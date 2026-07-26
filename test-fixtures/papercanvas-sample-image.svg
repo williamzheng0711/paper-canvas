@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="480" height="300" viewBox="0 0 480 300">
+  <defs>
+    <linearGradient id="paper" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#536fbe"/>
+      <stop offset="1" stop-color="#a9c8ff"/>
+    </linearGradient>
+  </defs>
+  <rect width="480" height="300" rx="20" fill="url(#paper)"/>
+  <path d="M85 210 185 105l80 85 55-55 75 75" fill="none" stroke="white" stroke-width="16" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="135" cy="92" r="24" fill="white"/>
+  <text x="240" y="270" fill="white" font-family="sans-serif" font-size="24" text-anchor="middle">PaperCanvas image test</text>
+</svg>

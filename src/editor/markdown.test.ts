@@ -1,0 +1,85 @@
+import { describe, expect, it } from 'vitest';
+import { documentToMarkdown, markdownToDocument } from './markdown';
+
+describe('PaperCanvas Markdown subset', () => {
+  it('round-trips supported research-note constructs without exposing formula syntax in the document model', () => {
+    const source = `# 研究筆記
+
+中文與 English **bold**、*italic*、~~old~~、\`inline\`、[link](https://example.com)。
+
+The loss is $\\mathcal{L}(\\theta)=\\mathbb{E}_{x\\sim p}[f_\\theta(x)]$.
+
+$$
+\\begin{aligned}
+x_{t-1} &= \\mu_\\theta(x_t,t)+\\sigma_t\\epsilon, \\\\
+\\epsilon &\\sim \\mathcal{N}(0,I).
+\\end{aligned}
+$$
+
+- [x] 完成公式
+- [ ] Review
+
+| Name | Value |
+| --- | ---: |
+| $x$ | 1 |
+
+> 一段引用
+
+\`\`\`ts
+const answer = 42;
+\`\`\`
+`;
+    const document = markdownToDocument(source);
+    const serialized = documentToMarkdown(document);
+
+    expect(JSON.stringify(document)).toContain('inlineFormula');
+    expect(JSON.stringify(document)).toContain('blockFormula');
+    expect(serialized).toContain('$\\mathcal{L}');
+    expect(serialized).toContain('$$');
+    expect(serialized).toContain('[x] 完成公式');
+    expect(serialized).toContain('| Name | Value |');
+    expect(serialized).toContain('```ts');
+  });
+
+  it('preserves unsupported HTML as a visible warning node and emits the original source', () => {
+    const source = '<script>alert("no")</script>\n\nRegular text';
+    const document = markdownToDocument(source);
+    const serialized = documentToMarkdown(document);
+
+    expect(JSON.stringify(document)).toContain('unsupportedMarkdown');
+    expect(serialized).toContain('<script>alert("no")</script>');
+    expect(serialized).toContain('Regular text');
+  });
+
+  it('preserves image alt text, title, and PaperCanvas resize dimensions', () => {
+    const document = {
+      type: 'doc',
+      content: [
+        {
+          type: 'image',
+          attrs: {
+            src: 'figures/model.png',
+            alt: '模型示意圖',
+            title: 'Figure 1',
+            width: 360,
+            height: 240,
+          },
+        },
+      ],
+    };
+
+    const serialized = documentToMarkdown(document);
+    const reopened = markdownToDocument(serialized);
+    const image = reopened.content?.[0];
+
+    expect(serialized).toContain('![模型示意圖](figures/model.png');
+    expect(serialized).toContain('papercanvas-size:360x240 | Figure 1');
+    expect(image?.attrs).toMatchObject({
+      src: 'figures/model.png',
+      alt: '模型示意圖',
+      title: 'Figure 1',
+      width: 360,
+      height: 240,
+    });
+  });
+});

@@ -1,0 +1,20 @@
+# PaperCanvas P0 manual QA
+
+Run `npm run tauri dev` on a machine with the Tauri prerequisites, then check these behaviours before a release.
+
+1. Create a document, type Chinese with an IME, English, and punctuation in the same paragraph. Confirm composition is not committed prematurely.
+2. Type `The loss is $x^2 + 1$` and confirm the completed formula changes into a rendered inline node. Click it, edit with MathLive, then press `Esc` and click elsewhere.
+3. Use **區塊公式** from the toolbar, then repeat the insertion by typing `$$` in an otherwise empty paragraph. Each path must create exactly one display formula. Enter the aligned-equation example below. Click the formula, press `Esc`, use arrow keys around the selected formula, then use Backspace and Delete after selecting it.
+
+   ```latex
+   \begin{aligned}
+   x_{t-1} &= \mu_\theta(x_t,t)+\sigma_t\epsilon, \\
+   \epsilon &\sim \mathcal{N}(0,I).
+   \end{aligned}
+   ```
+
+4. Also test `matrix`, `cases`, Chinese text around an inline formula, and `\definitelyNotALatexCommand{`. The last case must retain the source and show only a local formula warning.
+5. Use **圖片** to select a local image, then drag another image into the canvas and paste one from the clipboard. Each must display immediately. Select an image, drag each corner handle, and repeat while holding `Shift` to verify temporary aspect-ratio locking. Save as `notes.md`; verify images are written into `notes.assets/`, the Markdown contains relative image paths plus the PaperCanvas size metadata, and reopening preserves the final dimensions.
+6. Close/reopen `notes.md`, toggle **顯示原始 Markdown**, and verify the editor never changes into a simultaneous split source/preview view.
+7. Resize, minimize, and maximize the window; check the sidebar collapses and the central canvas remains the only primary editor.
+8. Build and install the native app. In Finder/Explorer, right-click a `.md` and `.markdown` file and choose **Open With → PaperCanvas**; then double-click a file after setting PaperCanvas as default. Verify both cold launch and opening a second file while PaperCanvas is already running load the requested document. With unsaved edits, verify the replacement confirmation is shown.
