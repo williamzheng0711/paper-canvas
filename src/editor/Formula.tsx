@@ -1,107 +1,115 @@
 /* eslint-disable react-refresh/only-export-components */
-import { InputRule, Node, mergeAttributes, type NodeViewRendererProps } from '@tiptap/core';
-import { NodeSelection, TextSelection } from '@tiptap/pm/state';
-import katex from 'katex';
-import type { MathfieldElement } from 'mathlive';
+import {
+  InputRule,
+  Node,
+  mergeAttributes,
+  type NodeViewRendererProps,
+} from "@tiptap/core";
+import { NodeSelection, TextSelection } from "@tiptap/pm/state";
+import katex from "katex";
 import {
   displayFormulaFromDelimitedLine,
   latexEnvironmentClosure,
   shouldCompleteRawLatexEnvironment,
   shouldCreateBlockFormula,
-} from './formulaInput';
+} from "./formulaInput";
 
-export type FormulaKind = 'inline' | 'block';
+export type FormulaKind = "inline" | "block";
 
 export function formulaBoundaryTarget(
   selection: { from: number; to: number; nodeType: string } | null,
-  key: 'ArrowLeft' | 'ArrowRight',
+  key: "ArrowLeft" | "ArrowRight",
 ): number | null {
-  if (!selection || !['inlineFormula', 'blockFormula'].includes(selection.nodeType)) return null;
-  return key === 'ArrowLeft' ? selection.from : selection.to;
+  if (
+    !selection ||
+    !["inlineFormula", "blockFormula"].includes(selection.nodeType)
+  )
+    return null;
+  return key === "ArrowLeft" ? selection.from : selection.to;
 }
 
-export function formulaFieldBoundaryAction(input: {
+export function formulaSourceBoundaryAction(input: {
   key: string;
-  selectionIsCollapsed: boolean;
-  position: number;
-  lastOffset: number;
-  latex: string;
-}): 'before' | 'after' | 'remove' | null {
-  if (!input.selectionIsCollapsed) return null;
-  if (input.key === 'ArrowLeft' && input.position === 0) return 'before';
-  if (input.key === 'ArrowRight' && input.position === input.lastOffset) return 'after';
+  selectionStart: number;
+  selectionEnd: number;
+  sourceLength: number;
+}): "before" | "after" | "remove" | null {
+  if (input.selectionStart !== input.selectionEnd) return null;
+  if (input.key === "ArrowLeft" && input.selectionStart === 0) return "before";
+  if (input.key === "ArrowRight" && input.selectionEnd === input.sourceLength)
+    return "after";
   if (
-    input.latex === '' &&
-    ((input.key === 'Backspace' && input.position === 0) ||
-      (input.key === 'Delete' && input.position === input.lastOffset))
+    input.sourceLength === 0 &&
+    ((input.key === "Backspace" && input.selectionStart === 0) ||
+      (input.key === "Delete" && input.selectionEnd === 0))
   ) {
-    return 'remove';
+    return "remove";
   }
   return null;
 }
 
-export function validateLatex(latex: string, displayMode = false): string | null {
+export function validateLatex(
+  latex: string,
+  displayMode = false,
+): string | null {
   try {
-    katex.renderToString(latex, { displayMode, strict: 'warn', throwOnError: true, trust: false });
+    katex.renderToString(latex, {
+      displayMode,
+      strict: "warn",
+      throwOnError: true,
+      trust: false,
+    });
     return null;
   } catch (error) {
-    return error instanceof Error ? error.message : '無法解析公式';
+    return error instanceof Error ? error.message : "無法解析公式";
   }
 }
 
-type FormulaInputField = Pick<MathfieldElement, 'getValue' | 'insert'>;
-
-/**
- * Adds the matching close command at a MathLive caret and returns the value
- * that should be persisted to the ProseMirror node.
- */
-export function completeFormulaFieldInput(field: FormulaInputField): string {
-  const latex = field.getValue('latex');
-  const closure = latexEnvironmentClosure(latex);
-  if (!closure) return latex;
-  // MathLive keeps the caret immediately before the inserted close command,
-  // so the user can continue writing the environment body without moving
-  // through `\\end{…}` by hand. Silence the nested event; the caller persists
-  // the complete value once after this function returns.
-  field.insert(closure, {
-    format: 'latex',
-    selectionMode: 'before',
-    silenceNotifications: true,
-  });
-  return field.getValue('latex');
+export function completeFormulaSourceInput(
+  value: string,
+  caret: number,
+): { value: string; caret: number } {
+  const beforeCaret = value.slice(0, caret);
+  const closure = latexEnvironmentClosure(beforeCaret);
+  if (!closure) return { value, caret };
+  return {
+    value: `${beforeCaret}${closure}${value.slice(caret)}`,
+    caret,
+  };
 }
 
 class FormulaNodeView {
   dom: HTMLElement;
   private readonly kind: FormulaKind;
-  private readonly view: NodeViewRendererProps['view'];
-  private readonly getPos: NodeViewRendererProps['getPos'];
-  private node: NodeViewRendererProps['node'];
+  private readonly view: NodeViewRendererProps["view"];
+  private readonly getPos: NodeViewRendererProps["getPos"];
+  private node: NodeViewRendererProps["node"];
   private editing = false;
-  private field: MathfieldElement | null = null;
-  private fieldInput: (() => void) | null = null;
-  private fieldKeyDown: ((event: KeyboardEvent) => void) | null = null;
-  private fieldBlur: (() => void) | null = null;
+  private source: HTMLTextAreaElement | null = null;
+  private sourceInput: (() => void) | null = null;
+  private sourceKeyDown: ((event: KeyboardEvent) => void) | null = null;
+  private sourceBlur: ((event: FocusEvent) => void) | null = null;
 
   constructor(props: NodeViewRendererProps, kind: FormulaKind) {
     this.node = props.node;
     this.view = props.view;
     this.getPos = props.getPos;
     this.kind = kind;
-    this.dom = document.createElement(kind === 'block' ? 'div' : 'span');
+    this.dom = document.createElement(kind === "block" ? "div" : "span");
     this.dom.className = `formula-node formula-node--${kind}`;
-    this.dom.contentEditable = 'false';
+    this.dom.contentEditable = "false";
     this.dom.dataset.formulaKind = kind;
     this.render();
   }
 
-  update(node: NodeViewRendererProps['node']): boolean {
+  update(node: NodeViewRendererProps["node"]): boolean {
     if (node.type !== this.node.type) return false;
     this.node = node;
-    if (this.editing && this.field) {
-      // Attribute updates occur on every MathLive input. Never reset an active
-      // field, because doing so loses its caret and breaks IME composition.
-      if (!this.field.hasFocus()) this.field.value = this.latex;
+    if (this.editing && this.source) {
+      // Attribute updates occur on every source input. Never reset an active
+      // textarea, because doing so loses its caret and breaks IME composition.
+      if (document.activeElement !== this.source)
+        this.source.value = this.latex;
       return true;
     }
     this.render();
@@ -109,15 +117,17 @@ class FormulaNodeView {
   }
 
   selectNode(): void {
-    this.dom.classList.add('is-selected');
+    this.dom.classList.add("is-selected");
   }
 
   deselectNode(): void {
-    this.dom.classList.remove('is-selected');
+    this.dom.classList.remove("is-selected");
   }
 
   stopEvent(event: Event): boolean {
-    return event.target instanceof HTMLElement && this.dom.contains(event.target);
+    return (
+      event.target instanceof HTMLElement && this.dom.contains(event.target)
+    );
   }
 
   ignoreMutation(): boolean {
@@ -125,60 +135,45 @@ class FormulaNodeView {
   }
 
   destroy(): void {
-    this.cleanupField();
+    this.cleanupSource();
   }
 
   private get latex(): string {
-    return String(this.node.attrs.latex ?? '');
+    return String(this.node.attrs.latex ?? "");
   }
 
   private position(): number | null {
-    if (typeof this.getPos !== 'function') return null;
+    if (typeof this.getPos !== "function") return null;
     const position = this.getPos();
-    return typeof position === 'number' ? position : null;
+    return typeof position === "number" ? position : null;
   }
 
   private render(): void {
     if (this.editing) return;
-    this.dom.textContent = '';
+    this.dom.textContent = "";
     const latex = this.latex;
-    const error = validateLatex(latex, this.kind === 'block');
-    const formula = document.createElement('span');
-    formula.className = `formula-render ${error ? 'formula-render--error' : ''}`;
-    formula.setAttribute('role', 'button');
+    const formula = document.createElement("span");
+    formula.className = "formula-render";
+    formula.setAttribute("role", "button");
     formula.tabIndex = 0;
-    formula.title = error ? `公式錯誤：${error}` : '點擊編輯公式';
-    formula.addEventListener('click', () => this.enterEditing());
-    formula.addEventListener('keydown', (event) => {
-      if (event.key === 'Enter' || event.key === ' ') {
+    formula.title = "點擊查看 LaTeX 原始碼與即時預覽";
+    formula.addEventListener("click", () => this.enterEditing());
+    formula.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
         event.preventDefault();
         this.enterEditing();
       }
     });
 
-    if (error) {
-      const source = document.createElement('code');
-      source.textContent = latex || '空公式';
-      const warning = document.createElement('small');
-      warning.textContent = '公式無法渲染，原始 LaTeX 已保留';
-      formula.append(source, warning);
-    } else {
-      const rendered = document.createElement('span');
-      rendered.innerHTML = katex.renderToString(latex || '\\;', {
-        displayMode: this.kind === 'block',
-        throwOnError: false,
-        trust: false,
-      });
-      formula.appendChild(rendered);
-    }
+    this.renderPreview(formula, latex);
 
-    const copy = document.createElement('button');
-    copy.className = 'formula-copy';
-    copy.type = 'button';
-    copy.setAttribute('aria-label', '複製 LaTeX');
-    copy.textContent = 'LaTeX';
-    copy.addEventListener('mousedown', (event) => event.preventDefault());
-    copy.addEventListener('click', (event) => {
+    const copy = document.createElement("button");
+    copy.className = "formula-copy";
+    copy.type = "button";
+    copy.setAttribute("aria-label", "複製 LaTeX");
+    copy.textContent = "LaTeX";
+    copy.addEventListener("mousedown", (event) => event.preventDefault());
+    copy.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
       const result = navigator.clipboard?.writeText(latex);
@@ -190,83 +185,194 @@ class FormulaNodeView {
   private enterEditing(): void {
     if (this.editing) return;
     this.editing = true;
-    this.dom.classList.add('is-editing');
-    this.dom.textContent = '';
-    const field = document.createElement('math-field') as MathfieldElement;
-    field.setAttribute('aria-label', `${this.kind === 'block' ? '區塊' : '行內'}公式`);
-    field.setAttribute('virtual-keyboard-mode', 'manual');
-    field.value = this.latex;
-    field.smartMode = true;
-    this.field = field;
-    this.fieldInput = () => this.handleFieldInput(field);
-    this.fieldKeyDown = (event) => this.handleFieldKeyDown(event, field);
-    this.fieldBlur = () => this.finishEditing();
-    field.addEventListener('input', this.fieldInput);
-    field.addEventListener('keydown', this.fieldKeyDown);
-    field.addEventListener('blur', this.fieldBlur);
-    this.dom.appendChild(field);
+    this.dom.classList.add("is-editing");
+    this.dom.textContent = "";
+
+    const panel = document.createElement("span");
+    panel.className = "formula-editor";
+    panel.addEventListener("mousedown", (event) => {
+      if (
+        event.target !== this.source &&
+        !(event.target instanceof HTMLButtonElement)
+      ) {
+        event.preventDefault();
+      }
+    });
+
+    const header = document.createElement("span");
+    header.className = "formula-editor__header";
+    const label = document.createElement("span");
+    label.textContent = this.kind === "block" ? "數學式" : "行內數學式";
+    const done = document.createElement("button");
+    done.className = "formula-editor__done";
+    done.type = "button";
+    done.setAttribute("aria-label", "完成公式編輯");
+    done.title = "完成公式編輯（⌘/Ctrl + Enter）";
+    done.textContent = "✓";
+    done.addEventListener("click", () => this.finishEditing());
+    header.append(label, done);
+
+    const sourceBox = document.createElement("span");
+    sourceBox.className = "formula-editor__source";
+    const opening = document.createElement("code");
+    const closing = document.createElement("code");
+    opening.className = "formula-editor__delimiter";
+    closing.className = "formula-editor__delimiter";
+    opening.textContent = this.kind === "block" ? "$$" : "$";
+    closing.textContent = opening.textContent;
+    opening.setAttribute("aria-hidden", "true");
+    closing.setAttribute("aria-hidden", "true");
+
+    const source = document.createElement("textarea");
+    source.className = "formula-editor__textarea";
+    source.setAttribute(
+      "aria-label",
+      `${this.kind === "block" ? "區塊" : "行內"}公式 LaTeX 原始碼`,
+    );
+    source.spellcheck = false;
+    source.wrap = "off";
+    source.value = this.latex;
+    this.resizeSource(source);
+
+    const preview = document.createElement("span");
+    preview.className = "formula-live-preview";
+    preview.setAttribute("aria-label", "公式即時預覽");
+    this.renderPreview(preview, source.value);
+
+    this.source = source;
+    this.sourceInput = () => this.handleSourceInput(source, preview);
+    this.sourceKeyDown = (event) => this.handleSourceKeyDown(event, source);
+    this.sourceBlur = (event) => {
+      if (
+        event.relatedTarget instanceof globalThis.Node &&
+        this.dom.contains(event.relatedTarget)
+      ) {
+        return;
+      }
+      this.finishEditing();
+    };
+    source.addEventListener("input", this.sourceInput);
+    source.addEventListener("keydown", this.sourceKeyDown);
+    source.addEventListener("blur", this.sourceBlur);
+    sourceBox.append(opening, source, closing);
+    panel.append(header, sourceBox, preview);
+    this.dom.appendChild(panel);
     requestAnimationFrame(() => {
-      if (this.field === field) field.focus();
+      if (this.source === source) {
+        source.focus();
+        source.setSelectionRange(source.value.length, source.value.length);
+      }
     });
   }
 
   private finishEditing(): void {
     if (!this.editing) return;
     this.editing = false;
-    this.dom.classList.remove('is-editing');
-    this.cleanupField();
+    this.dom.classList.remove("is-editing");
+    this.cleanupSource();
     this.render();
   }
 
-  private cleanupField(): void {
-    if (!this.field) return;
-    if (this.fieldInput) this.field.removeEventListener('input', this.fieldInput);
-    if (this.fieldKeyDown) this.field.removeEventListener('keydown', this.fieldKeyDown);
-    if (this.fieldBlur) this.field.removeEventListener('blur', this.fieldBlur);
-    this.field = null;
-    this.fieldInput = null;
-    this.fieldKeyDown = null;
-    this.fieldBlur = null;
+  private cleanupSource(): void {
+    if (!this.source) return;
+    if (this.sourceInput)
+      this.source.removeEventListener("input", this.sourceInput);
+    if (this.sourceKeyDown)
+      this.source.removeEventListener("keydown", this.sourceKeyDown);
+    if (this.sourceBlur)
+      this.source.removeEventListener("blur", this.sourceBlur);
+    this.source = null;
+    this.sourceInput = null;
+    this.sourceKeyDown = null;
+    this.sourceBlur = null;
   }
 
   private updateLatex(latex: string): void {
     const position = this.position();
     if (position === null) return;
     this.view.dispatch(
-      this.view.state.tr.setNodeMarkup(position, undefined, { ...this.node.attrs, latex }),
+      this.view.state.tr.setNodeMarkup(position, undefined, {
+        ...this.node.attrs,
+        latex,
+      }),
     );
   }
 
-  private handleFieldInput(field: MathfieldElement): void {
-    this.updateLatex(completeFormulaFieldInput(field));
-  }
-
-  private handleFieldKeyDown(event: KeyboardEvent, field: MathfieldElement): void {
-    if (event.key === 'Escape') {
-      event.preventDefault();
-      field.blur();
+  private renderPreview(container: HTMLElement, latex: string): void {
+    const error = validateLatex(latex, this.kind === "block");
+    container.textContent = "";
+    container.classList.toggle("formula-render--error", Boolean(error));
+    if (error) {
+      const source = document.createElement("code");
+      source.textContent = latex || "空公式";
+      const warning = document.createElement("small");
+      warning.textContent = `公式無法渲染：${error}`;
+      container.append(source, warning);
       return;
     }
-    const boundary = formulaFieldBoundaryAction({
+
+    const rendered = document.createElement("span");
+    rendered.innerHTML = katex.renderToString(latex || "\\;", {
+      displayMode: this.kind === "block",
+      throwOnError: false,
+      trust: false,
+    });
+    container.appendChild(rendered);
+  }
+
+  private resizeSource(source: HTMLTextAreaElement): void {
+    const lines = source.value.split("\n").length;
+    source.rows = this.kind === "block" ? Math.min(10, Math.max(2, lines)) : 1;
+  }
+
+  private handleSourceInput(
+    source: HTMLTextAreaElement,
+    preview: HTMLElement,
+  ): void {
+    const completed = completeFormulaSourceInput(
+      source.value,
+      source.selectionStart,
+    );
+    if (completed.value !== source.value) {
+      source.value = completed.value;
+      source.setSelectionRange(completed.caret, completed.caret);
+    }
+    this.resizeSource(source);
+    this.renderPreview(preview, source.value);
+    this.updateLatex(source.value);
+  }
+
+  private handleSourceKeyDown(
+    event: KeyboardEvent,
+    source: HTMLTextAreaElement,
+  ): void {
+    if (
+      event.key === "Escape" ||
+      (event.key === "Enter" && (event.metaKey || event.ctrlKey))
+    ) {
+      event.preventDefault();
+      this.finishEditing();
+      return;
+    }
+    const boundary = formulaSourceBoundaryAction({
       key: event.key,
-      selectionIsCollapsed: field.selectionIsCollapsed,
-      position: field.position,
-      lastOffset: field.lastOffset,
-      latex: field.getValue('latex'),
+      selectionStart: source.selectionStart,
+      selectionEnd: source.selectionEnd,
+      sourceLength: source.value.length,
     });
     if (!boundary) return;
     event.preventDefault();
-    if (boundary === 'remove') {
+    if (boundary === "remove") {
       this.removeEmptyFormula();
     } else {
       this.moveToText(boundary);
     }
   }
 
-  private moveToText(side: 'before' | 'after'): void {
+  private moveToText(side: "before" | "after"): void {
     const position = this.position();
     if (position === null) return;
-    const target = side === 'before' ? position : position + this.node.nodeSize;
+    const target = side === "before" ? position : position + this.node.nodeSize;
     this.finishEditing();
     requestAnimationFrame(() => {
       const transaction = this.view.state.tr.setSelection(
@@ -284,35 +390,46 @@ class FormulaNodeView {
     this.finishEditing();
     requestAnimationFrame(() => {
       const transaction = this.view.state.tr.delete(position, position + size);
-      this.view.dispatch(transaction.setSelection(TextSelection.create(transaction.doc, position)));
+      this.view.dispatch(
+        transaction.setSelection(
+          TextSelection.create(transaction.doc, position),
+        ),
+      );
       this.view.focus();
     });
   }
 }
 
-function createFormulaNode(name: 'inlineFormula' | 'blockFormula', kind: FormulaKind) {
+function createFormulaNode(
+  name: "inlineFormula" | "blockFormula",
+  kind: FormulaKind,
+) {
   return Node.create({
     name,
-    group: kind === 'inline' ? 'inline' : 'block',
-    inline: kind === 'inline',
+    group: kind === "inline" ? "inline" : "block",
+    inline: kind === "inline",
     atom: true,
     selectable: true,
     defining: true,
 
     addAttributes() {
-      return { latex: { default: '' } };
+      return { latex: { default: "" } };
     },
 
     parseHTML() {
-      return [{ tag: `${kind === 'inline' ? 'span' : 'div'}[data-formula-kind="${kind}"]` }];
+      return [
+        {
+          tag: `${kind === "inline" ? "span" : "div"}[data-formula-kind="${kind}"]`,
+        },
+      ];
     },
 
     renderHTML({ HTMLAttributes }) {
       return [
-        kind === 'inline' ? 'span' : 'div',
+        kind === "inline" ? "span" : "div",
         mergeAttributes(HTMLAttributes, {
-          'data-formula-kind': kind,
-          'data-latex': HTMLAttributes.latex,
+          "data-formula-kind": kind,
+          "data-latex": HTMLAttributes.latex,
         }),
       ];
     },
@@ -322,7 +439,7 @@ function createFormulaNode(name: 'inlineFormula' | 'blockFormula', kind: Formula
     },
 
     addInputRules() {
-      if (kind === 'block') {
+      if (kind === "block") {
         return [
           new InputRule({
             find: /\$\$([^$\n]+)\$\$$/,
@@ -334,7 +451,7 @@ function createFormulaNode(name: 'inlineFormula' | 'blockFormula', kind: Formula
               // document. Reconstruct that virtual line for the strict
               // standalone-line check, while replacing the existing paragraph
               // atomically so the trailing `$` never creates a new paragraph.
-              const virtualParentText = `${$from.parent.textContent}${source.at(-1) ?? ''}`;
+              const virtualParentText = `${$from.parent.textContent}${source.at(-1) ?? ""}`;
               if (
                 !latex ||
                 !shouldCreateBlockFormula({
@@ -346,7 +463,11 @@ function createFormulaNode(name: 'inlineFormula' | 'blockFormula', kind: Formula
               ) {
                 return null;
               }
-              state.tr.replaceWith($from.before(), $from.after(), this.type.create({ latex }));
+              state.tr.replaceWith(
+                $from.before(),
+                $from.after(),
+                this.type.create({ latex }),
+              );
             },
           }),
         ];
@@ -358,7 +479,7 @@ function createFormulaNode(name: 'inlineFormula' | 'blockFormula', kind: Formula
             const begin = match[0];
             const closure = latexEnvironmentClosure(begin);
             const $from = state.doc.resolve(range.to);
-            const virtualParentText = `${$from.parent.textContent}${begin.at(-1) ?? ''}`;
+            const virtualParentText = `${$from.parent.textContent}${begin.at(-1) ?? ""}`;
             if (
               !closure ||
               !shouldCompleteRawLatexEnvironment({
@@ -370,7 +491,7 @@ function createFormulaNode(name: 'inlineFormula' | 'blockFormula', kind: Formula
               return null;
             }
             state.tr
-              .insertText(`${begin.at(-1) ?? ''}${closure}`, range.to)
+              .insertText(`${begin.at(-1) ?? ""}${closure}`, range.to)
               .setSelection(TextSelection.create(state.tr.doc, range.to + 1));
           },
         }),
@@ -382,7 +503,11 @@ function createFormulaNode(name: 'inlineFormula' | 'blockFormula', kind: Formula
             // InputRule handlers must update the transaction handed to them.
             // A normal editor command can create a separate transaction, which
             // leaves the source delimiters visible during real text input.
-            state.tr.replaceWith(range.from, range.to, this.type.create({ latex }));
+            state.tr.replaceWith(
+              range.from,
+              range.to,
+              this.type.create({ latex }),
+            );
           },
         }),
       ];
@@ -390,13 +515,21 @@ function createFormulaNode(name: 'inlineFormula' | 'blockFormula', kind: Formula
 
     addKeyboardShortcuts() {
       return {
-        'Mod-Alt-m': () => this.editor.commands.insertContent({ type: name, attrs: { latex: '' } }),
+        "Mod-Alt-m": () =>
+          this.editor.commands.insertContent({
+            type: name,
+            attrs: { latex: "" },
+          }),
         ArrowLeft: () => {
           const selection = this.editor.state.selection;
           if (!(selection instanceof NodeSelection)) return false;
           const target = formulaBoundaryTarget(
-            { from: selection.from, to: selection.to, nodeType: selection.node.type.name },
-            'ArrowLeft',
+            {
+              from: selection.from,
+              to: selection.to,
+              nodeType: selection.node.type.name,
+            },
+            "ArrowLeft",
           );
           if (target === null) return false;
           return this.editor.commands.setTextSelection(target);
@@ -405,8 +538,12 @@ function createFormulaNode(name: 'inlineFormula' | 'blockFormula', kind: Formula
           const selection = this.editor.state.selection;
           if (!(selection instanceof NodeSelection)) return false;
           const target = formulaBoundaryTarget(
-            { from: selection.from, to: selection.to, nodeType: selection.node.type.name },
-            'ArrowRight',
+            {
+              from: selection.from,
+              to: selection.to,
+              nodeType: selection.node.type.name,
+            },
+            "ArrowRight",
           );
           if (target === null) return false;
           return this.editor.commands.setTextSelection(target);
@@ -414,14 +551,14 @@ function createFormulaNode(name: 'inlineFormula' | 'blockFormula', kind: Formula
         Backspace: () => {
           const selection = this.editor.state.selection;
           return selection instanceof NodeSelection &&
-            ['inlineFormula', 'blockFormula'].includes(selection.node.type.name)
+            ["inlineFormula", "blockFormula"].includes(selection.node.type.name)
             ? this.editor.commands.deleteSelection()
             : false;
         },
         Delete: () => {
           const selection = this.editor.state.selection;
           return selection instanceof NodeSelection &&
-            ['inlineFormula', 'blockFormula'].includes(selection.node.type.name)
+            ["inlineFormula", "blockFormula"].includes(selection.node.type.name)
             ? this.editor.commands.deleteSelection()
             : false;
         },
@@ -430,5 +567,5 @@ function createFormulaNode(name: 'inlineFormula' | 'blockFormula', kind: Formula
   });
 }
 
-export const InlineFormula = createFormulaNode('inlineFormula', 'inline');
-export const BlockFormula = createFormulaNode('blockFormula', 'block');
+export const InlineFormula = createFormulaNode("inlineFormula", "inline");
+export const BlockFormula = createFormulaNode("blockFormula", "block");

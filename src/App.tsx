@@ -4,6 +4,7 @@ import type { JSONContent } from '@tiptap/core';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { CanvasEditor, type InsertAction } from './components/CanvasEditor';
 import { MarkdownSourceEditor } from './components/MarkdownSourceEditor';
+import { documentsEqual } from './editor/documentSync';
 import { collectOutline, documentToMarkdown, markdownToDocument } from './editor/markdown';
 import { maximumFontSize, minimumFontSize, normalizeFontSize } from './lib/fontSize';
 import {
@@ -65,6 +66,7 @@ function statusLabel(status: SaveStatus): string {
 export default function App() {
   const [file, setFile] = useState<EditorFile>(newEditorFile);
   const [documentId, setDocumentId] = useState(0);
+  const [editRevision, setEditRevision] = useState(0);
   const [dirty, setDirty] = useState(false);
   const [saveStatus, setSaveStatus] = useState<SaveStatus>('saved');
   const [message, setMessage] = useState('所有內容僅保留在本機。');
@@ -82,10 +84,29 @@ export default function App() {
   const saving = useRef(false);
   const fileRef = useRef(file);
   const dirtyRef = useRef(dirty);
+  const editRevisionRef = useRef(editRevision);
+  const documentSessionRef = useRef(0);
+  const sourceModeRef = useRef(sourceMode);
+  const rawMarkdownRef = useRef(rawMarkdown);
   const openedByOperatingSystem = useRef(false);
   const recentExternalOpen = useRef(new Map<string, number>());
   fileRef.current = file;
   dirtyRef.current = dirty;
+  sourceModeRef.current = sourceMode;
+  rawMarkdownRef.current = rawMarkdown;
+
+  const advanceRevision = useCallback(() => {
+    const nextRevision = editRevisionRef.current + 1;
+    editRevisionRef.current = nextRevision;
+    setEditRevision(nextRevision);
+  }, []);
+
+  const markEdited = useCallback(() => {
+    advanceRevision();
+    dirtyRef.current = true;
+    setDirty(true);
+    setSaveStatus('unsaved');
+  }, [advanceRevision]);
 
   const handleEditorReady = useCallback((nextInsert: (action: InsertAction) => void) => {
     // React treats a function passed directly to a state setter as an updater.
@@ -100,8 +121,12 @@ export default function App() {
         setPreferences(loadedPreferences);
         setFontSizeInput(String(loadedPreferences.fontSize));
         if (draft && !openedByOperatingSystem.current) {
+          fileRef.current = draft;
           setFile(draft);
           setDocumentId((id) => id + 1);
+          documentSessionRef.current += 1;
+          advanceRevision();
+          dirtyRef.current = true;
           setDirty(true);
           setSaveStatus('draft');
           setMessage('已還原尚未指定位置的本機草稿。');
@@ -110,7 +135,7 @@ export default function App() {
       .catch((error: unknown) =>
         setMessage(error instanceof Error ? error.message : '無法載入本機設定。'),
       );
-  }, []);
+  }, [advanceRevision]);
 
   useEffect(() => {
     void savePreferences(preferences);
@@ -126,15 +151,23 @@ export default function App() {
     }
   }, [dirty, file.name]);
 
-  const loadFile = useCallback((nextFile: EditorFile) => {
-    if (nextFile.path) void clearDraft();
-    setFile(nextFile);
-    setDocumentId((id) => id + 1);
-    setDirty(false);
-    setSaveStatus('saved');
-    setSourceMode(false);
-    setMessage(`已開啟 ${nextFile.name}`);
-  }, []);
+  const loadFile = useCallback(
+    (nextFile: EditorFile) => {
+      if (nextFile.path) void clearDraft();
+      fileRef.current = nextFile;
+      setFile(nextFile);
+      setDocumentId((id) => id + 1);
+      documentSessionRef.current += 1;
+      advanceRevision();
+      dirtyRef.current = false;
+      setDirty(false);
+      setSaveStatus('saved');
+      sourceModeRef.current = false;
+      setSourceMode(false);
+      setMessage(`已開啟 ${nextFile.name}`);
+    },
+    [advanceRevision],
+  );
 
   const replaceWithOpenedFile = useCallback(
     async (nextFile: EditorFile) => {
@@ -174,53 +207,87 @@ export default function App() {
     [replaceWithOpenedFile],
   );
 
-  const saveCurrent = useCallback(
-    async (forceSaveAs = false) => {
-      if (saving.current) return;
-      saving.current = true;
-      setSaveStatus('saving');
-      try {
-        const candidate = sourceMode
-          ? { ...fileRef.current, document: markdownToDocument(rawMarkdown) }
+  const saveCurrent = useCallback(async (forceSaveAs = false) => {
+    if (saving.current) return;
+    saving.current = true;
+    setSaveStatus('saving');
+    const saveSession = documentSessionRef.current;
+    try {
+      let shouldSaveAs = forceSaveAs;
+      while (documentSessionRef.current === saveSession) {
+        const revision = editRevisionRef.current;
+        const editingSource = sourceModeRef.current;
+        const candidate = editingSource
+          ? { ...fileRef.current, document: markdownToDocument(rawMarkdownRef.current) }
           : fileRef.current;
-        const saved = await saveEditorFile(candidate, forceSaveAs);
+        const saved = await saveEditorFile(candidate, shouldSaveAs);
+        shouldSaveAs = false;
+
+        if (documentSessionRef.current !== saveSession) return;
+        if (editRevisionRef.current !== revision) {
+          // Keep edits made while the asynchronous write was in flight. If
+          // this was Save As, carry the new path into the next save pass.
+          const latest = { ...fileRef.current, path: saved.path, name: saved.name };
+          fileRef.current = latest;
+          setFile(latest);
+          setSaveStatus('saving');
+          continue;
+        }
+
+        const savedDocumentChanged = !documentsEqual(candidate.document, saved.document);
+        fileRef.current = saved;
         setFile(saved);
-        setDocumentId((id) => id + 1);
+        if (savedDocumentChanged && !sourceModeRef.current) {
+          setDocumentId((id) => id + 1);
+        }
+        if (sourceModeRef.current) {
+          const normalizedMarkdown = documentToMarkdown(saved.document);
+          rawMarkdownRef.current = normalizedMarkdown;
+          setRawMarkdown(normalizedMarkdown);
+        }
+        dirtyRef.current = false;
         setDirty(false);
         setSaveStatus('saved');
-        setRawMarkdown(documentToMarkdown(saved.document));
         setMessage(`已儲存 ${saved.name}`);
         await clearDraft();
         setRecent(await loadRecent());
-      } catch (error) {
+        return;
+      }
+    } catch (error) {
+      if (documentSessionRef.current === saveSession) {
         setSaveStatus('error');
         setMessage(error instanceof Error ? error.message : '儲存失敗。');
-      } finally {
-        saving.current = false;
       }
-    },
-    [rawMarkdown, sourceMode],
-  );
+    } finally {
+      saving.current = false;
+    }
+  }, []);
 
   useEffect(() => {
     if (!dirty) return;
+    const revision = editRevisionRef.current;
+    const session = documentSessionRef.current;
     const timer = window.setTimeout(() => {
-      if (file.path) {
+      if (fileRef.current.path) {
         void saveCurrent();
         return;
       }
-      const draft = sourceMode
-        ? { ...fileRef.current, document: markdownToDocument(rawMarkdown) }
+      const draft = sourceModeRef.current
+        ? { ...fileRef.current, document: markdownToDocument(rawMarkdownRef.current) }
         : fileRef.current;
       void saveDraft(draft)
-        .then(() => setSaveStatus('draft'))
+        .then(() => {
+          if (documentSessionRef.current === session && editRevisionRef.current === revision) {
+            setSaveStatus('draft');
+          }
+        })
         .catch((error: unknown) => {
           setSaveStatus('error');
           setMessage(error instanceof Error ? error.message : '無法自動保存草稿。');
         });
     }, 850);
     return () => window.clearTimeout(timer);
-  }, [dirty, file.path, rawMarkdown, saveCurrent, sourceMode]);
+  }, [dirty, editRevision, saveCurrent]);
 
   const openFile = useCallback(async () => {
     try {
@@ -281,16 +348,21 @@ export default function App() {
 
   const toggleSourceMode = () => {
     if (!sourceMode) {
-      setRawMarkdown(documentToMarkdown(file.document));
+      const markdown = documentToMarkdown(file.document);
+      rawMarkdownRef.current = markdown;
+      setRawMarkdown(markdown);
+      sourceModeRef.current = true;
       setSourceMode(true);
       return;
     }
     try {
       const nextDocument = markdownToDocument(rawMarkdown);
-      setFile((current) => ({ ...current, document: nextDocument }));
+      const nextFile = { ...fileRef.current, document: nextDocument };
+      fileRef.current = nextFile;
+      setFile(nextFile);
       setDocumentId((id) => id + 1);
-      setDirty(true);
-      setSaveStatus('unsaved');
+      markEdited();
+      sourceModeRef.current = false;
       setSourceMode(false);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : 'Markdown 無法解析。');
@@ -465,9 +537,9 @@ export default function App() {
             <MarkdownSourceEditor
               value={rawMarkdown}
               onChange={(value) => {
+                rawMarkdownRef.current = value;
                 setRawMarkdown(value);
-                setDirty(true);
-                setSaveStatus('unsaved');
+                markEdited();
               }}
             />
           ) : (
@@ -475,9 +547,12 @@ export default function App() {
               documentId={documentId}
               initialDocument={file.document}
               onChange={(document) => {
-                setFile((current) => ({ ...current, document }));
-                setDirty(true);
-                setSaveStatus('unsaved');
+                setFile((current) => {
+                  const nextFile = { ...current, document };
+                  fileRef.current = nextFile;
+                  return nextFile;
+                });
+                markEdited();
               }}
               onReady={handleEditorReady}
             />

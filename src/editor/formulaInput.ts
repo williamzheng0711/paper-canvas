@@ -1,4 +1,4 @@
-import type { FormulaKind } from './Formula';
+import type { FormulaKind } from "./Formula";
 
 export function shouldCreateBlockFormula(input: {
   text: string;
@@ -7,7 +7,7 @@ export function shouldCreateBlockFormula(input: {
   parentOffset: number;
 }): boolean {
   return (
-    input.parentType === 'paragraph' &&
+    input.parentType === "paragraph" &&
     input.parentText === input.text &&
     input.parentOffset === input.text.length &&
     displayFormulaFromDelimitedLine(input.text) !== null
@@ -33,34 +33,44 @@ export function latexEnvironmentClosure(latex: string): string | null {
 
 /**
  * Raw Markdown entry should only receive an automatic `\\end{…}` while the
- * user is actually inside a single-dollar formula. MathLive fields are handled
- * separately, so ordinary prose such as a LaTeX example remains untouched.
+ * user is actually inside a single-dollar formula. The formula source editor
+ * handles its own completion, so ordinary prose with LaTeX remains untouched.
  */
 export function shouldCompleteRawLatexEnvironment(input: {
   parentText: string;
   parentOffset: number;
   begin: string;
 }): boolean {
-  const beforeBegin = input.parentText.slice(0, input.parentOffset - input.begin.length);
-  return input.parentOffset >= input.begin.length && /(^|[^\\])\$(?!\$)[^$\n]*$/.test(beforeBegin);
+  const beforeBegin = input.parentText.slice(
+    0,
+    input.parentOffset - input.begin.length,
+  );
+  return (
+    input.parentOffset >= input.begin.length &&
+    /(^|[^\\])\$(?!\$)[^$\n]*$/.test(beforeBegin)
+  );
 }
 
-export function formulaFromClipboard(text: string): { kind: FormulaKind; latex: string } | null {
+export function formulaFromClipboard(
+  text: string,
+): { kind: FormulaKind; latex: string } | null {
   const trimmed = text.trim();
   const block = /^\$\$\s*([\s\S]+?)\s*\$\$$/.exec(trimmed);
-  if (block?.[1]) return { kind: 'block', latex: block[1] };
+  if (block?.[1]) return { kind: "block", latex: block[1] };
   const inline = /^\$([^$\n]+)\$$/.exec(trimmed);
-  if (inline?.[1]) return { kind: 'inline', latex: inline[1] };
+  if (inline?.[1]) return { kind: "inline", latex: inline[1] };
   // A standalone TeX control sequence is far more likely formula source than prose.
   // Do not keep an allow-list here: common research notation such as \mathcal,
   // \sum, and package-neutral operators would otherwise be pasted as plain text.
   if (/\\[A-Za-z]+/.test(trimmed)) {
     return {
       kind:
-        trimmed.includes('\n') ||
-        /\\begin\{(?:aligned|align|cases|matrix|pmatrix|bmatrix|vmatrix|Vmatrix)\}/.test(trimmed)
-          ? 'block'
-          : 'inline',
+        trimmed.includes("\n") ||
+        /\\begin\{(?:aligned|align|cases|matrix|pmatrix|bmatrix|vmatrix|Vmatrix)\}/.test(
+          trimmed,
+        )
+          ? "block"
+          : "inline",
       latex: trimmed,
     };
   }

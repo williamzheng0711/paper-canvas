@@ -1,6 +1,6 @@
 # PaperCanvas
 
-PaperCanvas is a local-first desktop writing app for research notes, derivations, proposals, and technical documents. It uses one Tiptap/ProseMirror canvas rather than a permanent Markdown-source/preview split. Markdown is the UTF-8 on-disk format; formulas are stored as LaTeX and displayed through KaTeX, with MathLive used when a formula is edited.
+PaperCanvas is a local-first desktop writing app for research notes, derivations, proposals, and technical documents. It uses one Tiptap/ProseMirror canvas rather than a permanent Markdown-source/preview split. Markdown is the UTF-8 on-disk format; formulas are stored as LaTeX and displayed through KaTeX.
 
 This project is intentionally not a Typora clone in design or assets. It pursues the same low-distraction, single-page writing outcome without claiming complete Markdown, TeX, or Typora compatibility.
 
@@ -8,19 +8,19 @@ This project is intentionally not a Typora clone in design or assets. It pursues
 
 - Create, open, save-as, rename, and auto-save local `.md` files; the window title and status bar show dirty/save state. Installed macOS and Windows builds register `.md` and `.markdown` as editable PaperCanvas document types, so Finder/Explorer double-click and **Open With PaperCanvas** open the file in the canvas; the opened file is also immediately added to **最近文件**.
 - One visual writing canvas with undo/redo, macOS `Cmd` / Windows `Ctrl` shortcuts, headings, lists, task lists, block quotes, code blocks with highlighting, tables, links, images, and a collapsible recent-files/outline sidebar.
-- Inline and block formula nodes: KaTeX when unfocused, MathLive on click, `Esc`/blur exit, formula-LaTex copy button, error containment, and toolbar / `Cmd` or `Ctrl` + `Alt` + `M` insertion.
-- Common `$...$` text becomes an inline formula after its closing `$`; entering `$$` at the start of an empty paragraph creates one empty display formula, and a complete standalone `$$...$$` line is normalized as a block formula on open. The toolbar remains an alternative insertion path.
+- Inline and block formula nodes: KaTeX when unfocused; click once to open the LaTeX source and live preview together; `Esc`, `Cmd`/`Ctrl` + `Enter`, the check button, or blur exits. Formula-source copying, error containment, and toolbar / `Cmd` or `Ctrl` + `Alt` + `M` insertion are included.
+- Common `$...$` text becomes an inline formula after its closing `$`; entering `$$` at the start of an empty paragraph creates one empty display formula, and a complete standalone `$$...$$` line is normalized as a block formula on open. Typora-style `\\(...\\)` and multiline `\\[...\\]` delimiters are also recognized when Markdown is opened. The toolbar remains an alternative insertion path.
 - Choose images from the **圖片** toolbar button, paste, or drag images into the canvas. Images display immediately, have four mouse resize handles, and temporarily preserve aspect ratio while `Shift` is held. Embedded images are saved under `<document>.assets/` on the next save and Markdown references them relatively; resize dimensions and companion assets survive reopen and rename.
 - HTML pasted into the editor is DOMPurify-sanitized. Unsupported Markdown/HTML is retained as a visible warning node and emitted back rather than silently discarded.
 - Light/dark mode, base font, font size, word/character counts, source-only Markdown mode, recent file list, and local preference storage through Tauri Store.
 
-PaperCanvas Markdown support is deliberately bounded: headings, paragraphs, bold/italic/strike/inline code/links, lists/tasks, quotes, rules, fenced code, GFM tables, images, `$...$`, and `$$...$$`. Supported math covers KaTeX-compatible everyday constructs such as fractions, scripts, roots, matrices, `cases`, `aligned`, Greek letters, `\mathbb`, `\mathbf`, and `\operatorname`. Arbitrary TeX macros, HTML execution, journal templates, and arbitrary LaTeX packages are not supported.
+PaperCanvas Markdown support is deliberately bounded: headings, paragraphs, bold/italic/strike/inline code/links, lists/tasks, quotes, rules, fenced code, GFM tables, images, `$...$`, `$$...$$`, `\\(...\\)`, and `\\[...\\]`. Supported math covers KaTeX-compatible everyday constructs such as fractions, scripts, roots, matrices, `cases`, `aligned`, Greek letters, `\mathbb`, `\mathbf`, and `\operatorname`. Arbitrary TeX macros, HTML execution, journal templates, and arbitrary LaTeX packages are not supported.
 
 ## Development
 
 Prerequisites:
 
-- Node.js 22 LTS (the current MathLive compute-engine dependency expects a modern Node release during development).
+- Node.js 22 LTS.
 - Rust stable via [rustup](https://rustup.rs/).
 - macOS: Xcode Command Line Tools. Windows: Visual Studio Build Tools with the C++ workload and WebView2 Runtime.
 
@@ -38,7 +38,7 @@ npm run test:perf
 npm run build
 ```
 
-`npm test` covers Markdown ↔ editor-document round trips, unsupported-content retention, formulas including invalid LaTeX, formula boundary navigation, and a create → formula → UTF-8 Markdown save/reopen smoke path. `npm run test:perf` measures a 50,000-character Chinese plain-text parse/serialize path; it is a model-layer measurement, not a claim that every platform or IME has identical latency. Use the release QA list in [docs/QA.md](docs/QA.md) for native MathLive, clipboard, image, and window checks.
+`npm test` covers Markdown ↔ editor-document round trips, Typora-compatible math delimiters, unsupported-content retention, formulas including invalid LaTeX, formula source/live-preview editing, formula boundary navigation, and a create → formula → UTF-8 Markdown save/reopen smoke path. `npm run test:perf` measures a 50,000-character Chinese plain-text parse/serialize path; it is a model-layer measurement, not a claim that every platform or IME has identical latency. Use the release QA list in [docs/QA.md](docs/QA.md) for native clipboard, image, and window checks.
 
 ## Native packaging and installation
 
@@ -67,5 +67,4 @@ The native shell grants only the file commands needed for open/save, image asset
 - No formula numbering, labels, references, custom macro preferences, PDF export, or TeX-draft export yet.
 - Tables are editable and round-trip through GFM, but do not yet have a rich spreadsheet-style cell toolbar.
 - Focus/typewriter modes, command palette, spelling dictionaries, and advanced font configuration are deferred.
-- Static rendering uses KaTeX. A formula KaTeX cannot parse remains in the document as source plus an inline warning; it never crashes the document. MathLive's full TeX surface is broader than the promise made by the Markdown import/export subset.
-- The frontend production bundle is currently large because MathLive and its compute engine are shipped locally for offline formula editing. It is a concrete optimization target before a bandwidth-sensitive release, not a runtime network dependency.
+- Formula rendering uses KaTeX. A formula KaTeX cannot parse remains in the document as source plus an inline warning; it never crashes the document.

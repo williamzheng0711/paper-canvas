@@ -1,88 +1,80 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from "vitest";
 import {
-  completeFormulaFieldInput,
+  completeFormulaSourceInput,
   formulaBoundaryTarget,
-  formulaFieldBoundaryAction,
+  formulaSourceBoundaryAction,
   validateLatex,
-} from './Formula';
+} from "./Formula";
 
-describe('formula safety and cursor boundaries', () => {
-  it('accepts matrices, cases, aligned equations, and Chinese-adjacent inline math', () => {
-    expect(validateLatex('\\begin{matrix}a & b\\\\ c & d\\end{matrix}')).toBeNull();
-    expect(validateLatex('f(x)=\\begin{cases}x^2 & x>0\\\\0 & x\\leq0\\end{cases}')).toBeNull();
-    expect(validateLatex('\\begin{aligned}a&=b\\\\c&=d\\end{aligned}', true)).toBeNull();
-    expect(validateLatex('\\mathbb{E}_{x\\sim p}[f_\\theta(x)]')).toBeNull();
+describe("formula safety and cursor boundaries", () => {
+  it("accepts matrices, cases, aligned equations, and Chinese-adjacent inline math", () => {
+    expect(
+      validateLatex("\\begin{matrix}a & b\\\\ c & d\\end{matrix}"),
+    ).toBeNull();
+    expect(
+      validateLatex("f(x)=\\begin{cases}x^2 & x>0\\\\0 & x\\leq0\\end{cases}"),
+    ).toBeNull();
+    expect(
+      validateLatex("\\begin{aligned}a&=b\\\\c&=d\\end{aligned}", true),
+    ).toBeNull();
+    expect(validateLatex("\\mathbb{E}_{x\\sim p}[f_\\theta(x)]")).toBeNull();
   });
 
-  it('returns a local error for invalid LaTeX instead of throwing', () => {
-    expect(validateLatex('\\definitelyNotALatexCommand{')).toMatch(
+  it("returns a local error for invalid LaTeX instead of throwing", () => {
+    expect(validateLatex("\\definitelyNotALatexCommand{")).toMatch(
       /ParseError|Undefined control sequence|KaTeX/,
     );
   });
 
-  it('moves a selected formula node naturally back to the surrounding text', () => {
-    const selection = { from: 12, to: 13, nodeType: 'inlineFormula' };
-    expect(formulaBoundaryTarget(selection, 'ArrowLeft')).toBe(12);
-    expect(formulaBoundaryTarget(selection, 'ArrowRight')).toBe(13);
-    expect(formulaBoundaryTarget({ ...selection, nodeType: 'image' }, 'ArrowLeft')).toBeNull();
+  it("moves a selected formula node naturally back to the surrounding text", () => {
+    const selection = { from: 12, to: 13, nodeType: "inlineFormula" };
+    expect(formulaBoundaryTarget(selection, "ArrowLeft")).toBe(12);
+    expect(formulaBoundaryTarget(selection, "ArrowRight")).toBe(13);
+    expect(
+      formulaBoundaryTarget({ ...selection, nodeType: "image" }, "ArrowLeft"),
+    ).toBeNull();
   });
 
-  it('returns text-boundary actions from an active MathLive field without swallowing edits', () => {
+  it("returns text-boundary actions from an active source editor without swallowing edits", () => {
     expect(
-      formulaFieldBoundaryAction({
-        key: 'ArrowLeft',
-        selectionIsCollapsed: true,
-        position: 0,
-        lastOffset: 4,
-        latex: 'x^2',
+      formulaSourceBoundaryAction({
+        key: "ArrowLeft",
+        selectionStart: 0,
+        selectionEnd: 0,
+        sourceLength: 3,
       }),
-    ).toBe('before');
+    ).toBe("before");
     expect(
-      formulaFieldBoundaryAction({
-        key: 'ArrowRight',
-        selectionIsCollapsed: true,
-        position: 4,
-        lastOffset: 4,
-        latex: 'x^2',
+      formulaSourceBoundaryAction({
+        key: "ArrowRight",
+        selectionStart: 3,
+        selectionEnd: 3,
+        sourceLength: 3,
       }),
-    ).toBe('after');
+    ).toBe("after");
     expect(
-      formulaFieldBoundaryAction({
-        key: 'Backspace',
-        selectionIsCollapsed: true,
-        position: 0,
-        lastOffset: 0,
-        latex: '',
+      formulaSourceBoundaryAction({
+        key: "Backspace",
+        selectionStart: 0,
+        selectionEnd: 0,
+        sourceLength: 0,
       }),
-    ).toBe('remove');
+    ).toBe("remove");
     expect(
-      formulaFieldBoundaryAction({
-        key: 'Delete',
-        selectionIsCollapsed: true,
-        position: 2,
-        lastOffset: 4,
-        latex: 'x^2',
+      formulaSourceBoundaryAction({
+        key: "Delete",
+        selectionStart: 1,
+        selectionEnd: 2,
+        sourceLength: 3,
       }),
     ).toBeNull();
   });
 
-  it('inserts a matching environment close command in a MathLive field and keeps the caret before it', () => {
-    let latex = '\\begin{equation}';
-    let insertedOptions: unknown;
-    const field = {
-      getValue: () => latex,
-      insert: (text: string, options: unknown) => {
-        latex += text;
-        insertedOptions = options;
-        return true;
-      },
-    };
-
-    expect(completeFormulaFieldInput(field)).toBe('\\begin{equation}\\end{equation}');
-    expect(insertedOptions).toMatchObject({
-      format: 'latex',
-      selectionMode: 'before',
-      silenceNotifications: true,
+  it("inserts a matching environment close command and keeps the source caret before it", () => {
+    const opening = "\\begin{equation}";
+    expect(completeFormulaSourceInput(opening, opening.length)).toEqual({
+      value: "\\begin{equation}\\end{equation}",
+      caret: opening.length,
     });
   });
 });

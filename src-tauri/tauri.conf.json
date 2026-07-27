@@ -40,6 +40,9 @@
     ],
     "category": "Productivity",
     "shortDescription": "Local-first Markdown and mathematics writing",
+    "macOS": {
+      "signingIdentity": "-"
+    },
     "fileAssociations": [
       {
         "ext": ["md", "markdown"],

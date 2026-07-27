@@ -1,8 +1,23 @@
-import { describe, expect, it } from 'vitest';
-import { documentToMarkdown, markdownToDocument } from './markdown';
+import { describe, expect, it } from "vitest";
+import type { JSONContent } from "@tiptap/core";
+import {
+  documentToMarkdown,
+  markdownToDocument,
+  normalizeLatexDelimiters,
+} from "./markdown";
 
-describe('PaperCanvas Markdown subset', () => {
-  it('round-trips supported research-note constructs without exposing formula syntax in the document model', () => {
+function nodesOfType(document: JSONContent, type: string): JSONContent[] {
+  const matches: JSONContent[] = [];
+  const visit = (node: JSONContent) => {
+    if (node.type === type) matches.push(node);
+    node.content?.forEach(visit);
+  };
+  visit(document);
+  return matches;
+}
+
+describe("PaperCanvas Markdown subset", () => {
+  it("round-trips supported research-note constructs without exposing formula syntax in the document model", () => {
     const source = `# 研究筆記
 
 中文與 English **bold**、*italic*、~~old~~、\`inline\`、[link](https://example.com)。
@@ -32,35 +47,95 @@ const answer = 42;
     const document = markdownToDocument(source);
     const serialized = documentToMarkdown(document);
 
-    expect(JSON.stringify(document)).toContain('inlineFormula');
-    expect(JSON.stringify(document)).toContain('blockFormula');
-    expect(serialized).toContain('$\\mathcal{L}');
-    expect(serialized).toContain('$$');
-    expect(serialized).toContain('[x] 完成公式');
-    expect(serialized).toContain('| Name | Value |');
-    expect(serialized).toContain('```ts');
+    expect(JSON.stringify(document)).toContain("inlineFormula");
+    expect(JSON.stringify(document)).toContain("blockFormula");
+    expect(serialized).toContain("$\\mathcal{L}");
+    expect(serialized).toContain("$$");
+    expect(serialized).toContain("[x] 完成公式");
+    expect(serialized).toContain("| Name | Value |");
+    expect(serialized).toContain("```ts");
   });
 
-  it('preserves unsupported HTML as a visible warning node and emits the original source', () => {
+  it("imports Typora-style parenthesis and bracket math from a research document", () => {
+    const source = `# 漸進式 Taylor 量化
+
+不直接從大小為 \\(N\\) MB 的模型跳到 \\(n\\) MB。
+
+\\[
+S(\\theta')\\le n\\ \\text{MB},
+\\qquad n<N,
+\\]
+
+若 \\(\\mathcal L(\\theta)\\) 是量化誤差目標，則
+
+\\[
+\\mathcal L(\\bar\\theta+\\Delta)
+\\approx
+\\mathcal L(\\bar\\theta)
++\\frac{1}{2}\\Delta^{\\mathsf T}H(\\bar\\theta)\\Delta.
+\\]
+`;
+
+    const document = markdownToDocument(source);
+    const inline = nodesOfType(document, "inlineFormula");
+    const blocks = nodesOfType(document, "blockFormula");
+
+    expect(inline.map((node) => node.attrs?.latex)).toEqual([
+      "N",
+      "n",
+      "\\mathcal L(\\theta)",
+    ]);
+    expect(blocks).toHaveLength(2);
+    expect(blocks[0].attrs?.latex).toContain("S(\\theta')\\le n");
+    expect(blocks[1].attrs?.latex).toContain("\\Delta^{\\mathsf T}");
+    expect(nodesOfType(document, "unsupportedMarkdown")).toHaveLength(0);
+
+    const reopened = markdownToDocument(documentToMarkdown(document));
+    expect(nodesOfType(reopened, "inlineFormula")).toHaveLength(3);
+    expect(nodesOfType(reopened, "blockFormula")).toHaveLength(2);
+  });
+
+  it("does not reinterpret Typora delimiters inside code or an unmatched display block", () => {
+    const source = `Inline code: \`\\(notMath\\)\`
+
+    \\[indentedCode\\]
+
+\`\`\`tex
+\\[
+x
+\\]
+\`\`\`
+
+$$
+\\text{literal delimiters } \\(x\\)
+$$
+
+\\[
+unclosed`;
+
+    expect(normalizeLatexDelimiters(source)).toBe(source);
+  });
+
+  it("preserves unsupported HTML as a visible warning node and emits the original source", () => {
     const source = '<script>alert("no")</script>\n\nRegular text';
     const document = markdownToDocument(source);
     const serialized = documentToMarkdown(document);
 
-    expect(JSON.stringify(document)).toContain('unsupportedMarkdown');
+    expect(JSON.stringify(document)).toContain("unsupportedMarkdown");
     expect(serialized).toContain('<script>alert("no")</script>');
-    expect(serialized).toContain('Regular text');
+    expect(serialized).toContain("Regular text");
   });
 
-  it('preserves image alt text, title, and PaperCanvas resize dimensions', () => {
+  it("preserves image alt text, title, and PaperCanvas resize dimensions", () => {
     const document = {
-      type: 'doc',
+      type: "doc",
       content: [
         {
-          type: 'image',
+          type: "image",
           attrs: {
-            src: 'figures/model.png',
-            alt: '模型示意圖',
-            title: 'Figure 1',
+            src: "figures/model.png",
+            alt: "模型示意圖",
+            title: "Figure 1",
             width: 360,
             height: 240,
           },
@@ -72,12 +147,12 @@ const answer = 42;
     const reopened = markdownToDocument(serialized);
     const image = reopened.content?.[0];
 
-    expect(serialized).toContain('![模型示意圖](figures/model.png');
-    expect(serialized).toContain('papercanvas-size:360x240 | Figure 1');
+    expect(serialized).toContain("![模型示意圖](figures/model.png");
+    expect(serialized).toContain("papercanvas-size:360x240 | Figure 1");
     expect(image?.attrs).toMatchObject({
-      src: 'figures/model.png',
-      alt: '模型示意圖',
-      title: 'Figure 1',
+      src: "figures/model.png",
+      alt: "模型示意圖",
+      title: "Figure 1",
       width: 360,
       height: 240,
     });

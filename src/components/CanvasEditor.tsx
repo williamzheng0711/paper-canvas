@@ -11,6 +11,7 @@ import { useEffect, useRef } from 'react';
 import type { JSONContent } from '@tiptap/core';
 import type { EditorView } from '@tiptap/pm/view';
 import { BlockFormula, InlineFormula } from '../editor/Formula';
+import { replaceDocumentPreservingSelection } from '../editor/documentSync';
 import { formulaFromClipboard } from '../editor/formulaInput';
 import { sanitizePastedHtml } from '../editor/paste';
 import { PaperImage } from '../editor/PaperImage';
@@ -134,7 +135,7 @@ export function CanvasEditor({ documentId, initialDocument, onChange, onReady }:
 
   useEffect(() => {
     if (!editor) return;
-    editor.commands.setContent(initialDocumentRef.current, { emitUpdate: false });
+    replaceDocumentPreservingSelection(editor, initialDocumentRef.current);
   }, [documentId, editor]);
 
   useEffect(() => {

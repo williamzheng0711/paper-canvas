@@ -67,7 +67,14 @@ export function MarkdownSourceEditor({ value, onChange }: Props) {
     if (!editor) return;
     const current = editor.state.doc.toString();
     if (current === value) return;
-    editor.dispatch({ changes: { from: 0, to: current.length, insert: value } });
+    const { anchor, head } = editor.state.selection.main;
+    editor.dispatch({
+      changes: { from: 0, to: current.length, insert: value },
+      selection: {
+        anchor: Math.min(anchor, value.length),
+        head: Math.min(head, value.length),
+      },
+    });
   }, [value]);
 
   return <div ref={host} className="markdown-source-editor" />;
