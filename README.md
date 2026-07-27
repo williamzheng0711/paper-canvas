@@ -13,6 +13,8 @@ This project is intentionally not a Typora clone in design or assets. It pursues
 - Choose images from the **圖片** toolbar button, paste, or drag images into the canvas. Images display immediately, have four mouse resize handles, and temporarily preserve aspect ratio while `Shift` is held. Embedded images are saved under `<document>.assets/` on the next save and Markdown references them relatively; resize dimensions and companion assets survive reopen and rename.
 - HTML pasted into the editor is DOMPurify-sanitized. Unsupported Markdown/HTML is retained as a visible warning node and emitted back rather than silently discarded.
 - Light/dark mode, base font, font size, word/character counts, source-only Markdown mode, recent file list, and local preference storage through Tauri Store.
+- Fixed, fine-lined page margins that stay constant as a desktop window grows, allowing each line to use the added width.
+- Export a copy as `.md`, or open the system print dialog with a print-optimized layout to save as `.pdf`.
 
 PaperCanvas Markdown support is deliberately bounded: headings, paragraphs, bold/italic/strike/inline code/links, lists/tasks, quotes, rules, fenced code, GFM tables, images, `$...$`, `$$...$$`, `\\(...\\)`, and `\\[...\\]`. Supported math covers KaTeX-compatible everyday constructs such as fractions, scripts, roots, matrices, `cases`, `aligned`, Greek letters, `\mathbb`, `\mathbf`, and `\operatorname`. Arbitrary TeX macros, HTML execution, journal templates, and arbitrary LaTeX packages are not supported.
 
@@ -64,7 +66,7 @@ The native shell grants only the file commands needed for open/save, image asset
 
 ## P1 / known limits
 
-- No formula numbering, labels, references, custom macro preferences, PDF export, or TeX-draft export yet.
+- No formula numbering, labels, references, custom macro preferences, direct TeX-draft export, or custom PDF page templates yet.
 - Tables are editable and round-trip through GFM, but do not yet have a rich spreadsheet-style cell toolbar.
 - Focus/typewriter modes, command palette, spelling dictionaries, and advanced font configuration are deferred.
 - Formula rendering uses KaTeX. A formula KaTeX cannot parse remains in the document as source plus an inline warning; it never crashes the document.

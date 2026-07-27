@@ -14,6 +14,7 @@ const harness = vi.hoisted(() => ({ canvasProps: null as CanvasProps | null }));
 
 const files = vi.hoisted(() => ({
   clearDraft: vi.fn(async () => undefined),
+  exportMarkdownFile: vi.fn(async () => 'research.md'),
   loadDraft: vi.fn(),
   loadPreferences: vi.fn(async () => ({
     theme: 'light' as const,
@@ -39,6 +40,11 @@ vi.mock('./components/MarkdownSourceEditor', () => ({ MarkdownSourceEditor: () =
 vi.mock('./lib/files', () => ({
   chooseMarkdownFile: vi.fn(async () => null),
   clearDraft: files.clearDraft,
+  documentToPortableMarkdown: (document: JSONContent) => {
+    const text = document.content?.[0]?.content?.[0]?.text ?? '';
+    return `${text}\n`;
+  },
+  exportMarkdownFile: files.exportMarkdownFile,
   loadDraft: files.loadDraft,
   loadPreferences: files.loadPreferences,
   loadRecent: files.loadRecent,
@@ -148,5 +154,55 @@ describe('App autosave cursor stability', () => {
     expect(files.saveEditorFile).toHaveBeenCalledTimes(2);
     expect(files.saveEditorFile.mock.calls[1]?.[0].document).toEqual(newerEdit);
     expect(harness.canvasProps?.initialDocument).toEqual(newerEdit);
+  });
+
+  it('exports a Markdown copy without changing the active file', async () => {
+    const button = Array.from(host.querySelectorAll('button')).find((candidate) =>
+      candidate.textContent?.includes('Markdown (.md)'),
+    );
+
+    await act(async () => {
+      button?.click();
+      await flushEffects();
+    });
+
+    expect(files.exportMarkdownFile).toHaveBeenCalledWith('原始內容\n', 'research.md');
+    expect(host.querySelector('.document-name')?.textContent).toContain('research.md');
+  });
+
+  it('opens the system print flow for PDF export', async () => {
+    const print = vi.spyOn(window, 'print').mockImplementation(() => undefined);
+    const button = Array.from(host.querySelectorAll('button')).find((candidate) =>
+      candidate.textContent?.includes('PDF (.pdf)'),
+    );
+
+    await act(async () => {
+      button?.click();
+      await vi.advanceTimersByTimeAsync(20);
+      await flushEffects();
+    });
+
+    expect(print).toHaveBeenCalledOnce();
+    expect(host.querySelector('.status-message')?.textContent).toContain('儲存為 PDF');
+    print.mockRestore();
+  });
+
+  it('reports a rejected native PDF print command', async () => {
+    const print = vi
+      .spyOn(window, 'print')
+      .mockImplementation(() => Promise.reject(new Error('系統拒絕列印')) as unknown as void);
+    const button = Array.from(host.querySelectorAll('button')).find((candidate) =>
+      candidate.textContent?.includes('PDF (.pdf)'),
+    );
+
+    await act(async () => {
+      button?.click();
+      await vi.advanceTimersByTimeAsync(20);
+      await flushEffects();
+    });
+
+    expect(print).toHaveBeenCalledOnce();
+    expect(host.querySelector('.status-message')?.textContent).toContain('系統拒絕列印');
+    print.mockRestore();
   });
 });

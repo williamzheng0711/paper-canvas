@@ -94,13 +94,15 @@ button {
   border-radius: 5px;
 }
 .topbar button:not(.icon-button),
-.toolbar button {
+.toolbar button,
+.export-menu summary {
   padding: 5px 7px;
   font-size: 13px;
 }
 .topbar button:hover,
 .toolbar button:hover,
-.sidebar button:hover {
+.sidebar button:hover,
+.export-menu summary:hover {
   background: var(--surface-muted);
 }
 .icon-button {
@@ -124,7 +126,47 @@ button {
 }
 .file-actions {
   display: flex;
+  align-items: center;
   gap: 1px;
+}
+.export-menu {
+  position: relative;
+}
+.export-menu summary {
+  color: inherit;
+  background: transparent;
+  border-radius: 5px;
+  cursor: pointer;
+  list-style: none;
+  white-space: nowrap;
+}
+.export-menu summary::-webkit-details-marker {
+  display: none;
+}
+.export-menu summary::after {
+  margin-left: 4px;
+  color: var(--muted);
+  content: '▾';
+  font-size: 9px;
+}
+.export-options {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 5px);
+  right: 0;
+  width: max-content;
+  min-width: 152px;
+  padding: 5px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface-raised);
+  box-shadow: 0 8px 24px rgb(30 26 22 / 14%);
+}
+.export-options button {
+  display: block;
+  width: 100%;
+  padding: 7px 9px !important;
+  text-align: left;
 }
 .topbar-spacer {
   flex: 1;
@@ -232,10 +274,12 @@ button {
 }
 .paper-editor,
 .markdown-source-editor {
-  width: min(100% - 56px, 920px);
-  min-height: calc(100vh - 160px);
+  width: calc(100% - 56px);
+  min-height: calc(100vh - 109px);
   margin: 0 auto;
   padding: 55px 38px 100px;
+  border-right: 1px solid var(--line);
+  border-left: 1px solid var(--line);
   outline: none;
   font-size: var(--editor-size);
   line-height: 1.78;
@@ -704,7 +748,7 @@ button {
   }
   .paper-editor,
   .markdown-source-editor {
-    width: 100%;
+    width: calc(100% - 32px);
   }
   .paper-editor,
   .markdown-source-editor .cm-content {
@@ -715,5 +759,63 @@ button {
   }
   .statusbar > :last-child {
     display: none;
+  }
+}
+
+@media print {
+  @page {
+    margin: 18mm 20mm 20mm;
+  }
+
+  html,
+  body,
+  #root {
+    height: auto;
+    background: #fff;
+  }
+  .app-shell {
+    display: block;
+    min-width: 0;
+    height: auto;
+    background: #fff;
+    color: #111;
+  }
+  .topbar,
+  .toolbar,
+  .sidebar,
+  .statusbar,
+  .image-file-input {
+    display: none !important;
+  }
+  .workspace,
+  .canvas-area {
+    display: block;
+    overflow: visible;
+    background: #fff;
+  }
+  .paper-editor {
+    width: 100%;
+    min-height: 0;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    background: #fff;
+    color: #111;
+    font-size: var(--editor-size);
+    line-height: 1.62;
+  }
+  .paper-editor pre,
+  .paper-editor table,
+  .paper-editor blockquote,
+  .paper-editor img,
+  .formula-node--block {
+    break-inside: avoid;
+  }
+  .paper-editor a {
+    color: inherit;
+  }
+  .paper-editor [data-resize-handle],
+  .formula-copy {
+    display: none !important;
   }
 }

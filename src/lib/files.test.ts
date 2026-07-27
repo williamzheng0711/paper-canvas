@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { isMarkdownFilePath, renameDocumentAssetReferences } from './files';
+import {
+  documentToPortableMarkdown,
+  isMarkdownFilePath,
+  renameDocumentAssetReferences,
+} from './files';
 
 describe('image asset references', () => {
   it('renames only the companion asset paths when a Markdown file is renamed', () => {
@@ -30,5 +34,26 @@ describe('Markdown file associations', () => {
     expect(isMarkdownFilePath('C:\\notes\\proposal.MARKDOWN')).toBe(true);
     expect(isMarkdownFilePath('/Users/example/notes.md.bak')).toBe(false);
     expect(isMarkdownFilePath('/Users/example/notes.txt')).toBe(false);
+  });
+});
+
+describe('Markdown export', () => {
+  it('uses original relative image paths instead of Tauri display URLs', () => {
+    const markdown = documentToPortableMarkdown({
+      type: 'doc',
+      content: [
+        {
+          type: 'image',
+          attrs: {
+            src: 'http://asset.localhost/notes.assets/image-1.png',
+            originalSrc: 'notes.assets/image-1.png',
+            alt: '圖表',
+          },
+        },
+      ],
+    });
+
+    expect(markdown).toContain('notes.assets/image-1.png');
+    expect(markdown).not.toContain('asset.localhost');
   });
 });

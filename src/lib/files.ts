@@ -140,6 +140,11 @@ function restoreRelativeImagePaths(document: JSONContent): JSONContent {
   return restored;
 }
 
+/** Serializes the editor document without leaking Tauri asset-protocol URLs. */
+export function documentToPortableMarkdown(document: JSONContent): string {
+  return documentToMarkdown(restoreRelativeImagePaths(document));
+}
+
 export function renameDocumentAssetReferences(
   document: JSONContent,
   oldPath: string,
@@ -190,6 +195,40 @@ export async function chooseSavePath(defaultName: string): Promise<string | null
     filters: [{ name: 'Markdown', extensions: ['md'] }],
   });
   return selected;
+}
+
+function markdownExportName(name: string): string {
+  return name.replace(/\.(?:md|markdown)$/i, '') + '.md';
+}
+
+function downloadTextFile(contents: string, name: string): void {
+  const url = URL.createObjectURL(new Blob([contents], { type: 'text/markdown;charset=utf-8' }));
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = name;
+  anchor.click();
+  URL.revokeObjectURL(url);
+}
+
+/** Exports a Markdown copy without changing the active document path. */
+export async function exportMarkdownFile(
+  markdown: string,
+  defaultName: string,
+): Promise<string | null> {
+  const name = markdownExportName(defaultName);
+  if (!isTauri()) {
+    downloadTextFile(markdown, name);
+    return name;
+  }
+
+  const selected = await save({
+    title: '導出 Markdown',
+    defaultPath: name,
+    filters: [{ name: 'Markdown', extensions: ['md'] }],
+  });
+  if (!selected) return null;
+  await writeTextFile(selected, markdown);
+  return fileName(selected);
 }
 
 export async function saveEditorFile(file: EditorFile, forceSaveAs = false): Promise<EditorFile> {

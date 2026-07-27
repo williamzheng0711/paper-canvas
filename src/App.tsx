@@ -10,6 +10,8 @@ import { maximumFontSize, minimumFontSize, normalizeFontSize } from './lib/fontS
 import {
   chooseMarkdownFile,
   clearDraft,
+  documentToPortableMarkdown,
+  exportMarkdownFile,
   loadDraft,
   loadPreferences,
   loadRecent,
@@ -90,6 +92,7 @@ export default function App() {
   const rawMarkdownRef = useRef(rawMarkdown);
   const openedByOperatingSystem = useRef(false);
   const recentExternalOpen = useRef(new Map<string, number>());
+  const exportMenu = useRef<HTMLDetailsElement>(null);
   fileRef.current = file;
   dirtyRef.current = dirty;
   sourceModeRef.current = sourceMode;
@@ -404,6 +407,50 @@ export default function App() {
     setPreferences((current) => ({ ...current, fontSize }));
   };
 
+  const closeExportMenu = () => exportMenu.current?.removeAttribute('open');
+
+  const exportMarkdown = useCallback(async () => {
+    closeExportMenu();
+    try {
+      const markdown = sourceModeRef.current
+        ? rawMarkdownRef.current
+        : documentToPortableMarkdown(fileRef.current.document);
+      const exportedName = await exportMarkdownFile(markdown, fileRef.current.name);
+      if (exportedName) setMessage(`已導出 ${exportedName}`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Markdown 導出失敗。');
+    }
+  }, []);
+
+  const exportPdf = useCallback(async () => {
+    closeExportMenu();
+    try {
+      // PDF should always contain the rendered document, even if the author is
+      // currently editing its Markdown source.
+      if (sourceModeRef.current) {
+        const nextDocument = markdownToDocument(rawMarkdownRef.current);
+        const nextFile = { ...fileRef.current, document: nextDocument };
+        fileRef.current = nextFile;
+        setFile(nextFile);
+        setDocumentId((id) => id + 1);
+        sourceModeRef.current = false;
+        setSourceMode(false);
+        await new Promise<void>((resolve) =>
+          window.requestAnimationFrame(() => window.requestAnimationFrame(() => resolve())),
+        );
+      }
+      if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+      await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+      setMessage('請在系統列印對話框選擇「儲存為 PDF」。');
+      // Tauri replaces window.print() with an asynchronous native command on
+      // macOS. Await it so capability or native print failures reach this
+      // handler instead of becoming an unhandled rejected promise.
+      await Promise.resolve(window.print());
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'PDF 導出失敗。');
+    }
+  }, []);
+
   return (
     <main className={`app-shell theme-${preferences.theme} font-${preferences.font}`}>
       <header className="topbar">
@@ -424,6 +471,17 @@ export default function App() {
           <button onClick={() => void saveCurrent()}>儲存</button>
           <button onClick={() => void saveCurrent(true)}>另存</button>
           <button onClick={() => void renameFile()}>重新命名</button>
+          <details ref={exportMenu} className="export-menu">
+            <summary>導出</summary>
+            <div className="export-options" role="menu" aria-label="選擇導出格式">
+              <button role="menuitem" onClick={() => void exportMarkdown()}>
+                Markdown (.md)
+              </button>
+              <button role="menuitem" onClick={() => void exportPdf()}>
+                PDF (.pdf)
+              </button>
+            </div>
+          </details>
         </nav>
         <div className="topbar-spacer" />
         <label className="compact-control">

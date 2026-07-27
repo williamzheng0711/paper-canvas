@@ -154,4 +154,14 @@ mod tests {
 
         assert_eq!(markdown_paths_from_urls(vec![url]), vec![markdown]);
     }
+
+    #[test]
+    fn pdf_printing_capability_is_enabled() {
+        let capabilities = include_str!("../capabilities/default.json");
+
+        assert!(
+            capabilities.contains("\"core:webview:allow-print\""),
+            "macOS window.print requires the Tauri webview print capability"
+        );
+    }
 }
