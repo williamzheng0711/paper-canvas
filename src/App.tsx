@@ -2,16 +2,18 @@ import { invoke, isTauri } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import type { JSONContent } from '@tiptap/core';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { CanvasEditor, type InsertAction } from './components/CanvasEditor';
+import { CanvasEditor } from './components/CanvasEditor';
 import { MarkdownSourceEditor } from './components/MarkdownSourceEditor';
 import { documentsEqual } from './editor/documentSync';
 import { collectOutline, documentToMarkdown, markdownToDocument } from './editor/markdown';
+import { getMessages, setCurrentLanguage, type Language } from './i18n';
 import { maximumFontSize, minimumFontSize, normalizeFontSize } from './lib/fontSize';
 import {
   chooseMarkdownFile,
   clearDraft,
   documentToPortableMarkdown,
   exportMarkdownFile,
+  exportPdfFile,
   loadDraft,
   loadPreferences,
   loadRecent,
@@ -29,22 +31,11 @@ import {
 
 type SaveStatus = 'saved' | 'saving' | 'draft' | 'error' | 'unsaved';
 
-const actions: Array<{ action: InsertAction; label: string }> = [
-  { action: 'heading', label: '標題' },
-  { action: 'bulletList', label: '項目清單' },
-  { action: 'orderedList', label: '編號清單' },
-  { action: 'taskList', label: '待辦' },
-  { action: 'quote', label: '引用' },
-  { action: 'code', label: '程式碼' },
-  { action: 'table', label: '表格' },
-  { action: 'image', label: '圖片' },
-  { action: 'inlineFormula', label: '行內公式' },
-  { action: 'blockFormula', label: '區塊公式' },
-];
-
-function documentMetrics(document: JSONContent): { characters: number; words: number } {
-  const walk = (node: JSONContent): string =>
-    `${node.text ?? ''}${(node.content ?? []).map(walk).join('')}`;
+function documentMetrics(document: JSONContent): {
+  characters: number;
+  words: number;
+} {
+  const walk = (node: JSONContent): string => `${node.text ?? ''}${(node.content ?? []).map(walk).join('')}`;
   const text = walk(document).trim();
   const cjk = (text.match(/[\u3400-\u9fff\uf900-\ufaff]/g) ?? []).length;
   const nonCjkWords = text
@@ -55,35 +46,28 @@ function documentMetrics(document: JSONContent): { characters: number; words: nu
   return { characters: [...text].length, words: cjk + nonCjkWords };
 }
 
-function statusLabel(status: SaveStatus): string {
-  return {
-    saved: '已儲存',
-    saving: '正在儲存…',
-    draft: '草稿已自動保存',
-    error: '儲存失敗',
-    unsaved: '未儲存變更',
-  }[status];
-}
-
 export default function App() {
   const [file, setFile] = useState<EditorFile>(newEditorFile);
   const [documentId, setDocumentId] = useState(0);
   const [editRevision, setEditRevision] = useState(0);
   const [dirty, setDirty] = useState(false);
   const [saveStatus, setSaveStatus] = useState<SaveStatus>('saved');
-  const [message, setMessage] = useState('所有內容僅保留在本機。');
+  const [message, setMessage] = useState(() => getMessages().localOnly);
   const [recent, setRecent] = useState<RecentFile[]>([]);
   const [sourceMode, setSourceMode] = useState(false);
   const [rawMarkdown, setRawMarkdown] = useState('');
+  const [pdfExporting, setPdfExporting] = useState(false);
   const [preferences, setPreferences] = useState<AppPreferences>({
     theme: 'light',
     font: 'system',
     fontSize: 18,
     sidebarOpen: true,
+    language: 'zh-Hant',
   });
+  const text = getMessages(preferences.language);
   const [fontSizeInput, setFontSizeInput] = useState('18');
-  const [insert, setInsert] = useState<(action: InsertAction) => void>(() => () => undefined);
   const saving = useRef(false);
+  const preferencesLoaded = useRef(false);
   const fileRef = useRef(file);
   const dirtyRef = useRef(dirty);
   const editRevisionRef = useRef(editRevision);
@@ -93,6 +77,7 @@ export default function App() {
   const openedByOperatingSystem = useRef(false);
   const recentExternalOpen = useRef(new Map<string, number>());
   const exportMenu = useRef<HTMLDetailsElement>(null);
+  const pdfExportingRef = useRef(false);
   fileRef.current = file;
   dirtyRef.current = dirty;
   sourceModeRef.current = sourceMode;
@@ -111,16 +96,14 @@ export default function App() {
     setSaveStatus('unsaved');
   }, [advanceRevision]);
 
-  const handleEditorReady = useCallback((nextInsert: (action: InsertAction) => void) => {
-    // React treats a function passed directly to a state setter as an updater.
-    // Wrap it so the editor action is stored, not run with the previous action.
-    setInsert(() => nextInsert);
-  }, []);
-
   useEffect(() => {
     void Promise.all([loadRecent(), loadPreferences(), loadDraft()])
       .then(([loadedRecent, loadedPreferences, draft]) => {
+        setCurrentLanguage(loadedPreferences.language);
+        document.documentElement.lang = loadedPreferences.language;
+        const loadedText = getMessages(loadedPreferences.language);
         if (!openedByOperatingSystem.current) setRecent(loadedRecent);
+        preferencesLoaded.current = true;
         setPreferences(loadedPreferences);
         setFontSizeInput(String(loadedPreferences.fontSize));
         if (draft && !openedByOperatingSystem.current) {
@@ -132,17 +115,23 @@ export default function App() {
           dirtyRef.current = true;
           setDirty(true);
           setSaveStatus('draft');
-          setMessage('已還原尚未指定位置的本機草稿。');
+          setMessage(loadedText.restoredDraft);
+        } else {
+          setMessage(loadedText.localOnly);
         }
       })
-      .catch((error: unknown) =>
-        setMessage(error instanceof Error ? error.message : '無法載入本機設定。'),
-      );
+      .catch((error: unknown) => setMessage(error instanceof Error ? error.message : getMessages().loadSettingsFailed));
   }, [advanceRevision]);
 
   useEffect(() => {
+    if (!preferencesLoaded.current) return;
     void savePreferences(preferences);
   }, [preferences]);
+
+  useEffect(() => {
+    setCurrentLanguage(preferences.language);
+    document.documentElement.lang = preferences.language;
+  }, [preferences.language]);
 
   useEffect(() => {
     const title = `${dirty ? '● ' : ''}${file.name} — PaperCanvas`;
@@ -167,7 +156,7 @@ export default function App() {
       setSaveStatus('saved');
       sourceModeRef.current = false;
       setSourceMode(false);
-      setMessage(`已開啟 ${nextFile.name}`);
+      setMessage(getMessages().openedFile(nextFile.name));
     },
     [advanceRevision],
   );
@@ -177,7 +166,7 @@ export default function App() {
       if (
         dirtyRef.current &&
         fileRef.current.path !== nextFile.path &&
-        !window.confirm('目前文件尚未儲存。要放棄變更並開啟另一份文件嗎？')
+        !window.confirm(getMessages().confirmDiscardAndOpen)
       ) {
         return false;
       }
@@ -204,7 +193,7 @@ export default function App() {
         const replaced = await replaceWithOpenedFile(nextFile);
         if (replaced) setRecent(await loadRecent());
       } catch (error) {
-        setMessage(error instanceof Error ? error.message : '無法開啟外部文件。');
+        setMessage(error instanceof Error ? error.message : getMessages().externalOpenFailed);
       }
     },
     [replaceWithOpenedFile],
@@ -221,7 +210,10 @@ export default function App() {
         const revision = editRevisionRef.current;
         const editingSource = sourceModeRef.current;
         const candidate = editingSource
-          ? { ...fileRef.current, document: markdownToDocument(rawMarkdownRef.current) }
+          ? {
+              ...fileRef.current,
+              document: markdownToDocument(rawMarkdownRef.current),
+            }
           : fileRef.current;
         const saved = await saveEditorFile(candidate, shouldSaveAs);
         shouldSaveAs = false;
@@ -230,7 +222,11 @@ export default function App() {
         if (editRevisionRef.current !== revision) {
           // Keep edits made while the asynchronous write was in flight. If
           // this was Save As, carry the new path into the next save pass.
-          const latest = { ...fileRef.current, path: saved.path, name: saved.name };
+          const latest = {
+            ...fileRef.current,
+            path: saved.path,
+            name: saved.name,
+          };
           fileRef.current = latest;
           setFile(latest);
           setSaveStatus('saving');
@@ -251,7 +247,7 @@ export default function App() {
         dirtyRef.current = false;
         setDirty(false);
         setSaveStatus('saved');
-        setMessage(`已儲存 ${saved.name}`);
+        setMessage(getMessages().savedFile(saved.name));
         await clearDraft();
         setRecent(await loadRecent());
         return;
@@ -259,7 +255,7 @@ export default function App() {
     } catch (error) {
       if (documentSessionRef.current === saveSession) {
         setSaveStatus('error');
-        setMessage(error instanceof Error ? error.message : '儲存失敗。');
+        setMessage(error instanceof Error ? error.message : getMessages().saveFailed);
       }
     } finally {
       saving.current = false;
@@ -276,7 +272,10 @@ export default function App() {
         return;
       }
       const draft = sourceModeRef.current
-        ? { ...fileRef.current, document: markdownToDocument(rawMarkdownRef.current) }
+        ? {
+            ...fileRef.current,
+            document: markdownToDocument(rawMarkdownRef.current),
+          }
         : fileRef.current;
       void saveDraft(draft)
         .then(() => {
@@ -286,7 +285,7 @@ export default function App() {
         })
         .catch((error: unknown) => {
           setSaveStatus('error');
-          setMessage(error instanceof Error ? error.message : '無法自動保存草稿。');
+          setMessage(error instanceof Error ? error.message : getMessages().autosaveFailed);
         });
     }, 850);
     return () => window.clearTimeout(timer);
@@ -297,7 +296,7 @@ export default function App() {
       const nextFile = await chooseMarkdownFile();
       if (nextFile) await replaceWithOpenedFile(nextFile);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : '無法開啟文件。');
+      setMessage(error instanceof Error ? error.message : getMessages().openFailed);
     }
   }, [replaceWithOpenedFile]);
 
@@ -319,7 +318,7 @@ export default function App() {
         if (active) await openExternalMarkdownFiles(paths);
       } catch (error) {
         if (active) {
-          setMessage(error instanceof Error ? error.message : '無法接收系統開啟文件事件。');
+          setMessage(error instanceof Error ? error.message : getMessages().systemOpenFailed);
         }
       }
     })();
@@ -331,21 +330,21 @@ export default function App() {
   }, [openExternalMarkdownFiles]);
 
   const newFile = useCallback(() => {
-    if (dirty && !window.confirm('目前文件尚未儲存。要放棄變更並建立新文件嗎？')) return;
+    if (dirty && !window.confirm(getMessages().confirmDiscardAndNew)) return;
     void clearDraft();
     loadFile(newEditorFile());
   }, [dirty, loadFile]);
 
   const renameFile = useCallback(async () => {
-    const nextName = window.prompt('新檔名', fileRef.current.name);
+    const nextName = window.prompt(getMessages().newFilenamePrompt, fileRef.current.name);
     if (!nextName) return;
     try {
       const renamed = await renameEditorFile(fileRef.current, nextName);
       setFile(renamed);
-      setMessage(`已重新命名為 ${renamed.name}`);
+      setMessage(getMessages().renamedFile(renamed.name));
       setRecent(await loadRecent());
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : '重新命名失敗。');
+      setMessage(error instanceof Error ? error.message : getMessages().renameFailed);
     }
   }, []);
 
@@ -368,7 +367,7 @@ export default function App() {
       sourceModeRef.current = false;
       setSourceMode(false);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'Markdown 無法解析。');
+      setMessage(error instanceof Error ? error.message : getMessages().markdownParseFailed);
     }
   };
 
@@ -416,14 +415,18 @@ export default function App() {
         ? rawMarkdownRef.current
         : documentToPortableMarkdown(fileRef.current.document);
       const exportedName = await exportMarkdownFile(markdown, fileRef.current.name);
-      if (exportedName) setMessage(`已導出 ${exportedName}`);
+      if (exportedName) setMessage(getMessages().exportedFile(exportedName));
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'Markdown 導出失敗。');
+      setMessage(error instanceof Error ? error.message : getMessages().markdownExportFailed);
     }
   }, []);
 
   const exportPdf = useCallback(async () => {
+    if (pdfExportingRef.current) return;
+    pdfExportingRef.current = true;
+    setPdfExporting(true);
     closeExportMenu();
+    setMessage(getMessages().pdfExporting);
     try {
       // PDF should always contain the rendered document, even if the author is
       // currently editing its Markdown source.
@@ -440,67 +443,84 @@ export default function App() {
         );
       }
       if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
-      await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
-      setMessage('請在系統列印對話框選擇「儲存為 PDF」。');
-      // Tauri replaces window.print() with an asynchronous native command on
-      // macOS. Await it so capability or native print failures reach this
-      // handler instead of becoming an unhandled rejected promise.
-      await Promise.resolve(window.print());
+      const result = await exportPdfFile(fileRef.current.name);
+      if (result.type === 'saved') {
+        setMessage(getMessages().exportedFile(result.name));
+      } else if (result.type === 'print') {
+        setMessage(getMessages().pdfInstruction);
+      }
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'PDF 導出失敗。');
+      setMessage(error instanceof Error ? error.message : getMessages().pdfExportFailed);
+    } finally {
+      pdfExportingRef.current = false;
+      setPdfExporting(false);
     }
   }, []);
 
   return (
-    <main className={`app-shell theme-${preferences.theme} font-${preferences.font}`}>
+    <main className={`app-shell theme-${preferences.theme} font-${preferences.font}`} lang={preferences.language}>
       <header className="topbar">
         <button
           className="icon-button"
-          title="顯示／隱藏側欄"
+          title={text.showSidebar}
           onClick={() => setPreferences((p) => ({ ...p, sidebarOpen: !p.sidebarOpen }))}
         >
           ☰
         </button>
-        <div className="document-name" title={file.path ?? '尚未儲存'}>
+        <div className="document-name" title={file.path ?? text.unsavedLocation}>
           {dirty && <span className="dirty-dot">●</span>}
           {file.name}
         </div>
-        <nav className="file-actions" aria-label="文件操作">
-          <button onClick={newFile}>新增</button>
-          <button onClick={() => void openFile()}>開啟</button>
-          <button onClick={() => void saveCurrent()}>儲存</button>
-          <button onClick={() => void saveCurrent(true)}>另存</button>
-          <button onClick={() => void renameFile()}>重新命名</button>
+        <nav className="file-actions" aria-label={text.fileActions}>
+          <button onClick={newFile}>{text.new}</button>
+          <button onClick={() => void openFile()}>{text.open}</button>
+          <button onClick={() => void saveCurrent()}>{text.save}</button>
+          <button onClick={() => void saveCurrent(true)}>{text.saveAs}</button>
+          <button onClick={() => void renameFile()}>{text.rename}</button>
           <details ref={exportMenu} className="export-menu">
-            <summary>導出</summary>
-            <div className="export-options" role="menu" aria-label="選擇導出格式">
+            <summary>{text.export}</summary>
+            <div className="export-options" role="menu" aria-label={text.chooseExportFormat}>
               <button role="menuitem" onClick={() => void exportMarkdown()}>
                 Markdown (.md)
               </button>
-              <button role="menuitem" onClick={() => void exportPdf()}>
+              <button
+                role="menuitem"
+                aria-busy={pdfExporting}
+                disabled={pdfExporting}
+                onClick={() => void exportPdf()}
+              >
                 PDF (.pdf)
               </button>
             </div>
           </details>
+          <button
+            className={sourceMode ? 'source-mode-button is-active' : 'source-mode-button'}
+            onClick={toggleSourceMode}
+          >
+            {sourceMode ? text.backToCanvas : text.showMarkdownSource}
+          </button>
         </nav>
         <div className="topbar-spacer" />
         <label className="compact-control">
-          字體{' '}
+          {text.font}{' '}
           <select
             value={preferences.font}
             onChange={(event) =>
-              setPreferences((p) => ({ ...p, font: event.target.value as AppPreferences['font'] }))
+              setPreferences((p) => ({
+                ...p,
+                font: event.target.value as AppPreferences['font'],
+              }))
             }
           >
-            <option value="system">系統</option>
-            <option value="serif">襯線</option>
-            <option value="mono">等寬</option>
+            <option value="system">{text.fontSystem}</option>
+            <option value="serif">{text.fontSerif}</option>
+            <option value="mono">{text.fontMono}</option>
           </select>
         </label>
         <label className="compact-control">
-          大小
+          {text.size}
           <input
-            aria-label="字級"
+            aria-label={text.fontSize}
             type="number"
             min={minimumFontSize}
             max={maximumFontSize}
@@ -517,34 +537,44 @@ export default function App() {
             }}
           />
         </label>
+        <label className="compact-control language-control">
+          {text.language}
+          <select
+            aria-label={text.language}
+            value={preferences.language}
+            onChange={(event) => {
+              const language = event.target.value as Language;
+              setCurrentLanguage(language);
+              document.documentElement.lang = language;
+              setPreferences((current) => ({ ...current, language }));
+              setMessage(getMessages(language).localOnly);
+            }}
+          >
+            <option value="en">{text.languageOptions.en}</option>
+            <option value="zh-Hans">{text.languageOptions['zh-Hans']}</option>
+            <option value="zh-Hant">{text.languageOptions['zh-Hant']}</option>
+          </select>
+        </label>
         <button
           className="icon-button"
-          title="切換淺色／深色"
+          title={text.toggleTheme}
           onClick={() =>
-            setPreferences((p) => ({ ...p, theme: p.theme === 'light' ? 'dark' : 'light' }))
+            setPreferences((p) => ({
+              ...p,
+              theme: p.theme === 'light' ? 'dark' : 'light',
+            }))
           }
         >
           {preferences.theme === 'light' ? '◐' : '◑'}
         </button>
       </header>
-      <div className="toolbar" aria-label="插入內容">
-        {actions.map(({ action, label }) => (
-          <button key={action} onClick={() => insert(action)}>
-            {label}
-          </button>
-        ))}
-        <span className="toolbar-separator" />
-        <button className={sourceMode ? 'is-active' : ''} onClick={toggleSourceMode}>
-          {sourceMode ? '返回畫布' : '顯示原始 Markdown'}
-        </button>
-      </div>
       <section className="workspace">
         {preferences.sidebarOpen && (
           <aside className="sidebar">
             <section>
-              <div className="sidebar-heading">最近文件</div>
+              <div className="sidebar-heading">{text.recentFiles}</div>
               {recent.length === 0 ? (
-                <p className="muted">尚未有最近文件</p>
+                <p className="muted">{text.noRecentFiles}</p>
               ) : (
                 <ul className="recent-list">
                   {recent.map((item) => (
@@ -555,9 +585,7 @@ export default function App() {
                           void openRecent(item)
                             .then(loadFile)
                             .catch((error: unknown) =>
-                              setMessage(
-                                error instanceof Error ? error.message : '無法開啟最近文件。',
-                              ),
+                              setMessage(error instanceof Error ? error.message : getMessages().recentOpenFailed),
                             )
                         }
                       >
@@ -569,15 +597,17 @@ export default function App() {
               )}
             </section>
             <section>
-              <div className="sidebar-heading">大綱</div>
+              <div className="sidebar-heading">{text.outline}</div>
               {outline.length === 0 ? (
-                <p className="muted">文件尚無標題</p>
+                <p className="muted">{text.noHeadings}</p>
               ) : (
                 <ol className="outline-list">
                   {outline.map((item, index) => (
                     <li
                       key={`${item.text}-${index}`}
-                      style={{ paddingInlineStart: `${(item.level - 1) * 12}px` }}
+                      style={{
+                        paddingInlineStart: `${(item.level - 1) * 12}px`,
+                      }}
                     >
                       {item.text}
                     </li>
@@ -589,10 +619,15 @@ export default function App() {
         )}
         <section
           className="canvas-area"
-          style={{ '--editor-size': `${preferences.fontSize}px` } as React.CSSProperties}
+          style={
+            {
+              '--editor-size': `${preferences.fontSize}px`,
+            } as React.CSSProperties
+          }
         >
           {sourceMode ? (
             <MarkdownSourceEditor
+              language={preferences.language}
               value={rawMarkdown}
               onChange={(value) => {
                 rawMarkdownRef.current = value;
@@ -602,6 +637,7 @@ export default function App() {
             />
           ) : (
             <CanvasEditor
+              language={preferences.language}
               documentId={documentId}
               initialDocument={file.document}
               onChange={(document) => {
@@ -612,18 +648,15 @@ export default function App() {
                 });
                 markEdited();
               }}
-              onReady={handleEditorReady}
             />
           )}
         </section>
       </section>
       <footer className="statusbar">
-        <span className={`save-status save-status--${saveStatus}`}>{statusLabel(saveStatus)}</span>
-        <span>
-          {metrics.words.toLocaleString()} 詞 · {metrics.characters.toLocaleString()} 字元
-        </span>
+        <span className={`save-status save-status--${saveStatus}`}>{text.saveStatus[saveStatus]}</span>
+        <span>{text.metrics(metrics.words, metrics.characters)}</span>
         <span className="status-message">{message}</span>
-        <span>本機優先 · 不傳送內容到網絡</span>
+        <span>{text.localFirst}</span>
       </footer>
     </main>
   );

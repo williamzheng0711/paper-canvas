@@ -15,12 +15,14 @@ const harness = vi.hoisted(() => ({ canvasProps: null as CanvasProps | null }));
 const files = vi.hoisted(() => ({
   clearDraft: vi.fn(async () => undefined),
   exportMarkdownFile: vi.fn(async () => 'research.md'),
+  exportPdfFile: vi.fn(async () => ({ type: 'saved' as const, name: 'research.pdf' })),
   loadDraft: vi.fn(),
   loadPreferences: vi.fn(async () => ({
     theme: 'light' as const,
     font: 'system' as const,
     fontSize: 18,
     sidebarOpen: true,
+    language: 'zh-Hant' as const,
   })),
   loadRecent: vi.fn(async () => []),
   saveEditorFile: vi.fn(),
@@ -28,7 +30,10 @@ const files = vi.hoisted(() => ({
   savePreferences: vi.fn(async () => undefined),
 }));
 
-vi.mock('@tauri-apps/api/core', () => ({ isTauri: () => false, invoke: vi.fn() }));
+vi.mock('@tauri-apps/api/core', () => ({
+  isTauri: () => false,
+  invoke: vi.fn(),
+}));
 vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn() }));
 vi.mock('./components/CanvasEditor', () => ({
   CanvasEditor: (props: CanvasProps) => {
@@ -36,7 +41,9 @@ vi.mock('./components/CanvasEditor', () => ({
     return null;
   },
 }));
-vi.mock('./components/MarkdownSourceEditor', () => ({ MarkdownSourceEditor: () => null }));
+vi.mock('./components/MarkdownSourceEditor', () => ({
+  MarkdownSourceEditor: () => null,
+}));
 vi.mock('./lib/files', () => ({
   chooseMarkdownFile: vi.fn(async () => null),
   clearDraft: files.clearDraft,
@@ -45,6 +52,7 @@ vi.mock('./lib/files', () => ({
     return `${text}\n`;
   },
   exportMarkdownFile: files.exportMarkdownFile,
+  exportPdfFile: files.exportPdfFile,
   loadDraft: files.loadDraft,
   loadPreferences: files.loadPreferences,
   loadRecent: files.loadRecent,
@@ -107,7 +115,12 @@ describe('App autosave cursor stability', () => {
     const initialDocumentId = harness.canvasProps?.documentId;
     const editedDocument: JSONContent = {
       type: 'doc',
-      content: [{ type: 'paragraph', content: [{ type: 'text', text: '中間新增文字' }] }],
+      content: [
+        {
+          type: 'paragraph',
+          content: [{ type: 'text', text: '中間新增文字' }],
+        },
+      ],
     };
 
     await act(async () => harness.canvasProps?.onChange(editedDocument));
@@ -137,7 +150,12 @@ describe('App autosave cursor stability', () => {
     };
     const newerEdit: JSONContent = {
       type: 'doc',
-      content: [{ type: 'paragraph', content: [{ type: 'text', text: '第一版＋新輸入' }] }],
+      content: [
+        {
+          type: 'paragraph',
+          content: [{ type: 'text', text: '第一版＋新輸入' }],
+        },
+      ],
     };
 
     await act(async () => harness.canvasProps?.onChange(firstEdit));
@@ -170,7 +188,41 @@ describe('App autosave cursor stability', () => {
     expect(host.querySelector('.document-name')?.textContent).toContain('research.md');
   });
 
-  it('opens the system print flow for PDF export', async () => {
+  it('switches the full interface among all three languages and saves the preference', async () => {
+    const language = host.querySelector<HTMLSelectElement>('select[aria-label="語言"]');
+
+    const switchLanguage = async (value: string) => {
+      await act(async () => {
+        if (language) {
+          language.value = value;
+          language.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+        await flushEffects();
+      });
+    };
+
+    expect(language).not.toBeNull();
+    expect(Array.from(language?.options ?? []).map((option) => option.textContent)).toEqual([
+      'English',
+      '简体中文',
+      '繁體中文',
+    ]);
+
+    await switchLanguage('zh-Hans');
+    expect(Array.from(host.querySelectorAll('button')).some((button) => button.textContent === '新建')).toBe(true);
+    expect(document.documentElement.lang).toBe('zh-Hans');
+
+    await switchLanguage('en');
+    expect(Array.from(host.querySelectorAll('button')).some((button) => button.textContent === 'New')).toBe(true);
+    expect(document.documentElement.lang).toBe('en');
+
+    await switchLanguage('zh-Hant');
+    expect(Array.from(host.querySelectorAll('button')).some((button) => button.textContent === '新增')).toBe(true);
+    expect(document.documentElement.lang).toBe('zh-Hant');
+    expect(files.savePreferences).toHaveBeenLastCalledWith(expect.objectContaining({ language: 'zh-Hant' }));
+  });
+
+  it('exports PDF without switching the visible app into a print layout', async () => {
     const print = vi.spyOn(window, 'print').mockImplementation(() => undefined);
     const button = Array.from(host.querySelectorAll('button')).find((candidate) =>
       candidate.textContent?.includes('PDF (.pdf)'),
@@ -178,31 +230,60 @@ describe('App autosave cursor stability', () => {
 
     await act(async () => {
       button?.click();
-      await vi.advanceTimersByTimeAsync(20);
       await flushEffects();
     });
 
-    expect(print).toHaveBeenCalledOnce();
-    expect(host.querySelector('.status-message')?.textContent).toContain('儲存為 PDF');
+    expect(files.exportPdfFile).toHaveBeenCalledWith('research.md');
+    expect(print).not.toHaveBeenCalled();
+    expect(document.documentElement.className).not.toContain('pdf-export');
+    expect(host.querySelector('.status-message')?.textContent).toContain('research.pdf');
     print.mockRestore();
   });
 
-  it('reports a rejected native PDF print command', async () => {
-    const print = vi
-      .spyOn(window, 'print')
-      .mockImplementation(() => Promise.reject(new Error('系統拒絕列印')) as unknown as void);
+  it('keeps the app interactive while preventing overlapping PDF exports', async () => {
+    let completeExport: ((result: { type: 'saved'; name: string }) => void) | undefined;
+    files.exportPdfFile.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          completeExport = resolve;
+        }),
+    );
+    const button = Array.from(host.querySelectorAll<HTMLButtonElement>('button')).find((candidate) =>
+      candidate.textContent?.includes('PDF (.pdf)'),
+    );
+
+    await act(async () => {
+      button?.click();
+      await flushEffects();
+    });
+
+    expect(button?.disabled).toBe(true);
+    expect(button?.getAttribute('aria-busy')).toBe('true');
+    expect(host.querySelector('.status-message')?.textContent).toContain('正在導出 PDF');
+    button?.click();
+    expect(files.exportPdfFile).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      completeExport?.({ type: 'saved', name: 'research.pdf' });
+      await flushEffects();
+    });
+
+    expect(button?.disabled).toBe(false);
+    expect(host.querySelector('.status-message')?.textContent).toContain('research.pdf');
+  });
+
+  it('reports a rejected native PDF export command', async () => {
+    files.exportPdfFile.mockRejectedValueOnce(new Error('原生 PDF 導出失敗'));
     const button = Array.from(host.querySelectorAll('button')).find((candidate) =>
       candidate.textContent?.includes('PDF (.pdf)'),
     );
 
     await act(async () => {
       button?.click();
-      await vi.advanceTimersByTimeAsync(20);
       await flushEffects();
     });
 
-    expect(print).toHaveBeenCalledOnce();
-    expect(host.querySelector('.status-message')?.textContent).toContain('系統拒絕列印');
-    print.mockRestore();
+    expect(files.exportPdfFile).toHaveBeenCalledWith('research.md');
+    expect(host.querySelector('.status-message')?.textContent).toContain('原生 PDF 導出失敗');
   });
 });

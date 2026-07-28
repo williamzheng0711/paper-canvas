@@ -1,31 +1,53 @@
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands';
 import { markdown } from '@codemirror/lang-markdown';
 import { HighlightStyle, bracketMatching, syntaxHighlighting } from '@codemirror/language';
-import { EditorState } from '@codemirror/state';
+import { Compartment, EditorState } from '@codemirror/state';
 import { EditorView, highlightActiveLine, keymap, lineNumbers } from '@codemirror/view';
 import { tags } from '@lezer/highlight';
 import { useEffect, useRef } from 'react';
+import { getMessages, type Language } from '../i18n';
 
 type Props = {
+  language: Language;
   value: string;
   onChange: (value: string) => void;
 };
 
 const markdownHighlightStyle = HighlightStyle.define([
   { tag: tags.heading, color: 'var(--markdown-heading)', fontWeight: '700' },
-  { tag: [tags.keyword, tags.controlKeyword], color: 'var(--markdown-keyword)', fontWeight: '600' },
-  { tag: [tags.string, tags.special(tags.string)], color: 'var(--markdown-string)' },
-  { tag: [tags.comment, tags.meta], color: 'var(--markdown-comment)', fontStyle: 'italic' },
-  { tag: [tags.url, tags.link], color: 'var(--markdown-link)', textDecoration: 'underline' },
-  { tag: [tags.emphasis, tags.strong], color: 'var(--markdown-emphasis)', fontWeight: '700' },
+  {
+    tag: [tags.keyword, tags.controlKeyword],
+    color: 'var(--markdown-keyword)',
+    fontWeight: '600',
+  },
+  {
+    tag: [tags.string, tags.special(tags.string)],
+    color: 'var(--markdown-string)',
+  },
+  {
+    tag: [tags.comment, tags.meta],
+    color: 'var(--markdown-comment)',
+    fontStyle: 'italic',
+  },
+  {
+    tag: [tags.url, tags.link],
+    color: 'var(--markdown-link)',
+    textDecoration: 'underline',
+  },
+  {
+    tag: [tags.emphasis, tags.strong],
+    color: 'var(--markdown-emphasis)',
+    fontWeight: '700',
+  },
   { tag: [tags.monospace, tags.literal], color: 'var(--markdown-code)' },
   { tag: tags.punctuation, color: 'var(--markdown-punctuation)' },
 ]);
 
 /** A controlled CodeMirror surface for editable, syntax-coloured Markdown. */
-export function MarkdownSourceEditor({ value, onChange }: Props) {
+export function MarkdownSourceEditor({ language, value, onChange }: Props) {
   const host = useRef<HTMLDivElement>(null);
   const view = useRef<EditorView | null>(null);
+  const contentAttributes = useRef(new Compartment()).current;
   const initialValue = useRef(value);
   const onChangeRef = useRef(onChange);
   onChangeRef.current = onChange;
@@ -44,10 +66,12 @@ export function MarkdownSourceEditor({ value, onChange }: Props) {
           markdown(),
           syntaxHighlighting(markdownHighlightStyle),
           EditorView.lineWrapping,
-          EditorView.contentAttributes.of({
-            'aria-label': '原始 Markdown',
-            spellcheck: 'false',
-          }),
+          contentAttributes.of(
+            EditorView.contentAttributes.of({
+              'aria-label': getMessages().markdownSource,
+              spellcheck: 'false',
+            }),
+          ),
           EditorView.updateListener.of((update) => {
             if (update.docChanged) onChangeRef.current(update.state.doc.toString());
           }),
@@ -60,7 +84,18 @@ export function MarkdownSourceEditor({ value, onChange }: Props) {
       if (view.current === editor) view.current = null;
       editor.destroy();
     };
-  }, []);
+  }, [contentAttributes]);
+
+  useEffect(() => {
+    view.current?.dispatch({
+      effects: contentAttributes.reconfigure(
+        EditorView.contentAttributes.of({
+          'aria-label': getMessages(language).markdownSource,
+          spellcheck: 'false',
+        }),
+      ),
+    });
+  }, [contentAttributes, language]);
 
   useEffect(() => {
     const editor = view.current;

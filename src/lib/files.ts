@@ -1,16 +1,10 @@
 import type { JSONContent } from '@tiptap/core';
-import { convertFileSrc, isTauri } from '@tauri-apps/api/core';
+import { convertFileSrc, invoke, isTauri } from '@tauri-apps/api/core';
 import { open, save } from '@tauri-apps/plugin-dialog';
-import {
-  exists,
-  mkdir,
-  readTextFile,
-  rename,
-  writeFile,
-  writeTextFile,
-} from '@tauri-apps/plugin-fs';
+import { exists, mkdir, readTextFile, rename, writeFile, writeTextFile } from '@tauri-apps/plugin-fs';
 import { Store } from '@tauri-apps/plugin-store';
 import { documentToMarkdown, markdownToDocument } from '../editor/markdown';
+import { detectLanguage, getMessages, isLanguage, type Language } from '../i18n';
 
 export type RecentFile = { path: string; name: string };
 export type EditorFile = {
@@ -24,6 +18,7 @@ export type AppPreferences = {
   font: 'system' | 'serif' | 'mono';
   fontSize: number;
   sidebarOpen: boolean;
+  language: Language;
 };
 
 const settingsKey = 'papercanvas.settings.v1';
@@ -77,13 +72,7 @@ function dataUrlBytes(dataUrl: string): Uint8Array | null {
 
 function extensionForDataUrl(dataUrl: string): string {
   const mime = /^data:([^;]+)/.exec(dataUrl)?.[1] ?? 'image/png';
-  return mime === 'image/jpeg'
-    ? 'jpg'
-    : mime === 'image/gif'
-      ? 'gif'
-      : mime === 'image/webp'
-        ? 'webp'
-        : 'png';
+  return mime === 'image/jpeg' ? 'jpg' : mime === 'image/gif' ? 'gif' : mime === 'image/webp' ? 'webp' : 'png';
 }
 
 async function persistEmbeddedImages(document: JSONContent, path: string): Promise<JSONContent> {
@@ -91,11 +80,7 @@ async function persistEmbeddedImages(document: JSONContent, path: string): Promi
   const targetDirectory = assetDirectory(path);
   const assets: Array<{ node: JSONContent; src: string }> = [];
   visit(prepared, (node) => {
-    if (
-      node.type === 'image' &&
-      typeof node.attrs?.src === 'string' &&
-      node.attrs.src.startsWith('data:')
-    ) {
+    if (node.type === 'image' && typeof node.attrs?.src === 'string' && node.attrs.src.startsWith('data:')) {
       assets.push({ node, src: node.attrs.src });
     }
   });
@@ -145,27 +130,27 @@ export function documentToPortableMarkdown(document: JSONContent): string {
   return documentToMarkdown(restoreRelativeImagePaths(document));
 }
 
-export function renameDocumentAssetReferences(
-  document: JSONContent,
-  oldPath: string,
-  newPath: string,
-): JSONContent {
+export function renameDocumentAssetReferences(document: JSONContent, oldPath: string, newPath: string): JSONContent {
   const oldPrefix = `${fileName(oldPath).replace(/\.md$/i, '')}.assets/`;
   const newPrefix = `${fileName(newPath).replace(/\.md$/i, '')}.assets/`;
   const renamed = restoreRelativeImagePaths(document);
   visit(renamed, (node) => {
     if (node.type !== 'image' || typeof node.attrs?.src !== 'string') return;
     if (node.attrs.src.startsWith(oldPrefix)) {
-      node.attrs = { ...node.attrs, src: `${newPrefix}${node.attrs.src.slice(oldPrefix.length)}` };
+      node.attrs = {
+        ...node.attrs,
+        src: `${newPrefix}${node.attrs.src.slice(oldPrefix.length)}`,
+      };
     }
   });
   return renamed;
 }
 
 export async function chooseMarkdownFile(): Promise<EditorFile | null> {
-  if (!isTauri()) throw new Error('檔案選擇器只會在桌面 App 中啟用。');
+  const text = getMessages();
+  if (!isTauri()) throw new Error(text.filePickerDesktopOnly);
   const selected = await open({
-    title: '開啟 Markdown 文件',
+    title: text.openMarkdownDialog,
     multiple: false,
     directory: false,
     filters: [{ name: 'Markdown', extensions: ['md', 'markdown'] }],
@@ -175,8 +160,9 @@ export async function chooseMarkdownFile(): Promise<EditorFile | null> {
 }
 
 export async function openMarkdownFile(path: string): Promise<EditorFile> {
-  if (!isTauri()) throw new Error('外部文件只會在桌面 App 中啟用。');
-  if (!isMarkdownFilePath(path)) throw new Error('PaperCanvas 只能開啟 .md 或 .markdown 文件。');
+  const text = getMessages();
+  if (!isTauri()) throw new Error(text.externalFilesDesktopOnly);
+  if (!isMarkdownFilePath(path)) throw new Error(text.markdownFilesOnly);
   const markdown = await readTextFile(path);
   const file = {
     path,
@@ -188,9 +174,10 @@ export async function openMarkdownFile(path: string): Promise<EditorFile> {
 }
 
 export async function chooseSavePath(defaultName: string): Promise<string | null> {
-  if (!isTauri()) throw new Error('另存新檔只會在桌面 App 中啟用。');
+  const text = getMessages();
+  if (!isTauri()) throw new Error(text.saveAsDesktopOnly);
   const selected = await save({
-    title: '儲存 PaperCanvas 文件',
+    title: text.saveDocumentDialog,
     defaultPath: defaultName.endsWith('.md') ? defaultName : `${defaultName}.md`,
     filters: [{ name: 'Markdown', extensions: ['md'] }],
   });
@@ -199,6 +186,10 @@ export async function chooseSavePath(defaultName: string): Promise<string | null
 
 function markdownExportName(name: string): string {
   return name.replace(/\.(?:md|markdown)$/i, '') + '.md';
+}
+
+function pdfExportName(name: string): string {
+  return name.replace(/\.(?:md|markdown|pdf)$/i, '') + '.pdf';
 }
 
 function downloadTextFile(contents: string, name: string): void {
@@ -211,10 +202,8 @@ function downloadTextFile(contents: string, name: string): void {
 }
 
 /** Exports a Markdown copy without changing the active document path. */
-export async function exportMarkdownFile(
-  markdown: string,
-  defaultName: string,
-): Promise<string | null> {
+export async function exportMarkdownFile(markdown: string, defaultName: string): Promise<string | null> {
+  const text = getMessages();
   const name = markdownExportName(defaultName);
   if (!isTauri()) {
     downloadTextFile(markdown, name);
@@ -222,7 +211,7 @@ export async function exportMarkdownFile(
   }
 
   const selected = await save({
-    title: '導出 Markdown',
+    title: text.exportMarkdownDialog,
     defaultPath: name,
     filters: [{ name: 'Markdown', extensions: ['md'] }],
   });
@@ -231,37 +220,70 @@ export async function exportMarkdownFile(
   return fileName(selected);
 }
 
+export type PdfExportResult =
+  | { type: 'saved'; name: string }
+  | { type: 'print' }
+  | { type: 'cancelled' };
+
+/**
+ * Saves directly through AppKit on macOS so WKWebView never presents its stale
+ * print-preview thumbnail. Other platforms retain their system print flow.
+ */
+export async function exportPdfFile(defaultName: string): Promise<PdfExportResult> {
+  const isMacDesktop = isTauri() && /Macintosh|Mac OS X/i.test(navigator.userAgent);
+  if (!isMacDesktop) {
+    await Promise.resolve(window.print());
+    return { type: 'print' };
+  }
+
+  const selected = await save({
+    title: getMessages().exportPdfDialog,
+    defaultPath: pdfExportName(defaultName),
+    filters: [{ name: 'PDF', extensions: ['pdf'] }],
+  });
+  if (!selected) return { type: 'cancelled' };
+
+  const path = selected.toLowerCase().endsWith('.pdf') ? selected : `${selected}.pdf`;
+  await invoke('export_pdf', { path });
+  return { type: 'saved', name: fileName(path) };
+}
+
 export async function saveEditorFile(file: EditorFile, forceSaveAs = false): Promise<EditorFile> {
   let path = file.path;
   if (!path || forceSaveAs) {
     const selected = await chooseSavePath(file.name);
     if (selected) path = selected;
   }
-  if (!path) throw new Error('儲存已取消。');
+  if (!path) throw new Error(getMessages().saveCancelled);
   const portable = restoreRelativeImagePaths(file.document);
   const withAssets = await persistEmbeddedImages(portable, path);
   await writeTextFile(path, documentToMarkdown(withAssets));
   await rememberRecent({ path, name: fileName(path) });
-  return { path, name: fileName(path), document: hydrateRelativeImages(withAssets, path) };
+  return {
+    path,
+    name: fileName(path),
+    document: hydrateRelativeImages(withAssets, path),
+  };
 }
 
 export async function renameEditorFile(file: EditorFile, newName: string): Promise<EditorFile> {
+  const text = getMessages();
   const cleanName = newName.trim().replace(/[\\/:*?"<>|]/g, '-');
-  if (!cleanName) throw new Error('請輸入有效的檔名。');
+  if (!cleanName) throw new Error(text.invalidFilename);
   if (!file.path)
-    return { ...file, name: cleanName.endsWith('.md') ? cleanName : `${cleanName}.md` };
-  const target = joinPath(
-    parentPath(file.path),
-    cleanName.endsWith('.md') ? cleanName : `${cleanName}.md`,
-  );
+    return {
+      ...file,
+      name: cleanName.endsWith('.md') ? cleanName : `${cleanName}.md`,
+    };
+  const target = joinPath(parentPath(file.path), cleanName.endsWith('.md') ? cleanName : `${cleanName}.md`);
   if (target === file.path) return file;
-  if (await exists(target)) throw new Error('目標檔名已存在，請使用另一個名稱。');
+  if (await exists(target)) throw new Error(text.filenameExists);
 
   const oldAssets = assetDirectory(file.path);
   const nextAssets = assetDirectory(target);
   const hasAssets = await exists(oldAssets);
   if (hasAssets && (await exists(nextAssets))) {
-    throw new Error('目標圖片 assets 目錄已存在，請先選擇另一個檔名。');
+    throw new Error(text.assetsDirectoryExists);
   }
 
   await rename(file.path, target);
@@ -288,10 +310,7 @@ export async function renameEditorFile(file: EditorFile, newName: string): Promi
     ...file,
     path: target,
     name: fileName(target),
-    document: hydrateRelativeImages(
-      renameDocumentAssetReferences(file.document, file.path, target),
-      target,
-    ),
+    document: hydrateRelativeImages(renameDocumentAssetReferences(file.document, file.path, target), target),
   };
 }
 
@@ -313,10 +332,7 @@ export async function loadRecent(): Promise<RecentFile[]> {
 }
 
 export async function rememberRecent(recent: RecentFile): Promise<void> {
-  const files = [recent, ...(await loadRecent()).filter((item) => item.path !== recent.path)].slice(
-    0,
-    12,
-  );
+  const files = [recent, ...(await loadRecent()).filter((item) => item.path !== recent.path)].slice(0, 12);
   if (isTauri()) {
     const store = await Store.load(settingsKey, { autoSave: 200 });
     await store.set(recentKey, files);
@@ -332,18 +348,24 @@ const defaultPreferences: AppPreferences = {
   font: 'system',
   fontSize: 18,
   sidebarOpen: true,
+  language: detectLanguage(),
 };
+
+function mergePreferences(stored: Partial<AppPreferences> | null | undefined): AppPreferences {
+  return {
+    ...defaultPreferences,
+    ...stored,
+    language: isLanguage(stored?.language) ? stored.language : defaultPreferences.language,
+  };
+}
 
 export async function loadPreferences(): Promise<AppPreferences> {
   if (isTauri()) {
     const store = await Store.load(settingsKey, { autoSave: 200 });
-    return { ...defaultPreferences, ...(await store.get<Partial<AppPreferences>>(preferencesKey)) };
+    return mergePreferences(await store.get<Partial<AppPreferences>>(preferencesKey));
   }
   try {
-    return {
-      ...defaultPreferences,
-      ...(JSON.parse(localStorage.getItem(preferencesKey) ?? '{}') as Partial<AppPreferences>),
-    };
+    return mergePreferences(JSON.parse(localStorage.getItem(preferencesKey) ?? '{}') as Partial<AppPreferences>);
   } catch {
     return defaultPreferences;
   }
@@ -399,5 +421,8 @@ export async function clearDraft(): Promise<void> {
 }
 
 export function newEditorFile(): EditorFile {
-  return { name: 'Untitled.md', document: { type: 'doc', content: [{ type: 'paragraph' }] } };
+  return {
+    name: getMessages().untitledFilename,
+    document: { type: 'doc', content: [{ type: 'paragraph' }] },
+  };
 }

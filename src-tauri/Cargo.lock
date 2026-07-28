@@ -2307,6 +2307,10 @@ dependencies = [
 name = "papercanvas"
 version = "0.1.0"
 dependencies = [
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
+ "objc2-web-kit",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",

@@ -13,6 +13,7 @@ import {
   shouldCompleteRawLatexEnvironment,
   shouldCreateBlockFormula,
 } from "./formulaInput";
+import { getMessages } from "../i18n";
 
 export type FormulaKind = "inline" | "block";
 
@@ -61,7 +62,9 @@ export function validateLatex(
     });
     return null;
   } catch (error) {
-    return error instanceof Error ? error.message : "無法解析公式";
+    return error instanceof Error
+      ? error.message
+      : getMessages().formulaParseFailed;
   }
 }
 
@@ -150,13 +153,14 @@ class FormulaNodeView {
 
   private render(): void {
     if (this.editing) return;
+    const text = getMessages();
     this.dom.textContent = "";
     const latex = this.latex;
     const formula = document.createElement("span");
     formula.className = "formula-render";
     formula.setAttribute("role", "button");
     formula.tabIndex = 0;
-    formula.title = "點擊查看 LaTeX 原始碼與即時預覽";
+    formula.title = text.formulaInspect;
     formula.addEventListener("click", () => this.enterEditing());
     formula.addEventListener("keydown", (event) => {
       if (event.key === "Enter" || event.key === " ") {
@@ -170,7 +174,7 @@ class FormulaNodeView {
     const copy = document.createElement("button");
     copy.className = "formula-copy";
     copy.type = "button";
-    copy.setAttribute("aria-label", "複製 LaTeX");
+    copy.setAttribute("aria-label", text.copyLatex);
     copy.textContent = "LaTeX";
     copy.addEventListener("mousedown", (event) => event.preventDefault());
     copy.addEventListener("click", (event) => {
@@ -184,6 +188,7 @@ class FormulaNodeView {
 
   private enterEditing(): void {
     if (this.editing) return;
+    const text = getMessages();
     this.editing = true;
     this.dom.classList.add("is-editing");
     this.dom.textContent = "";
@@ -202,12 +207,13 @@ class FormulaNodeView {
     const header = document.createElement("span");
     header.className = "formula-editor__header";
     const label = document.createElement("span");
-    label.textContent = this.kind === "block" ? "數學式" : "行內數學式";
+    label.textContent =
+      this.kind === "block" ? text.blockMath : text.inlineMath;
     const done = document.createElement("button");
     done.className = "formula-editor__done";
     done.type = "button";
-    done.setAttribute("aria-label", "完成公式編輯");
-    done.title = "完成公式編輯（⌘/Ctrl + Enter）";
+    done.setAttribute("aria-label", text.finishFormula);
+    done.title = text.finishFormulaShortcut;
     done.textContent = "✓";
     done.addEventListener("click", () => this.finishEditing());
     header.append(label, done);
@@ -225,10 +231,7 @@ class FormulaNodeView {
 
     const source = document.createElement("textarea");
     source.className = "formula-editor__textarea";
-    source.setAttribute(
-      "aria-label",
-      `${this.kind === "block" ? "區塊" : "行內"}公式 LaTeX 原始碼`,
-    );
+    source.setAttribute("aria-label", text.formulaSource(this.kind));
     source.spellcheck = false;
     source.wrap = "off";
     source.value = this.latex;
@@ -236,7 +239,7 @@ class FormulaNodeView {
 
     const preview = document.createElement("span");
     preview.className = "formula-live-preview";
-    preview.setAttribute("aria-label", "公式即時預覽");
+    preview.setAttribute("aria-label", text.formulaPreview);
     this.renderPreview(preview, source.value);
 
     this.source = source;
@@ -299,14 +302,15 @@ class FormulaNodeView {
   }
 
   private renderPreview(container: HTMLElement, latex: string): void {
+    const text = getMessages();
     const error = validateLatex(latex, this.kind === "block");
     container.textContent = "";
     container.classList.toggle("formula-render--error", Boolean(error));
     if (error) {
       const source = document.createElement("code");
-      source.textContent = latex || "空公式";
+      source.textContent = latex || text.emptyFormula;
       const warning = document.createElement("small");
-      warning.textContent = `公式無法渲染：${error}`;
+      warning.textContent = text.formulaRenderFailed(error);
       container.append(source, warning);
       return;
     }

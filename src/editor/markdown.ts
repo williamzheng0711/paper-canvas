@@ -4,6 +4,7 @@ import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import remarkParse from "remark-parse";
 import remarkStringify from "remark-stringify";
+import { getMessages } from "../i18n";
 
 type MdNode = {
   type: string;
@@ -176,7 +177,10 @@ function unsupported(node: MdNode, reason?: string): JSONContent {
     .trimEnd();
   return {
     type: "unsupportedMarkdown",
-    attrs: { source, reason: reason ?? `不支援的 ${node.type} 結構。` },
+    attrs: {
+      source,
+      reason: reason ?? getMessages().unsupportedStructure(node.type),
+    },
   };
 }
 
@@ -350,7 +354,7 @@ function fromMdast(node: MdNode): JSONContent[] {
         },
       ];
     case "html":
-      return [unsupported(node, "HTML 不會執行，已按原文保留。")];
+      return [unsupported(node, getMessages().htmlPreserved)];
     default:
       return [unsupported(node)];
   }
@@ -493,6 +497,6 @@ export function collectOutline(
     .filter((node) => node.type === "heading")
     .map((node) => ({
       level: Number(node.attrs?.level ?? 1),
-      text: flattenText(node) || "未命名標題",
+      text: flattenText(node) || getMessages().unnamedHeading,
     }));
 }

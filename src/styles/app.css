@@ -1,8 +1,7 @@
 :root {
   color: #242426;
   background: #f7f5f1;
-  font-family:
-    Inter, 'Noto Sans CJK TC', 'PingFang TC', 'Microsoft JhengHei', system-ui, sans-serif;
+  font-family: Inter, "Noto Sans CJK TC", "PingFang TC", "Microsoft JhengHei", system-ui, sans-serif;
   font-synthesis: none;
 }
 
@@ -48,7 +47,7 @@ button {
   min-width: 800px;
   height: 100%;
   display: grid;
-  grid-template-rows: 44px 38px minmax(0, 1fr) 27px;
+  grid-template-rows: 44px minmax(0, 1fr) 27px;
   background: var(--surface);
   color: var(--text);
 }
@@ -73,7 +72,6 @@ button {
 }
 
 .topbar,
-.toolbar,
 .statusbar {
   display: flex;
   align-items: center;
@@ -86,7 +84,6 @@ button {
   background: var(--surface-raised);
 }
 .topbar button,
-.toolbar button,
 .sidebar button {
   border: 0;
   color: inherit;
@@ -94,13 +91,11 @@ button {
   border-radius: 5px;
 }
 .topbar button:not(.icon-button),
-.toolbar button,
 .export-menu summary {
   padding: 5px 7px;
   font-size: 13px;
 }
 .topbar button:hover,
-.toolbar button:hover,
 .sidebar button:hover,
 .export-menu summary:hover {
   background: var(--surface-muted);
@@ -146,7 +141,7 @@ button {
 .export-menu summary::after {
   margin-left: 4px;
   color: var(--muted);
-  content: '▾';
+  content: "▾";
   font-size: 9px;
 }
 .export-options {
@@ -187,26 +182,8 @@ button {
   border-radius: 4px;
   padding: 2px 3px;
 }
-
-.toolbar {
-  gap: 3px;
-  overflow-x: auto;
-  padding: 4px 12px;
-  border-bottom: 1px solid var(--line);
-  background: var(--surface);
-}
-.toolbar button {
-  white-space: nowrap;
-}
-.toolbar .is-active {
-  color: var(--accent);
-  background: var(--accent-soft);
-}
-.toolbar-separator {
-  width: 1px;
-  height: 20px;
-  margin: 0 4px;
-  background: var(--line);
+.language-control select {
+  width: 92px;
 }
 
 .workspace {
@@ -275,7 +252,7 @@ button {
 .paper-editor,
 .markdown-source-editor {
   width: calc(100% - 56px);
-  min-height: calc(100vh - 109px);
+  min-height: calc(100vh - 71px);
   margin: 0 auto;
   padding: 55px 38px 100px;
   border-right: 1px solid var(--line);
@@ -288,10 +265,10 @@ button {
   caret-color: var(--accent);
 }
 .font-serif .paper-editor {
-  font-family: Charter, 'Noto Serif CJK TC', 'Songti TC', serif;
+  font-family: Charter, "Noto Serif CJK TC", "Songti TC", serif;
 }
 .font-mono .paper-editor {
-  font-family: 'SFMono-Regular', Consolas, 'Noto Sans Mono CJK TC', monospace;
+  font-family: "SFMono-Regular", Consolas, "Noto Sans Mono CJK TC", monospace;
 }
 .paper-editor > :first-child {
   margin-top: 0;
@@ -403,23 +380,20 @@ button {
   margin: 1em auto;
   border-radius: 4px;
 }
-.image-file-input {
-  display: none;
-}
-.paper-editor [data-resize-container][data-node='image'] {
+.paper-editor [data-resize-container][data-node="image"] {
   max-width: 100%;
   margin: 1em auto;
 }
-.paper-editor [data-resize-container][data-node='image'] [data-resize-wrapper] {
+.paper-editor [data-resize-container][data-node="image"] [data-resize-wrapper] {
   max-width: 100%;
 }
-.paper-editor [data-resize-container][data-node='image'] img {
+.paper-editor [data-resize-container][data-node="image"] img {
   max-width: 100%;
   margin: 0;
   border: 1px solid transparent;
 }
-.paper-editor [data-resize-container][data-node='image']:hover img,
-.paper-editor [data-resize-container][data-node='image'].ProseMirror-selectednode img {
+.paper-editor [data-resize-container][data-node="image"]:hover img,
+.paper-editor [data-resize-container][data-node="image"].ProseMirror-selectednode img {
   border-color: var(--accent);
 }
 .paper-editor [data-resize-handle] {
@@ -432,37 +406,37 @@ button {
   background: var(--surface-raised);
   transition: opacity 120ms ease;
 }
-.paper-editor [data-resize-container][data-node='image']:hover [data-resize-handle],
+.paper-editor [data-resize-container][data-node="image"]:hover [data-resize-handle],
 .paper-editor [data-resize-container].ProseMirror-selectednode [data-resize-handle],
-.paper-editor [data-resize-container][data-resize-state='true'] [data-resize-handle] {
+.paper-editor [data-resize-container][data-resize-state="true"] [data-resize-handle] {
   opacity: 1;
 }
-.paper-editor [data-resize-handle='top-left'] {
+.paper-editor [data-resize-handle="top-left"] {
   cursor: nwse-resize;
   transform: translate(-50%, -50%);
 }
-.paper-editor [data-resize-handle='top-right'] {
+.paper-editor [data-resize-handle="top-right"] {
   cursor: nesw-resize;
   transform: translate(50%, -50%);
 }
-.paper-editor [data-resize-handle='bottom-left'] {
+.paper-editor [data-resize-handle="bottom-left"] {
   cursor: nesw-resize;
   transform: translate(-50%, 50%);
 }
-.paper-editor [data-resize-handle='bottom-right'] {
+.paper-editor [data-resize-handle="bottom-right"] {
   cursor: nwse-resize;
   transform: translate(50%, 50%);
 }
-.paper-editor ul[data-type='taskList'] {
+.paper-editor ul[data-type="taskList"] {
   padding: 0;
   list-style: none;
 }
-.paper-editor ul[data-type='taskList'] li {
+.paper-editor ul[data-type="taskList"] li {
   display: flex;
   align-items: baseline;
   gap: 7px;
 }
-.paper-editor ul[data-type='taskList'] label {
+.paper-editor ul[data-type="taskList"] label {
   flex: 0 0 auto;
 }
 
@@ -672,7 +646,7 @@ button {
   outline: none;
 }
 .markdown-source-editor .cm-scroller {
-  font-family: 'SFMono-Regular', Consolas, 'Noto Sans Mono CJK TC', monospace;
+  font-family: "SFMono-Regular", Consolas, "Noto Sans Mono CJK TC", monospace;
   line-height: 1.65;
 }
 .markdown-source-editor .cm-content {
@@ -739,7 +713,7 @@ button {
   }
   .file-actions button:nth-child(4),
   .file-actions button:nth-child(5),
-  .compact-control {
+  .compact-control:not(.language-control) {
     display: none;
   }
   .sidebar {
@@ -767,11 +741,12 @@ button {
     margin: 18mm 20mm 20mm;
   }
 
+  :root,
   html,
   body,
   #root {
     height: auto;
-    background: #fff;
+    background: #fff !important;
   }
   .app-shell {
     display: block;
@@ -781,10 +756,8 @@ button {
     color: #111;
   }
   .topbar,
-  .toolbar,
   .sidebar,
-  .statusbar,
-  .image-file-input {
+  .statusbar {
     display: none !important;
   }
   .workspace,

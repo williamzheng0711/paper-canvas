@@ -1,4 +1,5 @@
 import { Node, mergeAttributes, type NodeViewRendererProps } from '@tiptap/core';
+import { getMessages } from '../i18n';
 
 class UnsupportedMarkdownView {
   dom: HTMLElement;
@@ -28,13 +29,12 @@ class UnsupportedMarkdownView {
   }
 
   private render(): void {
+    const text = getMessages();
     this.dom.textContent = '';
     const title = document.createElement('strong');
-    title.textContent = '未支援的 Markdown 已保留';
+    title.textContent = text.unsupportedMarkdownTitle;
     const reason = document.createElement('span');
-    reason.textContent = String(
-      this.node.attrs.reason ?? '此內容未納入 PaperCanvas Markdown 子集。',
-    );
+    reason.textContent = String(this.node.attrs.reason ?? text.unsupportedMarkdownReason);
     const source = document.createElement('pre');
     source.textContent = String(this.node.attrs.source ?? '');
     this.dom.append(title, reason, source);
