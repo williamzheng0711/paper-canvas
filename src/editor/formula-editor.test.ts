@@ -38,6 +38,90 @@ describe("inline formula input rule", () => {
     expect(JSON.stringify(json)).not.toContain("$x^2 + 1$");
   });
 
+  it("lets the block rule win when both formula extensions receive sequential $$ input", () => {
+    const editor = new Editor({
+      extensions: [StarterKit, InlineFormula, BlockFormula],
+      content: { type: "doc", content: [{ type: "paragraph" }] },
+    });
+    editors.push(editor);
+
+    typeThroughInputRules(editor, "$$f(x)$$");
+
+    const formulas = editor
+      .getJSON()
+      .content?.filter((node) => node.type === "blockFormula");
+    expect(formulas).toEqual([
+      expect.objectContaining({
+        attrs: expect.objectContaining({ latex: "f(x)" }),
+      }),
+    ]);
+    expect(JSON.stringify(editor.getJSON())).not.toContain("inlineFormula");
+  });
+
+  it("normalizes content inserted between four existing dollar signs", () => {
+    const editor = new Editor({
+      extensions: [StarterKit, InlineFormula, BlockFormula],
+      content: "<p>$$$$</p>",
+    });
+    editors.push(editor);
+    editor.commands.setTextSelection(3);
+
+    editor.commands.insertContent("f(x)");
+
+    expect(editor.getJSON().content?.[0]).toMatchObject({
+      type: "blockFormula",
+      attrs: { latex: "f(x)" },
+    });
+  });
+
+  it("keeps rapid follow-up typing inside a pre-delimited formula source", () => {
+    const frames: FrameRequestCallback[] = [];
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      frames.push(callback);
+      return frames.length;
+    });
+    const editor = new Editor({
+      extensions: [StarterKit, InlineFormula, BlockFormula],
+      content: "<p>$$$$</p>",
+    });
+    editors.push(editor);
+    editor.commands.setTextSelection(3);
+
+    editor.commands.insertContent("f");
+    while (frames.length > 0) frames.shift()?.(0);
+
+    const source = editor.view.dom.querySelector<HTMLTextAreaElement>(
+      ".formula-editor__textarea",
+    );
+    expect(source).not.toBeNull();
+    expect(source?.selectionStart).toBe(1);
+
+    source!.value = "f(x)";
+    source!.setSelectionRange(4, 4);
+    source!.dispatchEvent(new Event("input", { bubbles: true }));
+
+    expect(editor.getJSON().content?.[0].attrs?.latex).toBe("f(x)");
+  });
+
+  it("starts a supported standalone environment as an editable block formula", () => {
+    const editor = new Editor({
+      extensions: [StarterKit, InlineFormula, BlockFormula],
+      content: { type: "doc", content: [{ type: "paragraph" }] },
+    });
+    editors.push(editor);
+
+    typeThroughInputRules(editor, "\\begin{equation}");
+
+    expect(editor.getJSON().content?.[0]).toMatchObject({
+      type: "blockFormula",
+      attrs: {
+        latex: "\\begin{equation}\\end{equation}",
+        autoEdit: true,
+        sourceCaret: "\\begin{equation}".length,
+      },
+    });
+  });
+
   it("keeps incomplete display delimiters as text, then atomically replaces a completed line", () => {
     const editor = new Editor({
       extensions: [StarterKit, BlockFormula],

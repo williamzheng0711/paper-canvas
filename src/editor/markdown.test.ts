@@ -95,6 +95,27 @@ S(\\theta')\\le n\\ \\text{MB},
     expect(nodesOfType(reopened, "blockFormula")).toHaveLength(2);
   });
 
+  it("imports standalone LaTeX display environments and keeps their wrappers", () => {
+    const source = `Before
+
+\\begin{equation}
+f(x)=x^2
+\\end{equation}
+
+\\begin{align}a&=b\\\\c&=d\\end{align}
+
+After`;
+
+    const document = markdownToDocument(source);
+    const blocks = nodesOfType(document, "blockFormula");
+    expect(blocks.map((node) => node.attrs?.latex)).toEqual([
+      "\\begin{equation}\nf(x)=x^2\n\\end{equation}",
+      "\\begin{align}a&=b\\\\c&=d\\end{align}",
+    ]);
+    expect(documentToMarkdown(document)).toContain("\\begin{equation}");
+    expect(nodesOfType(document, "unsupportedMarkdown")).toHaveLength(0);
+  });
+
   it("does not reinterpret Typora delimiters inside code or an unmatched display block", () => {
     const source = `Inline code: \`\\(notMath\\)\`
 
@@ -106,11 +127,20 @@ x
 \\]
 \`\`\`
 
+\`\`\`tex
+\\begin{equation}
+x
+\\end{equation}
+\`\`\`
+
 $$
 \\text{literal delimiters } \\(x\\)
 $$
 
 \\[
+unclosed
+
+\\begin{equation}
 unclosed`;
 
     expect(normalizeLatexDelimiters(source)).toBe(source);

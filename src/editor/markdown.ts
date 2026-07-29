@@ -5,6 +5,7 @@ import remarkMath from "remark-math";
 import remarkParse from "remark-parse";
 import remarkStringify from "remark-stringify";
 import { getMessages } from "../i18n";
+import { isDisplayLatexEnvironment } from "./formulaInput";
 
 type MdNode = {
   type: string;
@@ -100,8 +101,21 @@ export function normalizeLatexDelimiters(markdown: string): string {
   let bracketOpeningIndex: number | null = null;
   let bracketOpeningSource = "";
   let dollarDisplayBlock = false;
+  let latexEnvironment: { name: string; openingIndex: number } | null = null;
 
   for (const line of lines) {
+    if (latexEnvironment !== null) {
+      normalized.push(line);
+      if (
+        new RegExp(
+          `\\\\end\\{${latexEnvironment.name.replace("*", "\\\\*")}\\}\\s*$`,
+        ).test(line)
+      ) {
+        normalized.push("$$");
+        latexEnvironment = null;
+      }
+      continue;
+    }
     if (bracketOpeningIndex !== null) {
       if (/^\s*\\\]\s*$/.test(line)) {
         normalized.push("$$");
@@ -158,6 +172,24 @@ export function normalizeLatexDelimiters(markdown: string): string {
       normalized.push("$$");
       continue;
     }
+
+    const environmentOpening = /^\s*\\begin\{([A-Za-z][A-Za-z0-9_*-]*)\}/.exec(
+      line,
+    );
+    if (
+      environmentOpening &&
+      isDisplayLatexEnvironment(environmentOpening[1])
+    ) {
+      const name = environmentOpening[1];
+      const closing = new RegExp(
+        `\\\\end\\{${name.replace("*", "\\\\*")}\\}\\s*$`,
+      );
+      const openingIndex = normalized.length;
+      normalized.push("$$", line);
+      if (closing.test(line)) normalized.push("$$");
+      else latexEnvironment = { name, openingIndex };
+      continue;
+    }
     normalized.push(normalizeInlineLatexDelimiters(line));
   }
 
@@ -165,6 +197,8 @@ export function normalizeLatexDelimiters(markdown: string): string {
   // so malformed input is retained verbatim instead of being reinterpreted.
   if (bracketOpeningIndex !== null)
     normalized[bracketOpeningIndex] = bracketOpeningSource;
+  if (latexEnvironment !== null)
+    normalized.splice(latexEnvironment.openingIndex, 1);
   return normalized.join("\n");
 }
 

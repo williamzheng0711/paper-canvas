@@ -6,9 +6,12 @@ import {
   type NodeViewRendererProps,
 } from "@tiptap/core";
 import { NodeSelection, TextSelection } from "@tiptap/pm/state";
+import { Plugin } from "@tiptap/pm/state";
 import katex from "katex";
 import {
   displayFormulaFromDelimitedLine,
+  displayFormulaAfterTextInsertion,
+  isDisplayLatexEnvironment,
   latexEnvironmentClosure,
   shouldCompleteRawLatexEnvironment,
   shouldCreateBlockFormula,
@@ -103,6 +106,13 @@ class FormulaNodeView {
     this.dom.contentEditable = "false";
     this.dom.dataset.formulaKind = kind;
     this.render();
+    if (this.node.attrs.autoEdit) {
+      const caret = Number(this.node.attrs.sourceCaret);
+      requestAnimationFrame(() => {
+        this.enterEditing(Number.isFinite(caret) ? caret : this.latex.length);
+        this.clearAutomaticEditingRequest();
+      });
+    }
   }
 
   update(node: NodeViewRendererProps["node"]): boolean {
@@ -186,7 +196,7 @@ class FormulaNodeView {
     this.dom.append(formula, copy);
   }
 
-  private enterEditing(): void {
+  private enterEditing(initialCaret = this.latex.length): void {
     if (this.editing) return;
     const text = getMessages();
     this.editing = true;
@@ -260,12 +270,30 @@ class FormulaNodeView {
     sourceBox.append(opening, source, closing);
     panel.append(header, sourceBox, preview);
     this.dom.appendChild(panel);
-    requestAnimationFrame(() => {
+    const focusSource = () => {
       if (this.source === source) {
         source.focus();
-        source.setSelectionRange(source.value.length, source.value.length);
+        const caret = Math.max(0, Math.min(source.value.length, initialCaret));
+        source.setSelectionRange(caret, caret);
       }
-    });
+    };
+    // Automatically created formulas already enter editing from a queued
+    // animation frame. Focus synchronously once the node view is connected so
+    // the next physical keystroke cannot replace the new formula atom.
+    if (this.dom.isConnected) focusSource();
+    else requestAnimationFrame(focusSource);
+  }
+
+  private clearAutomaticEditingRequest(): void {
+    const position = this.position();
+    if (position === null || !this.node.attrs.autoEdit) return;
+    this.view.dispatch(
+      this.view.state.tr.setNodeMarkup(position, undefined, {
+        ...this.node.attrs,
+        autoEdit: false,
+        sourceCaret: null,
+      }),
+    );
   }
 
   private finishEditing(): void {
@@ -417,7 +445,11 @@ function createFormulaNode(
     defining: true,
 
     addAttributes() {
-      return { latex: { default: "" } };
+      return {
+        latex: { default: "" },
+        autoEdit: { default: false, rendered: false },
+        sourceCaret: { default: null, rendered: false },
+      };
     },
 
     parseHTML() {
@@ -445,6 +477,33 @@ function createFormulaNode(
     addInputRules() {
       if (kind === "block") {
         return [
+          new InputRule({
+            find: /\\begin\{([A-Za-z][A-Za-z0-9_*-]*)\}$/,
+            handler: ({ state, range, match }) => {
+              const begin = match[0];
+              const environment = match[1];
+              const closure = latexEnvironmentClosure(begin);
+              const $from = state.doc.resolve(range.to);
+              const virtualParentText = `${$from.parent.textContent}${begin.at(-1) ?? ""}`;
+              if (
+                !closure ||
+                !isDisplayLatexEnvironment(environment) ||
+                $from.parent.type.name !== "paragraph" ||
+                virtualParentText !== begin
+              ) {
+                return null;
+              }
+              state.tr.replaceWith(
+                $from.before(),
+                $from.after(),
+                this.type.create({
+                  latex: `${begin}${closure}`,
+                  autoEdit: true,
+                  sourceCaret: begin.length,
+                }),
+              );
+            },
+          }),
           new InputRule({
             find: /\$\$([^$\n]+)\$\$$/,
             handler: ({ state, range, match }) => {
@@ -504,6 +563,19 @@ function createFormulaNode(
           handler: ({ state, range, match }) => {
             const latex = match[1]?.trim();
             if (!latex) return null;
+            const $start = state.doc.resolve(range.from);
+            // In `$$...$$`, the inline regexp can see the inner `$...$` one
+            // keystroke before the display delimiter is complete. Leave that
+            // match alone so the block rule receives the final `$`.
+            if (
+              $start.parentOffset > 0 &&
+              $start.parent.textBetween(
+                $start.parentOffset - 1,
+                $start.parentOffset,
+              ) === "$"
+            ) {
+              return null;
+            }
             // InputRule handlers must update the transaction handed to them.
             // A normal editor command can create a separate transaction, which
             // leaves the source delimiters visible during real text input.
@@ -511,6 +583,49 @@ function createFormulaNode(
               range.from,
               range.to,
               this.type.create({ latex }),
+            );
+          },
+        }),
+      ];
+    },
+
+    addProseMirrorPlugins() {
+      if (kind !== "block") return [];
+      return [
+        new Plugin({
+          appendTransaction: (transactions, _oldState, newState) => {
+            if (!transactions.some((transaction) => transaction.docChanged))
+              return null;
+            const selection = newState.selection;
+            if (!(selection instanceof TextSelection) || !selection.empty)
+              return null;
+            const $cursor = selection.$from;
+            if ($cursor.parent.type.name !== "paragraph") return null;
+            const parsed = displayFormulaAfterTextInsertion({
+              parentText: $cursor.parent.textContent,
+              from: $cursor.parentOffset,
+              to: $cursor.parentOffset,
+              insertedText: "",
+            });
+            if (!parsed) return null;
+
+            // A complete formula whose delimiters were already to the right of
+            // the caret must remain editable so the next keystroke continues in
+            // the formula instead of replacing the new atom.
+            const insideDelimitedSource =
+              $cursor.parent.textContent.startsWith("$$") &&
+              $cursor.parentOffset >= 2 &&
+              $cursor.parentOffset <= $cursor.parent.content.size - 2;
+            return newState.tr.replaceWith(
+              $cursor.before(),
+              $cursor.after(),
+              this.type.create({
+                latex: parsed.latex,
+                autoEdit: insideDelimitedSource,
+                sourceCaret: insideDelimitedSource
+                  ? $cursor.parentOffset - 2
+                  : null,
+              }),
             );
           },
         }),

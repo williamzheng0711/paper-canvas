@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   displayFormulaFromDelimitedLine,
+  displayFormulaAfterTextInsertion,
+  displayFormulaFromLatexEnvironment,
   formulaFromClipboard,
   latexEnvironmentClosure,
   shouldCompleteRawLatexEnvironment,
@@ -28,6 +30,29 @@ describe('formula text entry and clipboard recognition', () => {
     expect(displayFormulaFromDelimitedLine('$$f(x)=x^2$$')).toBe('f(x)=x^2');
     expect(displayFormulaFromDelimitedLine('$$')).toBeNull();
     expect(displayFormulaFromDelimitedLine('$$1+1=2')).toBeNull();
+  });
+
+  it('recognizes content inserted between pre-existing display delimiters', () => {
+    expect(
+      displayFormulaAfterTextInsertion({
+        parentText: '$$$$',
+        from: 2,
+        to: 2,
+        insertedText: 'f(x)',
+      }),
+    ).toEqual({ latex: 'f(x)', caret: 4 });
+  });
+
+  it('recognizes supported standalone LaTeX display environments', () => {
+    const equation = '\\begin{equation}f(x)\\end{equation}';
+    expect(displayFormulaFromLatexEnvironment(equation)).toBe(equation);
+    expect(formulaFromClipboard('\\begin{align}a&=b\\\\c&=d\\end{align}')).toMatchObject({ kind: 'block' });
+    expect(formulaFromClipboard('\\begin{equation}')).toEqual({
+      kind: 'block',
+      latex: '\\begin{equation}\\end{equation}',
+      sourceCaret: '\\begin{equation}'.length,
+    });
+    expect(displayFormulaFromLatexEnvironment('\\begin{unknown}f(x)\\end{unknown}')).toBeNull();
   });
 
   it('closes a freshly typed LaTeX environment inside a raw inline formula only', () => {

@@ -1,5 +1,39 @@
 import type { FormulaKind } from "./Formula";
 
+const displayLatexEnvironments = new Set([
+  "equation",
+  "equation*",
+  "align",
+  "align*",
+  "aligned",
+  "alignedat",
+  "gather",
+  "gather*",
+  "gathered",
+  "split",
+  "cases",
+  "matrix",
+  "pmatrix",
+  "bmatrix",
+  "Bmatrix",
+  "vmatrix",
+  "Vmatrix",
+]);
+
+export function isDisplayLatexEnvironment(name: string): boolean {
+  return displayLatexEnvironments.has(name);
+}
+
+/** Returns a complete standalone display environment, including its wrappers. */
+export function displayFormulaFromLatexEnvironment(
+  text: string,
+): string | null {
+  const latex = text.trim();
+  const opening = /^\\begin\{([A-Za-z][A-Za-z0-9_*-]*)\}/.exec(latex);
+  if (!opening || !isDisplayLatexEnvironment(opening[1])) return null;
+  return latex.endsWith(`\\end{${opening[1]}}`) ? latex : null;
+}
+
 export function shouldCreateBlockFormula(input: {
   text: string;
   parentType: string;
@@ -23,6 +57,31 @@ export function displayFormulaFromDelimitedLine(text: string): string | null {
   const match = /^\$\$([^$\n]+)\$\$$/.exec(text);
   const latex = match?.[1]?.trim();
   return latex || null;
+}
+
+/**
+ * Finds a completed display formula after an insertion anywhere in one plain
+ * paragraph. This is needed when the closing `$$` already exists to the right
+ * of the caret, so an end-anchored input rule cannot see it.
+ */
+export function displayFormulaAfterTextInsertion(input: {
+  parentText: string;
+  from: number;
+  to: number;
+  insertedText: string;
+}): { latex: string; caret: number } | null {
+  const nextText = `${input.parentText.slice(0, input.from)}${input.insertedText}${input.parentText.slice(input.to)}`;
+  const latex =
+    displayFormulaFromDelimitedLine(nextText) ??
+    displayFormulaFromLatexEnvironment(nextText);
+  if (latex === null) return null;
+
+  const delimited = nextText.startsWith("$$");
+  const caret = input.from + input.insertedText.length - (delimited ? 2 : 0);
+  return {
+    latex,
+    caret: Math.max(0, Math.min(latex.length, caret)),
+  };
 }
 
 /** Returns the matching closing command after a just-completed TeX environment. */
@@ -53,7 +112,7 @@ export function shouldCompleteRawLatexEnvironment(input: {
 
 export function formulaFromClipboard(
   text: string,
-): { kind: FormulaKind; latex: string } | null {
+): { kind: FormulaKind; latex: string; sourceCaret?: number } | null {
   const trimmed = text.trim();
   const block = /^\$\$\s*([\s\S]+?)\s*\$\$$/.exec(trimmed);
   if (block?.[1]) return { kind: "block", latex: block[1] };
@@ -63,12 +122,24 @@ export function formulaFromClipboard(
   // Do not keep an allow-list here: common research notation such as \mathcal,
   // \sum, and package-neutral operators would otherwise be pasted as plain text.
   if (/\\[A-Za-z]+/.test(trimmed)) {
+    const environment = /^\\begin\{([A-Za-z][A-Za-z0-9_*-]*)\}/.exec(
+      trimmed,
+    )?.[1];
+    if (
+      environment !== undefined &&
+      isDisplayLatexEnvironment(environment) &&
+      trimmed === `\\begin{${environment}}`
+    ) {
+      return {
+        kind: "block",
+        latex: `${trimmed}\\end{${environment}}`,
+        sourceCaret: trimmed.length,
+      };
+    }
     return {
       kind:
         trimmed.includes("\n") ||
-        /\\begin\{(?:aligned|align|cases|matrix|pmatrix|bmatrix|vmatrix|Vmatrix)\}/.test(
-          trimmed,
-        )
+        (environment !== undefined && isDisplayLatexEnvironment(environment))
           ? "block"
           : "inline",
       latex: trimmed,

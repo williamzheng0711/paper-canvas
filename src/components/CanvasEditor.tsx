@@ -104,7 +104,15 @@ export function CanvasEditor({ language, documentId, initialDocument, onChange }
           const formulaNode = view.state.schema.nodes[formula.kind === 'block' ? 'blockFormula' : 'inlineFormula'];
           if (!formulaNode) return false;
           view.dispatch(
-            view.state.tr.replaceSelectionWith(formulaNode.create({ latex: formula.latex })).scrollIntoView(),
+            view.state.tr
+              .replaceSelectionWith(
+                formulaNode.create({
+                  latex: formula.latex,
+                  autoEdit: formula.sourceCaret !== undefined,
+                  sourceCaret: formula.sourceCaret ?? null,
+                }),
+              )
+              .scrollIntoView(),
           );
           view.focus();
           return true;

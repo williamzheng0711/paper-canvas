@@ -9,6 +9,12 @@ import {
 describe("formula safety and cursor boundaries", () => {
   it("accepts matrices, cases, aligned equations, and Chinese-adjacent inline math", () => {
     expect(
+      validateLatex("\\begin{equation}f(x)\\end{equation}", true),
+    ).toBeNull();
+    expect(
+      validateLatex("\\begin{align}a&=b\\\\c&=d\\end{align}", true),
+    ).toBeNull();
+    expect(
       validateLatex("\\begin{matrix}a & b\\\\ c & d\\end{matrix}"),
     ).toBeNull();
     expect(
