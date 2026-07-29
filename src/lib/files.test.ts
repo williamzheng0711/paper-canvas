@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
   documentToPortableMarkdown,
+  hideRecentFile,
   isMarkdownFilePath,
+  loadRecent,
+  rememberRecent,
   renameDocumentAssetReferences,
 } from './files';
 
@@ -16,15 +19,29 @@ describe('image asset references', () => {
       ],
     };
 
-    const renamed = renameDocumentAssetReferences(
-      document,
-      '/Users/example/notes.md',
-      '/Users/example/proposal.md',
-    );
+    const renamed = renameDocumentAssetReferences(document, '/Users/example/notes.md', '/Users/example/proposal.md');
 
     expect(renamed.content?.[1]?.attrs?.src).toBe('proposal.assets/image-1.png');
     expect(renamed.content?.[2]?.attrs?.src).toBe('https://example.com/remote.png');
     expect(document.content?.[1]?.attrs?.src).toBe('notes.assets/image-1.png');
+  });
+});
+
+describe('recent documents', () => {
+  it('persists hiding one item while preserving the remaining order', async () => {
+    localStorage.setItem(
+      'recentFiles',
+      JSON.stringify([
+        { path: '/tmp/first.md', name: 'first.md' },
+        { path: '/tmp/second.md', name: 'second.md' },
+      ]),
+    );
+
+    await expect(hideRecentFile('/tmp/first.md')).resolves.toEqual([{ path: '/tmp/second.md', name: 'second.md' }]);
+    await expect(loadRecent()).resolves.toEqual([{ path: '/tmp/second.md', name: 'second.md' }]);
+
+    await rememberRecent({ path: '/tmp/first.md', name: 'first.md' });
+    await expect(loadRecent()).resolves.toEqual([{ path: '/tmp/second.md', name: 'second.md' }]);
   });
 });
 

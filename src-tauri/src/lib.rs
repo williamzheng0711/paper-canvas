@@ -3,6 +3,9 @@ use std::{
     sync::Mutex,
 };
 
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+use std::process::Command;
+
 #[cfg(target_os = "macos")]
 use std::{
     fs::File,
@@ -93,6 +96,37 @@ fn take_opened_files(app: AppHandle) -> Vec<String> {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     std::mem::take(&mut *paths)
+}
+
+#[tauri::command]
+fn show_in_folder(path: String) -> Result<(), String> {
+    let target = supported_markdown_path(PathBuf::from(path))
+        .ok_or_else(|| "The recent Markdown document no longer exists.".to_string())?;
+
+    #[cfg(target_os = "macos")]
+    return Command::new("open")
+        .arg("-R")
+        .arg(target)
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("Could not show the document in its folder: {error}"));
+
+    #[cfg(target_os = "windows")]
+    return Command::new("explorer")
+        .arg(format!("/select,{}", target.display()))
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("Could not show the document in its folder: {error}"));
+
+    #[cfg(target_os = "linux")]
+    return Command::new("xdg-open")
+        .arg(target.parent().unwrap_or(Path::new(".")))
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("Could not show the document folder: {error}"));
+
+    #[allow(unreachable_code)]
+    Err("Showing a document in its folder is unavailable on this platform.".to_string())
 }
 
 #[cfg(target_os = "macos")]
@@ -289,7 +323,11 @@ pub fn run() {
             record_opened_files(app.handle(), initial_files.clone());
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![take_opened_files, export_pdf])
+        .invoke_handler(tauri::generate_handler![
+            take_opened_files,
+            show_in_folder,
+            export_pdf
+        ])
         .build(tauri::generate_context!())
         .expect("error while building PaperCanvas")
         .run(|app, event| {

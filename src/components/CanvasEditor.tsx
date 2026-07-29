@@ -15,6 +15,7 @@ import { replaceDocumentPreservingSelection } from '../editor/documentSync';
 import { formulaFromClipboard } from '../editor/formulaInput';
 import { sanitizePastedHtml } from '../editor/paste';
 import { PaperImage } from '../editor/PaperImage';
+import { scrollToOutlineHeading } from '../editor/outline';
 import { UnsupportedMarkdown } from '../editor/UnsupportedMarkdown';
 import { getMessages, type Language } from '../i18n';
 
@@ -24,6 +25,7 @@ type Props = {
   language: Language;
   documentId: number;
   initialDocument: JSONContent;
+  outlineTarget?: { index: number; request: number };
   onChange: (document: JSONContent) => void;
 };
 
@@ -48,7 +50,7 @@ function insertImage(view: EditorView, src: string, alt = '', position?: number)
   view.focus();
 }
 
-export function CanvasEditor({ language, documentId, initialDocument, onChange }: Props) {
+export function CanvasEditor({ language, documentId, initialDocument, outlineTarget, onChange }: Props) {
   const text = getMessages(language);
   const initialDocumentRef = useRef(initialDocument);
   initialDocumentRef.current = initialDocument;
@@ -137,6 +139,11 @@ export function CanvasEditor({ language, documentId, initialDocument, onChange }
     if (!editor) return;
     replaceDocumentPreservingSelection(editor, initialDocumentRef.current);
   }, [documentId, editor]);
+
+  useEffect(() => {
+    if (!editor || !outlineTarget) return;
+    scrollToOutlineHeading(editor.view.dom, outlineTarget.index);
+  }, [editor, outlineTarget]);
 
   return <EditorContent editor={editor} />;
 }

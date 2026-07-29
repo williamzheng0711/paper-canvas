@@ -14,12 +14,14 @@ import {
   documentToPortableMarkdown,
   exportMarkdownFile,
   exportPdfFile,
+  hideRecentFile,
   loadDraft,
   loadPreferences,
   loadRecent,
   newEditorFile,
   openMarkdownFile,
   openRecent,
+  revealFileInFolder,
   renameEditorFile,
   saveEditorFile,
   saveDraft,
@@ -30,6 +32,7 @@ import {
 } from './lib/files';
 
 type SaveStatus = 'saved' | 'saving' | 'draft' | 'error' | 'unsaved';
+type RecentContextMenu = { item: RecentFile; x: number; y: number };
 
 function documentMetrics(document: JSONContent): {
   characters: number;
@@ -54,6 +57,11 @@ export default function App() {
   const [saveStatus, setSaveStatus] = useState<SaveStatus>('saved');
   const [message, setMessage] = useState(() => getMessages().localOnly);
   const [recent, setRecent] = useState<RecentFile[]>([]);
+  const [recentContextMenu, setRecentContextMenu] = useState<RecentContextMenu | null>(null);
+  const [outlineTarget, setOutlineTarget] = useState<{
+    index: number;
+    request: number;
+  }>();
   const [sourceMode, setSourceMode] = useState(false);
   const [rawMarkdown, setRawMarkdown] = useState('');
   const [pdfExporting, setPdfExporting] = useState(false);
@@ -77,6 +85,7 @@ export default function App() {
   const openedByOperatingSystem = useRef(false);
   const recentExternalOpen = useRef(new Map<string, number>());
   const exportMenu = useRef<HTMLDetailsElement>(null);
+  const outlineRequest = useRef(0);
   const pdfExportingRef = useRef(false);
   fileRef.current = file;
   dirtyRef.current = dirty;
@@ -132,6 +141,24 @@ export default function App() {
     setCurrentLanguage(preferences.language);
     document.documentElement.lang = preferences.language;
   }, [preferences.language]);
+
+  useEffect(() => {
+    if (!recentContextMenu) return;
+    const close = () => setRecentContextMenu(null);
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') close();
+    };
+    window.addEventListener('blur', close);
+    window.addEventListener('resize', close);
+    document.addEventListener('pointerdown', close);
+    document.addEventListener('keydown', closeOnEscape);
+    return () => {
+      window.removeEventListener('blur', close);
+      window.removeEventListener('resize', close);
+      document.removeEventListener('pointerdown', close);
+      document.removeEventListener('keydown', closeOnEscape);
+    };
+  }, [recentContextMenu]);
 
   useEffect(() => {
     const title = `${dirty ? '● ' : ''}${file.name} — PaperCanvas`;
@@ -300,6 +327,39 @@ export default function App() {
     }
   }, [replaceWithOpenedFile]);
 
+  const openRecentFile = useCallback(
+    async (item: RecentFile) => {
+      setRecentContextMenu(null);
+      try {
+        const nextFile = await openRecent(item);
+        await replaceWithOpenedFile(nextFile);
+      } catch (error) {
+        setMessage(error instanceof Error ? error.message : getMessages().recentOpenFailed);
+      }
+    },
+    [replaceWithOpenedFile],
+  );
+
+  const revealRecentFile = useCallback(async (item: RecentFile) => {
+    setRecentContextMenu(null);
+    try {
+      await revealFileInFolder(item.path);
+      setMessage(getMessages().revealedFile(item.name));
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : getMessages().revealFailed);
+    }
+  }, []);
+
+  const hideRecent = useCallback(async (item: RecentFile) => {
+    setRecentContextMenu(null);
+    try {
+      setRecent(await hideRecentFile(item.path));
+      setMessage(getMessages().hiddenRecentFile(item.name));
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : getMessages().hideRecentFailed);
+    }
+  }, []);
+
   useEffect(() => {
     if (!isTauri()) return;
     let active = true;
@@ -408,6 +468,26 @@ export default function App() {
 
   const closeExportMenu = () => exportMenu.current?.removeAttribute('open');
 
+  const jumpToOutline = (index: number) => {
+    if (sourceMode) {
+      try {
+        const nextDocument = markdownToDocument(rawMarkdownRef.current);
+        const nextFile = { ...fileRef.current, document: nextDocument };
+        fileRef.current = nextFile;
+        setFile(nextFile);
+        setDocumentId((id) => id + 1);
+        markEdited();
+        sourceModeRef.current = false;
+        setSourceMode(false);
+      } catch (error) {
+        setMessage(error instanceof Error ? error.message : getMessages().markdownParseFailed);
+        return;
+      }
+    }
+    outlineRequest.current += 1;
+    setOutlineTarget({ index, request: outlineRequest.current });
+  };
+
   const exportMarkdown = useCallback(async () => {
     closeExportMenu();
     try {
@@ -483,12 +563,7 @@ export default function App() {
               <button role="menuitem" onClick={() => void exportMarkdown()}>
                 Markdown (.md)
               </button>
-              <button
-                role="menuitem"
-                aria-busy={pdfExporting}
-                disabled={pdfExporting}
-                onClick={() => void exportPdf()}
-              >
+              <button role="menuitem" aria-busy={pdfExporting} disabled={pdfExporting} onClick={() => void exportPdf()}>
                 PDF (.pdf)
               </button>
             </div>
@@ -581,13 +656,17 @@ export default function App() {
                     <li key={item.path}>
                       <button
                         title={item.path}
-                        onClick={() =>
-                          void openRecent(item)
-                            .then(loadFile)
-                            .catch((error: unknown) =>
-                              setMessage(error instanceof Error ? error.message : getMessages().recentOpenFailed),
-                            )
-                        }
+                        onClick={() => void openRecentFile(item)}
+                        onContextMenu={(event) => {
+                          event.preventDefault();
+                          const menuWidth = 196;
+                          const menuHeight = 116;
+                          setRecentContextMenu({
+                            item,
+                            x: Math.max(8, Math.min(event.clientX, window.innerWidth - menuWidth - 8)),
+                            y: Math.max(8, Math.min(event.clientY, window.innerHeight - menuHeight - 8)),
+                          });
+                        }}
                       >
                         {item.name}
                       </button>
@@ -609,7 +688,9 @@ export default function App() {
                         paddingInlineStart: `${(item.level - 1) * 12}px`,
                       }}
                     >
-                      {item.text}
+                      <button type="button" title={item.text} onClick={() => jumpToOutline(index)}>
+                        {item.text}
+                      </button>
                     </li>
                   ))}
                 </ol>
@@ -640,6 +721,7 @@ export default function App() {
               language={preferences.language}
               documentId={documentId}
               initialDocument={file.document}
+              outlineTarget={outlineTarget}
               onChange={(document) => {
                 setFile((current) => {
                   const nextFile = { ...current, document };
@@ -652,6 +734,26 @@ export default function App() {
           )}
         </section>
       </section>
+      {recentContextMenu && (
+        <div
+          className="recent-context-menu"
+          role="menu"
+          aria-label={text.recentFileActions(recentContextMenu.item.name)}
+          style={{ left: recentContextMenu.x, top: recentContextMenu.y }}
+          onPointerDown={(event) => event.stopPropagation()}
+          onContextMenu={(event) => event.preventDefault()}
+        >
+          <button role="menuitem" onClick={() => void openRecentFile(recentContextMenu.item)}>
+            {text.recentContextOpen}
+          </button>
+          <button role="menuitem" onClick={() => void revealRecentFile(recentContextMenu.item)}>
+            {text.showInFolder}
+          </button>
+          <button role="menuitem" onClick={() => void hideRecent(recentContextMenu.item)}>
+            {text.hideFromRecent}
+          </button>
+        </div>
+      )}
       <footer className="statusbar">
         <span className={`save-status save-status--${saveStatus}`}>{text.saveStatus[saveStatus]}</span>
         <span>{text.metrics(metrics.words, metrics.characters)}</span>

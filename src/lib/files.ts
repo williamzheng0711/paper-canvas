@@ -23,6 +23,7 @@ export type AppPreferences = {
 
 const settingsKey = 'papercanvas.settings.v1';
 const recentKey = 'recentFiles';
+const hiddenRecentKey = 'hiddenRecentFiles';
 const draftKey = 'unsavedDraft';
 
 function separator(path: string) {
@@ -220,10 +221,7 @@ export async function exportMarkdownFile(markdown: string, defaultName: string):
   return fileName(selected);
 }
 
-export type PdfExportResult =
-  | { type: 'saved'; name: string }
-  | { type: 'print' }
-  | { type: 'cancelled' };
+export type PdfExportResult = { type: 'saved'; name: string } | { type: 'print' } | { type: 'cancelled' };
 
 /**
  * Saves directly through AppKit on macOS so WKWebView never presents its stale
@@ -321,11 +319,15 @@ async function browserSettings(): Promise<Storage> {
 export async function loadRecent(): Promise<RecentFile[]> {
   if (isTauri()) {
     const store = await Store.load(settingsKey, { autoSave: 200 });
-    return (await store.get<RecentFile[]>(recentKey)) ?? [];
+    const files = (await store.get<RecentFile[]>(recentKey)) ?? [];
+    const hidden = new Set((await store.get<string[]>(hiddenRecentKey)) ?? []);
+    return files.filter((item) => !hidden.has(item.path));
   }
   const storage = await browserSettings();
   try {
-    return JSON.parse(storage.getItem(recentKey) ?? '[]') as RecentFile[];
+    const files = JSON.parse(storage.getItem(recentKey) ?? '[]') as RecentFile[];
+    const hidden = new Set(JSON.parse(storage.getItem(hiddenRecentKey) ?? '[]') as string[]);
+    return files.filter((item) => !hidden.has(item.path));
   } catch {
     return [];
   }
@@ -340,6 +342,33 @@ export async function rememberRecent(recent: RecentFile): Promise<void> {
   }
   const storage = await browserSettings();
   storage.setItem(recentKey, JSON.stringify(files));
+}
+
+export async function hideRecentFile(path: string): Promise<RecentFile[]> {
+  const files = (await loadRecent()).filter((item) => item.path !== path);
+  if (isTauri()) {
+    const store = await Store.load(settingsKey, { autoSave: 200 });
+    const hidden = new Set((await store.get<string[]>(hiddenRecentKey)) ?? []);
+    hidden.add(path);
+    await store.set(recentKey, files);
+    await store.set(hiddenRecentKey, [...hidden]);
+    return files;
+  }
+  const storage = await browserSettings();
+  let hidden: string[] = [];
+  try {
+    hidden = JSON.parse(storage.getItem(hiddenRecentKey) ?? '[]') as string[];
+  } catch {
+    // Replace malformed legacy state with a clean hidden-file list.
+  }
+  storage.setItem(recentKey, JSON.stringify(files));
+  storage.setItem(hiddenRecentKey, JSON.stringify([...new Set([...hidden, path])]));
+  return files;
+}
+
+export async function revealFileInFolder(path: string): Promise<void> {
+  if (!isTauri()) throw new Error(getMessages().revealDesktopOnly);
+  await invoke('show_in_folder', { path });
 }
 
 const preferencesKey = 'preferences';

@@ -235,12 +235,44 @@ button {
   font-size: 13px;
 }
 .outline-list li {
+  min-width: 0;
+}
+.outline-list button {
+  width: 100%;
   overflow: hidden;
   padding: 4px 6px;
+  text-align: left;
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--muted);
   font-size: 12px;
+}
+
+.recent-context-menu {
+  position: fixed;
+  z-index: 100;
+  width: max-content;
+  min-width: 188px;
+  padding: 5px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-raised);
+  box-shadow: 0 10px 30px rgb(30 26 22 / 18%);
+}
+.recent-context-menu button {
+  display: block;
+  width: 100%;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 5px;
+  color: var(--text);
+  background: transparent;
+  text-align: left;
+  font-size: 13px;
+}
+.recent-context-menu button:hover,
+.recent-context-menu button:focus-visible {
+  background: var(--surface-muted);
 }
 
 .canvas-area {
