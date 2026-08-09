@@ -13,7 +13,7 @@ This project is intentionally not a Typora clone in design or assets. It pursues
 - Standalone KaTeX display environments such as `\\begin{equation}`, `align`, `gather`, `cases`, and matrix variants become block formulas. Typing or pasting only the opening command inserts its matching `\\end{...}` and leaves the formula caret between the pair; complete bare environments are also recognized when Markdown is opened.
 - Paste or drag images into the canvas. Images display immediately, have four mouse resize handles, and temporarily preserve aspect ratio while `Shift` is held. Embedded images are saved under `<document>.assets/` on the next save and Markdown references them relatively; resize dimensions and companion assets survive reopen and rename.
 - HTML pasted into the editor is DOMPurify-sanitized. Unsupported Markdown/HTML is retained as a visible warning node and emitted back rather than silently discarded.
-- Light/dark mode, base font, font size, word/character counts, source-only Markdown mode, recent file list, and local preference storage through Tauri Store.
+- Light/dark mode, base font, font size, adjustable line spacing, word/character counts, source-only Markdown mode, recent file list, and local preference storage through Tauri Store.
 - Fixed, fine-lined page margins that stay constant as a desktop window grows, allowing each line to use the added width.
 - Export a copy as `.md`; on macOS, export `.pdf` directly through the native save dialog without an intermediate print-preview screen.
 

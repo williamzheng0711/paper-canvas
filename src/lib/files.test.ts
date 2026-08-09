@@ -3,10 +3,29 @@ import {
   documentToPortableMarkdown,
   hideRecentFile,
   isMarkdownFilePath,
+  loadPreferences,
   loadRecent,
   rememberRecent,
   renameDocumentAssetReferences,
 } from './files';
+
+describe('preferences', () => {
+  it('adds default line spacing to legacy preferences and normalizes invalid stored values', async () => {
+    localStorage.setItem(
+      'preferences',
+      JSON.stringify({
+        theme: 'dark',
+        font: 'serif',
+        fontSize: 20,
+        sidebarOpen: false,
+      }),
+    );
+    await expect(loadPreferences()).resolves.toEqual(expect.objectContaining({ theme: 'dark', lineSpacing: 1.78 }));
+
+    localStorage.setItem('preferences', JSON.stringify({ lineSpacing: 9 }));
+    await expect(loadPreferences()).resolves.toEqual(expect.objectContaining({ lineSpacing: 3 }));
+  });
+});
 
 describe('image asset references', () => {
   it('renames only the companion asset paths when a Markdown file is renamed', () => {

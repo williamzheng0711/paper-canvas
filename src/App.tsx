@@ -8,6 +8,7 @@ import { documentsEqual } from './editor/documentSync';
 import { collectOutline, documentToMarkdown, markdownToDocument } from './editor/markdown';
 import { getMessages, setCurrentLanguage, type Language } from './i18n';
 import { maximumFontSize, minimumFontSize, normalizeFontSize } from './lib/fontSize';
+import { maximumLineSpacing, minimumLineSpacing, normalizeLineSpacing } from './lib/lineSpacing';
 import {
   chooseMarkdownFile,
   clearDraft,
@@ -69,11 +70,13 @@ export default function App() {
     theme: 'light',
     font: 'system',
     fontSize: 18,
+    lineSpacing: 1.78,
     sidebarOpen: true,
     language: 'zh-Hant',
   });
   const text = getMessages(preferences.language);
   const [fontSizeInput, setFontSizeInput] = useState('18');
+  const [lineSpacingInput, setLineSpacingInput] = useState('1.78');
   const saving = useRef(false);
   const preferencesLoaded = useRef(false);
   const fileRef = useRef(file);
@@ -115,6 +118,7 @@ export default function App() {
         preferencesLoaded.current = true;
         setPreferences(loadedPreferences);
         setFontSizeInput(String(loadedPreferences.fontSize));
+        setLineSpacingInput(String(loadedPreferences.lineSpacing));
         if (draft && !openedByOperatingSystem.current) {
           fileRef.current = draft;
           setFile(draft);
@@ -466,6 +470,12 @@ export default function App() {
     setPreferences((current) => ({ ...current, fontSize }));
   };
 
+  const commitLineSpacing = () => {
+    const lineSpacing = normalizeLineSpacing(lineSpacingInput, preferences.lineSpacing);
+    setLineSpacingInput(String(lineSpacing));
+    setPreferences((current) => ({ ...current, lineSpacing }));
+  };
+
   const closeExportMenu = () => exportMenu.current?.removeAttribute('open');
 
   const jumpToOutline = (index: number) => {
@@ -612,6 +622,27 @@ export default function App() {
             }}
           />
         </label>
+        <label className="compact-control">
+          {text.lineSpacing}
+          <input
+            aria-label={text.lineSpacing}
+            type="number"
+            min={minimumLineSpacing}
+            max={maximumLineSpacing}
+            step="0.01"
+            value={lineSpacingInput}
+            onFocus={(event) => event.currentTarget.select()}
+            onChange={(event) => setLineSpacingInput(event.target.value)}
+            onBlur={commitLineSpacing}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') event.currentTarget.blur();
+              if (event.key === 'Escape') {
+                setLineSpacingInput(String(preferences.lineSpacing));
+                event.currentTarget.blur();
+              }
+            }}
+          />
+        </label>
         <label className="compact-control language-control">
           {text.language}
           <select
@@ -703,6 +734,7 @@ export default function App() {
           style={
             {
               '--editor-size': `${preferences.fontSize}px`,
+              '--editor-line-height': preferences.lineSpacing,
             } as React.CSSProperties
           }
         >

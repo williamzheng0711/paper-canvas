@@ -5,6 +5,7 @@ import { exists, mkdir, readTextFile, rename, writeFile, writeTextFile } from '@
 import { Store } from '@tauri-apps/plugin-store';
 import { documentToMarkdown, markdownToDocument } from '../editor/markdown';
 import { detectLanguage, getMessages, isLanguage, type Language } from '../i18n';
+import { normalizeLineSpacing } from './lineSpacing';
 
 export type RecentFile = { path: string; name: string };
 export type EditorFile = {
@@ -17,6 +18,7 @@ export type AppPreferences = {
   theme: 'light' | 'dark';
   font: 'system' | 'serif' | 'mono';
   fontSize: number;
+  lineSpacing: number;
   sidebarOpen: boolean;
   language: Language;
 };
@@ -376,6 +378,7 @@ const defaultPreferences: AppPreferences = {
   theme: 'light',
   font: 'system',
   fontSize: 18,
+  lineSpacing: 1.78,
   sidebarOpen: true,
   language: detectLanguage(),
 };
@@ -384,6 +387,10 @@ function mergePreferences(stored: Partial<AppPreferences> | null | undefined): A
   return {
     ...defaultPreferences,
     ...stored,
+    lineSpacing: normalizeLineSpacing(
+      stored?.lineSpacing ?? defaultPreferences.lineSpacing,
+      defaultPreferences.lineSpacing,
+    ),
     language: isLanguage(stored?.language) ? stored.language : defaultPreferences.language,
   };
 }

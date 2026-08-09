@@ -44,6 +44,7 @@ button {
   --markdown-code: #b43f6c;
   --markdown-punctuation: #72787e;
   --editor-size: 18px;
+  --editor-line-height: 1.78;
   min-width: 800px;
   height: 100%;
   display: grid;
@@ -291,7 +292,7 @@ button {
   border-left: 1px solid var(--line);
   outline: none;
   font-size: var(--editor-size);
-  line-height: 1.78;
+  line-height: var(--editor-line-height);
 }
 .paper-editor {
   caret-color: var(--accent);
@@ -807,7 +808,7 @@ button {
     background: #fff;
     color: #111;
     font-size: var(--editor-size);
-    line-height: 1.62;
+    line-height: var(--editor-line-height);
   }
   .paper-editor pre,
   .paper-editor table,

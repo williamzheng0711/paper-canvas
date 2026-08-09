@@ -25,6 +25,7 @@ const files = vi.hoisted(() => ({
     theme: 'light' as const,
     font: 'system' as const,
     fontSize: 18,
+    lineSpacing: 1.78,
     sidebarOpen: true,
     language: 'zh-Hant' as const,
   })),
@@ -233,6 +234,30 @@ describe('App autosave cursor stability', () => {
     expect(Array.from(host.querySelectorAll('button')).some((button) => button.textContent === '新增')).toBe(true);
     expect(document.documentElement.lang).toBe('zh-Hant');
     expect(files.savePreferences).toHaveBeenLastCalledWith(expect.objectContaining({ language: 'zh-Hant' }));
+  });
+
+  it('applies and persists an adjusted line spacing without marking the document dirty', async () => {
+    const input = host.querySelector<HTMLInputElement>('input[aria-label="行距"]');
+    const initialDirtyIndicator = host.querySelector('.document-name')?.textContent?.includes('●');
+
+    expect(input).not.toBeNull();
+    expect(host.querySelector<HTMLElement>('.canvas-area')?.style.getPropertyValue('--editor-line-height')).toBe(
+      '1.78',
+    );
+
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set?.call(input, '2.2');
+      input?.dispatchEvent(new Event('input', { bubbles: true }));
+      await flushEffects();
+    });
+    await act(async () => {
+      input?.dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
+      await flushEffects();
+    });
+
+    expect(host.querySelector<HTMLElement>('.canvas-area')?.style.getPropertyValue('--editor-line-height')).toBe('2.2');
+    expect(files.savePreferences).toHaveBeenLastCalledWith(expect.objectContaining({ lineSpacing: 2.2 }));
+    expect(host.querySelector('.document-name')?.textContent?.includes('●')).toBe(initialDirtyIndicator);
   });
 
   it('exports PDF without switching the visible app into a print layout', async () => {
