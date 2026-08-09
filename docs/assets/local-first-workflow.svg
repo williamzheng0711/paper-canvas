@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="460" viewBox="0 0 1200 460" role="img" aria-labelledby="title description">
+  <title id="title">PaperCanvas local-first workflow</title>
+  <desc id="description">A visual explanation of how PaperCanvas writes local Markdown and image assets that remain usable with Finder, Explorer, Git, and other Markdown editors.</desc>
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f8f6f2"/>
+      <stop offset="1" stop-color="#eef1fa"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#536fbe"/>
+      <stop offset="1" stop-color="#785fa8"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="8" stdDeviation="12" flood-color="#292632" flood-opacity="0.11"/>
+    </filter>
+  </defs>
+
+  <rect width="1200" height="460" rx="28" fill="url(#background)"/>
+  <circle cx="1090" cy="76" r="94" fill="#dfe5fa" opacity="0.55"/>
+  <circle cx="94" cy="411" r="120" fill="#efe6dc" opacity="0.62"/>
+
+  <text x="600" y="54" text-anchor="middle" fill="#242426" font-family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="25" font-weight="700">
+    A file you can keep, move, and inspect
+  </text>
+  <text x="600" y="82" text-anchor="middle" fill="#706d70" font-family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="15">
+    PaperCanvas adds a focused writing surface without locking your work into a private format.
+  </text>
+
+  <g filter="url(#shadow)">
+    <rect x="70" y="125" width="290" height="210" rx="18" fill="#fffdfa" stroke="#ded8cf"/>
+    <rect x="455" y="125" width="290" height="210" rx="18" fill="#fffdfa" stroke="#ded8cf"/>
+    <rect x="840" y="125" width="290" height="210" rx="18" fill="#fffdfa" stroke="#ded8cf"/>
+  </g>
+
+  <rect x="94" y="150" width="50" height="50" rx="14" fill="url(#accent)"/>
+  <path d="M109 164h20a5 5 0 0 1 5 5v17H104v-17a5 5 0 0 1 5-5Z" fill="none" stroke="#fff" stroke-width="2.2"/>
+  <path d="M110 174h18M110 181h12" stroke="#fff" stroke-width="2.2" stroke-linecap="round"/>
+  <text x="94" y="232" fill="#242426" font-family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="20" font-weight="700">Write in PaperCanvas</text>
+  <text x="94" y="263" fill="#706d70" font-family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="15">Visual canvas · LaTeX · tables</text>
+  <text x="94" y="288" fill="#706d70" font-family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="15">images · outline · source mode</text>
+
+  <rect x="479" y="150" width="50" height="50" rx="14" fill="#e9edfb"/>
+  <path d="M491 160h19l8 8v23h-27Z" fill="#fff" stroke="#536fbe" stroke-width="2"/>
+  <path d="M510 160v9h8M496 177h16M496 183h12" fill="none" stroke="#536fbe" stroke-width="2" stroke-linecap="round"/>
+  <text x="479" y="232" fill="#242426" font-family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="20" font-weight="700">Store ordinary files</text>
+  <text x="479" y="263" fill="#536fbe" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="15" font-weight="600">research-notes.md</text>
+  <text x="479" y="288" fill="#536fbe" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="15" font-weight="600">research-notes.assets/</text>
+
+  <rect x="864" y="150" width="50" height="50" rx="14" fill="#eee9f6"/>
+  <path d="M876 173h26M889 160v26" stroke="#785fa8" stroke-width="2.5" stroke-linecap="round"/>
+  <circle cx="889" cy="173" r="14" fill="none" stroke="#785fa8" stroke-width="2"/>
+  <text x="864" y="232" fill="#242426" font-family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="20" font-weight="700">Use them anywhere</text>
+  <text x="864" y="263" fill="#706d70" font-family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="15">Finder / Explorer · Git</text>
+  <text x="864" y="288" fill="#706d70" font-family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="15">any text or Markdown editor</text>
+
+  <path d="M375 230h55" fill="none" stroke="#7581a5" stroke-width="3" stroke-linecap="round"/>
+  <path d="m430 222 14 8-14 8Z" fill="#7581a5"/>
+  <path d="M760 230h55" fill="none" stroke="#7581a5" stroke-width="3" stroke-linecap="round"/>
+  <path d="m815 222 14 8-14 8Z" fill="#7581a5"/>
+
+  <rect x="341" y="376" width="518" height="48" rx="24" fill="#252833" opacity="0.96"/>
+  <circle cx="374" cy="400" r="9" fill="#92d7b7"/>
+  <path d="M370 400l3 3 6-7" fill="none" stroke="#173d2c" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="397" y="406" fill="#f5f4f2" font-family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="15" font-weight="600">
+    No account · No telemetry · No document upload
+  </text>
+</svg>
