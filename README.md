@@ -16,7 +16,7 @@
   <img alt="Platforms: macOS and Windows" src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows-555?style=flat-square">
   <img alt="Built with Tauri 2" src="https://img.shields.io/badge/Tauri-2-24C8DB?style=flat-square&logo=tauri&logoColor=white">
   <img alt="Node.js 22" src="https://img.shields.io/badge/Node.js-22-43853D?style=flat-square&logo=nodedotjs&logoColor=white">
-  <a href="LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-536fbe?style=flat-square"></a>
+  <a href="LICENSE"><img alt="Apache License 2.0" src="https://img.shields.io/badge/license-Apache--2.0-536fbe?style=flat-square"></a>
 </p>
 
 <p align="center">
@@ -243,4 +243,4 @@ PaperCanvas is its own design and asset set. It aims for a low-distraction, sing
 
 ## License
 
-PaperCanvas is available under the [MIT License](LICENSE).
+PaperCanvas is available under the [Apache License 2.0](LICENSE).
