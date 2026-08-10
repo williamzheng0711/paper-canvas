@@ -20,10 +20,10 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/williamzheng0711/paper-canvas/releases/latest/download/PaperCanvas-Windows-x64-Setup.exe">
+  <a href="https://williamzheng0711.github.io/paper-canvas/download/PaperCanvas-Windows-x64-Setup.exe">
     <img alt="Download PaperCanvas for Windows" src="https://img.shields.io/badge/Download_for_Windows-0078D4?style=for-the-badge&logo=windows11&logoColor=white">
   </a>
-  <a href="https://github.com/williamzheng0711/paper-canvas/releases/latest/download/PaperCanvas-macOS-universal.dmg">
+  <a href="https://williamzheng0711.github.io/paper-canvas/download/PaperCanvas-macOS-universal.dmg">
     <img alt="Download PaperCanvas for macOS" src="https://img.shields.io/badge/Download_for_macOS-111111?style=for-the-badge&logo=apple&logoColor=white">
   </a>
 </p>
@@ -48,7 +48,7 @@
 <p align="center"><sub>The real PaperCanvas interface, captured from this repository.</sub></p>
 
 > [!IMPORTANT]
-> Desktop installers are built from each version tag by [the release workflow](.github/workflows/release-desktop.yml). The two download buttons always resolve to the matching installer in the latest GitHub Release; no Node.js, Rust, Git, or source build is required to install PaperCanvas.
+> Desktop installers are built from each version tag by [the release workflow](.github/workflows/release-desktop.yml), then copied to a public download site by [the Pages workflow](.github/workflows/publish-downloads.yml). No Node.js, Rust, Git, GitHub account, or source build is required to install PaperCanvas.
 
 ## Why PaperCanvas
 

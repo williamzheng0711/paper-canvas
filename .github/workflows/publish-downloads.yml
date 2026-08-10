@@ -1,0 +1,73 @@
+name: Publish public downloads
+
+on:
+  workflow_dispatch:
+  workflow_run:
+    workflows:
+      - Release desktop installers
+    types:
+      - completed
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: github-pages
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Prepare public download site
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out site template
+        uses: actions/checkout@v6
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Download latest installers
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          mkdir -p site/download
+          gh release download \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern "PaperCanvas-Windows-x64-Setup.exe" \
+            --pattern "PaperCanvas-macOS-universal.dmg" \
+            --dir site/download \
+            --clobber
+
+          test -s site/download/PaperCanvas-Windows-x64-Setup.exe
+          test -s site/download/PaperCanvas-macOS-universal.dmg
+
+          cp docs/downloads/index.html site/index.html
+          cp src-tauri/icons/128x128.png site/icon.png
+          touch site/.nojekyll
+
+          cd site/download
+          sha256sum \
+            PaperCanvas-Windows-x64-Setup.exe \
+            PaperCanvas-macOS-universal.dmg \
+            > SHA256SUMS.txt
+
+      - name: Upload GitHub Pages artifact
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: site
+
+  deploy:
+    name: Deploy public download site
+    needs: prepare
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
