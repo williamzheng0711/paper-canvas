@@ -1,0 +1,184 @@
+name: Release desktop installers
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: desktop-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate release source
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the release source
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Verify release versions
+        shell: bash
+        run: |
+          app_version="$(node -p "require('./package.json').version")"
+          tauri_version="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          cargo_version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' src-tauri/Cargo.toml | head -n 1)"
+
+          if [[ "$app_version" != "$tauri_version" || "$app_version" != "$cargo_version" ]]; then
+            echo "package.json, tauri.conf.json, and Cargo.toml must use the same version." >&2
+            exit 1
+          fi
+
+          if [[ "$GITHUB_REF_TYPE" == "tag" && "$GITHUB_REF_NAME" != "v$app_version" ]]; then
+            echo "Release tag $GITHUB_REF_NAME must match application version v$app_version." >&2
+            exit 1
+          fi
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm test
+
+      - name: Build frontend
+        run: npm run build
+
+  publish:
+    name: Build ${{ matrix.label }} installer
+    needs: validate
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: macOS Universal
+            platform: macos
+            runner: macos-latest
+            rust_targets: aarch64-apple-darwin,x86_64-apple-darwin
+            build_args: --target universal-apple-darwin --bundles dmg
+            asset_name: PaperCanvas-macOS-universal[ext]
+          - label: Windows x64
+            platform: windows
+            runner: windows-latest
+            rust_targets: x86_64-pc-windows-msvc
+            build_args: --target x86_64-pc-windows-msvc --bundles nsis
+            asset_name: PaperCanvas-Windows-x64-Setup[ext]
+    env:
+      MACOS_SIGNING_CONFIGURED: >-
+        ${{ secrets.APPLE_CERTIFICATE != '' &&
+        secrets.APPLE_CERTIFICATE_PASSWORD != '' &&
+        secrets.APPLE_ID != '' &&
+        secrets.APPLE_PASSWORD != '' &&
+        secrets.APPLE_TEAM_ID != '' }}
+    steps:
+      - name: Check out the release source
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_targets }}
+
+      - name: Cache Rust build artifacts
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ./src-tauri -> target
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Import Developer ID certificate
+        if: matrix.platform == 'macos' && env.MACOS_SIGNING_CONFIGURED == 'true'
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          certificate_path="$RUNNER_TEMP/papercanvas-certificate.p12"
+          keychain_path="$RUNNER_TEMP/papercanvas-signing.keychain-db"
+          keychain_password="$(openssl rand -hex 24)"
+
+          printf '%s' "$APPLE_CERTIFICATE" | openssl base64 -d -A -out "$certificate_path"
+          security create-keychain -p "$keychain_password" "$keychain_path"
+          security default-keychain -s "$keychain_path"
+          security unlock-keychain -p "$keychain_password" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security import "$certificate_path" -k "$keychain_path" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain_path"
+
+          signing_identity="$(security find-identity -v -p codesigning "$keychain_path" | sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p' | head -n 1)"
+          if [[ -z "$signing_identity" ]]; then
+            echo "The imported certificate does not contain a Developer ID Application identity." >&2
+            exit 1
+          fi
+
+          echo "APPLE_SIGNING_IDENTITY=$signing_identity" >> "$GITHUB_ENV"
+
+      - name: Build and publish installer
+        if: matrix.platform != 'macos' || env.MACOS_SIGNING_CONFIGURED != 'true'
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: v__VERSION__
+          releaseName: PaperCanvas v__VERSION__
+          releaseBody: |
+            Download the installer for your operating system below.
+
+            - Windows: run `PaperCanvas-Windows-x64-Setup.exe`.
+            - macOS: open `PaperCanvas-macOS-universal.dmg`, then drag PaperCanvas to Applications.
+
+            These artifacts were built automatically from this release tag. Unsigned builds can trigger Windows SmartScreen or macOS Gatekeeper; only continue when this repository is the download source.
+          releaseDraft: false
+          prerelease: false
+          generateReleaseNotes: true
+          uploadUpdaterJson: false
+          retryAttempts: 2
+          args: ${{ matrix.build_args }}
+          releaseAssetNamePattern: ${{ matrix.asset_name }}
+
+      - name: Build, sign, notarize, and publish installer
+        if: matrix.platform == 'macos' && env.MACOS_SIGNING_CONFIGURED == 'true'
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APPLE_SIGNING_IDENTITY: ${{ env.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        with:
+          tagName: v__VERSION__
+          releaseName: PaperCanvas v__VERSION__
+          releaseBody: |
+            Download the installer for your operating system below.
+
+            - Windows: run `PaperCanvas-Windows-x64-Setup.exe`.
+            - macOS: open `PaperCanvas-macOS-universal.dmg`, then drag PaperCanvas to Applications.
+
+            These artifacts were built automatically from this release tag.
+          releaseDraft: false
+          prerelease: false
+          generateReleaseNotes: true
+          uploadUpdaterJson: false
+          retryAttempts: 2
+          args: ${{ matrix.build_args }}
+          releaseAssetNamePattern: ${{ matrix.asset_name }}

@@ -20,6 +20,19 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/williamzheng0711/paper-canvas/releases/latest/download/PaperCanvas-Windows-x64-Setup.exe">
+    <img alt="Download PaperCanvas for Windows" src="https://img.shields.io/badge/Download_for_Windows-0078D4?style=for-the-badge&logo=windows11&logoColor=white">
+  </a>
+  <a href="https://github.com/williamzheng0711/paper-canvas/releases/latest/download/PaperCanvas-macOS-universal.dmg">
+    <img alt="Download PaperCanvas for macOS" src="https://img.shields.io/badge/Download_for_macOS-111111?style=for-the-badge&logo=apple&logoColor=white">
+  </a>
+</p>
+
+<p align="center">
+  <sub>Windows 10/11 x64 · macOS Intel and Apple Silicon · Each button downloads the newest release directly.</sub>
+</p>
+
+<p align="center">
   <a href="#install-on-macos">Install on macOS</a> ·
   <a href="#install-on-windows">Install on Windows</a> ·
   <a href="#development">Development</a> ·
@@ -35,7 +48,7 @@
 <p align="center"><sub>The real PaperCanvas interface, captured from this repository.</sub></p>
 
 > [!IMPORTANT]
-> PaperCanvas does not yet publish signed, notarized installers. The reproducible installation path today is to build on the target Mac or Windows computer using the steps below. Until signing is configured, shared artifacts should be treated as local/test builds rather than official trusted releases.
+> Desktop installers are built from each version tag by [the release workflow](.github/workflows/release-desktop.yml). The two download buttons always resolve to the matching installer in the latest GitHub Release; no Node.js, Rust, Git, or source build is required to install PaperCanvas.
 
 ## Why PaperCanvas
 
@@ -77,111 +90,25 @@ The native shell grants only the file capabilities needed for open, save, rename
 
 ## Install on macOS
 
-These steps follow the official [Tauri 2 prerequisites](https://v2.tauri.app/start/prerequisites/) and build a native `.app` and `.dmg` on the Mac where PaperCanvas will run. Apple Silicon and Intel Macs must use a Rust toolchain that matches the computer's architecture.
+1. Click **Download for macOS** above to download `PaperCanvas-macOS-universal.dmg`.
+2. Open the downloaded DMG.
+3. Drag **PaperCanvas** into **Applications**, eject the DMG, and open PaperCanvas from Applications.
 
-### 1. Install the build tools
-
-You need:
-
-- macOS with [Xcode Command Line Tools](https://developer.apple.com/xcode/resources/).
-- [Homebrew](https://brew.sh/) and Node.js 22.
-- Stable Rust installed through [rustup](https://rustup.rs/), not an older package-manager Rust.
-- Git, which is included with Xcode Command Line Tools.
-
-Open Terminal and run:
-
-```bash
-xcode-select --install
-brew install node@22
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-```
-
-`xcode-select` may report that the tools are already installed. After rustup finishes, close and reopen Terminal once.
-
-### 2. Clone, verify, and build
-
-```bash
-git clone https://github.com/williamzheng0711/paper-canvas.git
-cd paper-canvas
-
-export PATH="$HOME/.cargo/bin:$(brew --prefix node@22)/bin:$PATH"
-
-node --version
-rustc -Vv
-
-npm ci
-npm run tauri build -- --bundles app,dmg
-```
-
-Before building, `node --version` must begin with `v22`. On Apple Silicon, `rustc -Vv` must report `host: aarch64-apple-darwin`; on an Intel Mac it must report `host: x86_64-apple-darwin`.
-
-### 3. Install the app
-
-```bash
-open src-tauri/target/release/bundle/dmg
-```
-
-Open the generated `.dmg`, then drag **PaperCanvas** into **Applications**. The unpacked app bundle is also available at:
-
-```text
-src-tauri/target/release/bundle/macos/PaperCanvas.app
-```
-
-To verify the actual executable architecture instead of trusting the installer filename:
-
-```bash
-file src-tauri/target/release/bundle/macos/PaperCanvas.app/Contents/MacOS/papercanvas
-```
+The same installer contains native Intel (`x86_64`) and Apple Silicon (`arm64`) executables, so users do not need to choose a processor-specific download.
 
 > [!NOTE]
-> Current builds use an ad-hoc signature and are not notarized. A locally built app normally opens directly; a shared or downloaded build may trigger Gatekeeper. Only open artifacts you trust, then use **System Settings → Privacy & Security → Open Anyway** if macOS offers that option. Public distribution without this warning requires an Apple **Developer ID Application** certificate and notarization; see Tauri's [macOS code-signing guide](https://v2.tauri.app/distribute/sign/macos/).
+> If a release is ad-hoc signed rather than Developer ID signed and notarized, macOS may block its first launch. Confirm that the DMG came from this repository, then open **System Settings → Privacy & Security** and choose **Open Anyway** for PaperCanvas. The release workflow automatically switches to Developer ID signing and notarization when the required Apple secrets are configured.
 
 ## Install on Windows
 
-Follow the official [Tauri 2 prerequisites](https://v2.tauri.app/start/prerequisites/) and build PaperCanvas from a regular 64-bit Windows 10 or Windows 11 environment. WSL alone cannot produce the normal native Windows installer workflow described here.
+1. Click **Download for Windows** above to download `PaperCanvas-Windows-x64-Setup.exe`.
+2. Run the downloaded installer and follow its prompts.
+3. Launch **PaperCanvas** from the Start menu or open a `.md` or `.markdown` file with it.
 
-### 1. Install the build tools
-
-Install the following, then restart PowerShell:
-
-- [Git for Windows](https://git-scm.com/download/win).
-- [Node.js 22](https://nodejs.org/en/download/archive/v22) for your Windows architecture.
-- Stable Rust from the official [rustup installer](https://rustup.rs/) using the MSVC toolchain.
-- [Visual Studio 2022 Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) with the **Desktop development with C++** workload, MSVC, and a Windows 10 or 11 SDK selected.
-- [Microsoft Edge WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/). It is already present on most current Windows 10 and Windows 11 systems.
-
-### 2. Clone, verify, and build
-
-Open a new PowerShell window:
-
-```powershell
-git clone https://github.com/williamzheng0711/paper-canvas.git
-Set-Location paper-canvas
-
-node --version
-rustc -Vv
-
-npm ci
-npm run tauri build -- --bundles nsis
-```
-
-`node --version` must begin with `v22`. For a standard 64-bit Intel/AMD Windows computer, `rustc -Vv` should report `host: x86_64-pc-windows-msvc`.
-
-### 3. Run the installer
-
-```powershell
-$paperCanvasInstaller = Get-ChildItem ".\src-tauri\target\release\bundle\nsis\*.exe" | Select-Object -First 1
-Start-Process $paperCanvasInstaller.FullName
-```
-
-The NSIS installer is generated under:
-
-```text
-src-tauri\target\release\bundle\nsis\
-```
+The installer targets standard 64-bit Intel/AMD Windows 10 and Windows 11 computers. It checks for Microsoft Edge WebView2 and downloads the runtime when Windows does not already provide it.
 
 > [!NOTE]
-> Current Windows installers are not Authenticode-signed. SmartScreen may warn about a shared or downloaded build with no established reputation. Verify where the file came from before choosing **More info → Run anyway**. A future public release should sign and timestamp its installer; see Tauri's [Windows code-signing guide](https://v2.tauri.app/distribute/sign/windows/).
+> Until an Authenticode certificate is configured, Microsoft Defender SmartScreen may warn that the publisher is unknown. Confirm that the installer came from this repository, then choose **More info → Run anyway** to continue.
 
 ## Run in development
 
