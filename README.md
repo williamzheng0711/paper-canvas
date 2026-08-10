@@ -20,16 +20,16 @@
 </p>
 
 <p align="center">
-  <a href="https://williamzheng0711.github.io/paper-canvas/download/PaperCanvas-Windows-x64-Setup.exe">
+  <a href="https://williamzheng0711.github.io/paper-canvas/download/PaperCanvas-Windows-x64-Setup.exe?v=0.1.1">
     <img alt="Download PaperCanvas for Windows" src="https://img.shields.io/badge/Download_for_Windows-0078D4?style=for-the-badge&logo=windows11&logoColor=white">
   </a>
-  <a href="https://williamzheng0711.github.io/paper-canvas/download/PaperCanvas-macOS-universal.dmg">
+  <a href="https://williamzheng0711.github.io/paper-canvas/download/PaperCanvas-macOS-universal.dmg?v=0.1.1">
     <img alt="Download PaperCanvas for macOS" src="https://img.shields.io/badge/Download_for_macOS-111111?style=for-the-badge&logo=apple&logoColor=white">
   </a>
 </p>
 
 <p align="center">
-  <sub>Windows 10/11 x64 · macOS Intel and Apple Silicon · Each button downloads the newest release directly.</sub>
+  <sub>Current installer release: v0.1.1 · Windows 10/11 x64 · macOS Intel and Apple Silicon · Each button downloads the newest release directly.</sub>
 </p>
 
 <p align="center">
