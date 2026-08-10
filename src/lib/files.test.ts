@@ -6,6 +6,7 @@ import {
   loadPreferences,
   loadRecent,
   rememberRecent,
+  removeRecentFile,
   renameDocumentAssetReferences,
 } from './files';
 
@@ -20,10 +21,14 @@ describe('preferences', () => {
         sidebarOpen: false,
       }),
     );
-    await expect(loadPreferences()).resolves.toEqual(expect.objectContaining({ theme: 'dark', lineSpacing: 1.78 }));
+    await expect(loadPreferences()).resolves.toEqual(
+      expect.objectContaining({ theme: 'dark', lineSpacing: 1.78, recentFilesExpanded: true }),
+    );
 
-    localStorage.setItem('preferences', JSON.stringify({ lineSpacing: 9 }));
-    await expect(loadPreferences()).resolves.toEqual(expect.objectContaining({ lineSpacing: 3 }));
+    localStorage.setItem('preferences', JSON.stringify({ lineSpacing: 9, recentFilesExpanded: false }));
+    await expect(loadPreferences()).resolves.toEqual(
+      expect.objectContaining({ lineSpacing: 3, recentFilesExpanded: false }),
+    );
   });
 });
 
@@ -48,6 +53,7 @@ describe('image asset references', () => {
 
 describe('recent documents', () => {
   it('persists hiding one item while preserving the remaining order', async () => {
+    localStorage.clear();
     localStorage.setItem(
       'recentFiles',
       JSON.stringify([
@@ -61,6 +67,26 @@ describe('recent documents', () => {
 
     await rememberRecent({ path: '/tmp/first.md', name: 'first.md' });
     await expect(loadRecent()).resolves.toEqual([{ path: '/tmp/second.md', name: 'second.md' }]);
+  });
+
+  it('removes a stale entry without permanently hiding its path', async () => {
+    localStorage.clear();
+    localStorage.setItem(
+      'recentFiles',
+      JSON.stringify([
+        { path: '/tmp/stale.md', name: 'stale.md' },
+        { path: '/tmp/current.md', name: 'current.md' },
+      ]),
+    );
+
+    await expect(removeRecentFile('/tmp/stale.md')).resolves.toEqual([
+      { path: '/tmp/current.md', name: 'current.md' },
+    ]);
+    await rememberRecent({ path: '/tmp/stale.md', name: 'stale.md' });
+    await expect(loadRecent()).resolves.toEqual([
+      { path: '/tmp/stale.md', name: 'stale.md' },
+      { path: '/tmp/current.md', name: 'current.md' },
+    ]);
   });
 });
 

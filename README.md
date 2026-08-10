@@ -57,6 +57,7 @@
 - **Files you control.** Create, open, rename, auto-save, export, and reopen local `.md` and `.markdown` documents. Installed builds register both file types with Finder or Explorer.
 - **Portable images.** Paste or drag images, resize them on the canvas, and save them beside the document under `<document>.assets/` with relative Markdown references.
 - **Content-preserving by design.** Unsupported Markdown or sanitized HTML stays visible and round-trips as source instead of disappearing silently.
+- **Find without leaving the keyboard.** Press `⌘F` on macOS or `Ctrl+F` elsewhere to highlight every match, move forward or backward, and search the visual canvas or Markdown source.
 - **Built for long technical documents.** Outline navigation, tables, task lists, highlighted code blocks, word counts, themes, font controls, adjustable spacing, and English, 简体中文, and 繁體中文 UI are included.
 
 <table>
@@ -134,7 +135,7 @@ npm run test:perf
 npm run build
 ```
 
-The tests cover Markdown ↔ editor-document round trips, math delimiters, unsupported-content retention, live formula editing, formula boundary navigation, image behavior, auto-save stability, PDF export logic, and a create → formula → UTF-8 Markdown save/reopen smoke path. `npm run test:perf` measures the local parse/serialize path for a 50,000-character Chinese document; it is not a universal UI or IME latency claim.
+The tests cover Markdown ↔ editor-document round trips, math delimiters, unsupported-content retention, live formula editing, formula boundary navigation, document search and focus restoration, image behavior, auto-save stability, PDF export logic, and a create → formula → UTF-8 Markdown save/reopen smoke path. `npm run test:perf` measures the local parse/serialize path for a 50,000-character Chinese document; it is not a universal UI or IME latency claim.
 
 Use [docs/QA.md](docs/QA.md) for native clipboard, image, file-association, export, and window checks before a release.
 

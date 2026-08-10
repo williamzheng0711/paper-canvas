@@ -20,6 +20,7 @@ export type AppPreferences = {
   fontSize: number;
   lineSpacing: number;
   sidebarOpen: boolean;
+  recentFilesExpanded: boolean;
   language: Language;
 };
 
@@ -346,13 +347,24 @@ export async function rememberRecent(recent: RecentFile): Promise<void> {
   storage.setItem(recentKey, JSON.stringify(files));
 }
 
-export async function hideRecentFile(path: string): Promise<RecentFile[]> {
+export async function removeRecentFile(path: string): Promise<RecentFile[]> {
   const files = (await loadRecent()).filter((item) => item.path !== path);
+  if (isTauri()) {
+    const store = await Store.load(settingsKey, { autoSave: 200 });
+    await store.set(recentKey, files);
+    return files;
+  }
+  const storage = await browserSettings();
+  storage.setItem(recentKey, JSON.stringify(files));
+  return files;
+}
+
+export async function hideRecentFile(path: string): Promise<RecentFile[]> {
+  const files = await removeRecentFile(path);
   if (isTauri()) {
     const store = await Store.load(settingsKey, { autoSave: 200 });
     const hidden = new Set((await store.get<string[]>(hiddenRecentKey)) ?? []);
     hidden.add(path);
-    await store.set(recentKey, files);
     await store.set(hiddenRecentKey, [...hidden]);
     return files;
   }
@@ -363,7 +375,6 @@ export async function hideRecentFile(path: string): Promise<RecentFile[]> {
   } catch {
     // Replace malformed legacy state with a clean hidden-file list.
   }
-  storage.setItem(recentKey, JSON.stringify(files));
   storage.setItem(hiddenRecentKey, JSON.stringify([...new Set([...hidden, path])]));
   return files;
 }
@@ -380,6 +391,7 @@ const defaultPreferences: AppPreferences = {
   fontSize: 18,
   lineSpacing: 1.78,
   sidebarOpen: true,
+  recentFilesExpanded: true,
   language: detectLanguage(),
 };
 
@@ -416,8 +428,18 @@ export async function savePreferences(preferences: AppPreferences): Promise<void
   localStorage.setItem(preferencesKey, JSON.stringify(preferences));
 }
 
-export async function openRecent(recent: RecentFile): Promise<EditorFile> {
-  const markdown = await readTextFile(recent.path);
+export async function openRecent(recent: RecentFile): Promise<EditorFile | null> {
+  if (!(await exists(recent.path))) return null;
+
+  let markdown: string;
+  try {
+    markdown = await readTextFile(recent.path);
+  } catch (error) {
+    // The file may be removed after the existence check. Keep other failures,
+    // such as denied access, distinguishable from a genuinely stale entry.
+    if (!(await exists(recent.path))) return null;
+    throw error;
+  }
   return {
     path: recent.path,
     name: recent.name,

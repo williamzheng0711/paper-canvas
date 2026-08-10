@@ -7,7 +7,7 @@ import TaskList from '@tiptap/extension-task-list';
 import { EditorContent, useEditor } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
 import { common, createLowlight } from 'lowlight';
-import { useEffect, useRef } from 'react';
+import { forwardRef, useEffect, useImperativeHandle, useRef } from 'react';
 import type { JSONContent } from '@tiptap/core';
 import type { EditorView } from '@tiptap/pm/view';
 import { BlockFormula, InlineFormula } from '../editor/Formula';
@@ -16,6 +16,13 @@ import { insertPastedFormula, insertPastedMarkdown, sanitizePastedHtml } from '.
 import { PaperImage } from '../editor/PaperImage';
 import { scrollToOutlineHeading } from '../editor/outline';
 import { UnsupportedMarkdown } from '../editor/UnsupportedMarkdown';
+import {
+  clearDocumentSearch,
+  DocumentSearch,
+  getSelectedDocumentText,
+  searchDocument,
+  type SearchableEditorHandle,
+} from '../editor/search';
 import { getMessages, type Language } from '../i18n';
 
 const lowlight = createLowlight(common);
@@ -49,7 +56,10 @@ function insertImage(view: EditorView, src: string, alt = '', position?: number)
   view.focus();
 }
 
-export function CanvasEditor({ language, documentId, initialDocument, outlineTarget, onChange }: Props) {
+export const CanvasEditor = forwardRef<SearchableEditorHandle, Props>(function CanvasEditor(
+  { language, documentId, initialDocument, outlineTarget, onChange },
+  ref,
+) {
   const text = getMessages(language);
   const initialDocumentRef = useRef(initialDocument);
   initialDocumentRef.current = initialDocument;
@@ -85,6 +95,7 @@ export function CanvasEditor({ language, documentId, initialDocument, outlineTar
         InlineFormula,
         BlockFormula,
         UnsupportedMarkdown,
+        DocumentSearch,
       ],
       content: initialDocument,
       // Formula React node views are created during editor initialization. Delay
@@ -140,5 +151,18 @@ export function CanvasEditor({ language, documentId, initialDocument, outlineTar
     scrollToOutlineHeading(editor.view.dom, outlineTarget.index);
   }, [editor, outlineTarget]);
 
+  useImperativeHandle(
+    ref,
+    () => ({
+      search: (query, direction) => (editor ? searchDocument(editor, query, direction) : { current: 0, total: 0 }),
+      clearSearch: () => {
+        if (editor) clearDocumentSearch(editor);
+      },
+      focus: () => editor?.commands.focus(),
+      getSelectedText: () => (editor ? getSelectedDocumentText(editor) : ''),
+    }),
+    [editor],
+  );
+
   return <EditorContent editor={editor} />;
-}
+});

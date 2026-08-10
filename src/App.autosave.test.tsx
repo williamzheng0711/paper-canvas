@@ -3,6 +3,7 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import App from './App';
+import type { SearchableEditorHandle } from './editor/search';
 
 type CanvasProps = {
   documentId: number;
@@ -11,7 +12,17 @@ type CanvasProps = {
   onChange: (document: JSONContent) => void;
 };
 
-const harness = vi.hoisted(() => ({ canvasProps: null as CanvasProps | null }));
+const harness = vi.hoisted(() => ({
+  canvasProps: null as CanvasProps | null,
+  searchHandle: {
+    search: vi.fn<(query: string, direction: 'reset' | 'next' | 'previous') => { current: number; total: number }>(
+      () => ({ current: 0, total: 0 }),
+    ),
+    clearSearch: vi.fn(),
+    focus: vi.fn(),
+    getSelectedText: vi.fn(() => ''),
+  },
+}));
 
 const files = vi.hoisted(() => ({
   clearDraft: vi.fn(async () => undefined),
@@ -27,6 +38,7 @@ const files = vi.hoisted(() => ({
     fontSize: 18,
     lineSpacing: 1.78,
     sidebarOpen: true,
+    recentFilesExpanded: true,
     language: 'zh-Hant' as const,
   })),
   hideRecentFile: vi.fn(async () => []),
@@ -36,6 +48,7 @@ const files = vi.hoisted(() => ({
     name: 'recent.md',
     document: { type: 'doc', content: [{ type: 'paragraph' }] },
   })),
+  removeRecentFile: vi.fn(async () => []),
   revealFileInFolder: vi.fn(async () => undefined),
   saveEditorFile: vi.fn(),
   saveDraft: vi.fn(async () => undefined),
@@ -48,13 +61,19 @@ vi.mock('@tauri-apps/api/core', () => ({
 }));
 vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn() }));
 vi.mock('./components/CanvasEditor', () => ({
-  CanvasEditor: (props: CanvasProps) => {
+  CanvasEditor: (props: CanvasProps & { ref?: React.Ref<SearchableEditorHandle> }) => {
     harness.canvasProps = props;
+    if (typeof props.ref === 'function') props.ref(harness.searchHandle);
+    if (props.ref && typeof props.ref === 'object') props.ref.current = harness.searchHandle;
     return null;
   },
 }));
 vi.mock('./components/MarkdownSourceEditor', () => ({
-  MarkdownSourceEditor: () => null,
+  MarkdownSourceEditor: (props: { ref?: React.Ref<SearchableEditorHandle> }) => {
+    if (typeof props.ref === 'function') props.ref(harness.searchHandle);
+    if (props.ref && typeof props.ref === 'object') props.ref.current = harness.searchHandle;
+    return null;
+  },
 }));
 vi.mock('./lib/files', () => ({
   chooseMarkdownFile: vi.fn(async () => null),
@@ -75,6 +94,7 @@ vi.mock('./lib/files', () => ({
   }),
   openMarkdownFile: vi.fn(),
   openRecent: files.openRecent,
+  removeRecentFile: files.removeRecentFile,
   revealFileInFolder: files.revealFileInFolder,
   renameEditorFile: vi.fn(),
   saveDraft: files.saveDraft,
@@ -104,6 +124,15 @@ describe('App autosave cursor stability', () => {
     vi.useFakeTimers();
     vi.clearAllMocks();
     harness.canvasProps = null;
+    let activeSearchResult = 0;
+    harness.searchHandle.search.mockImplementation((query, direction) => {
+      if (!query) return { current: 0, total: 0 };
+      if (direction === 'next') activeSearchResult = (activeSearchResult % 3) + 1;
+      else if (direction === 'previous') activeSearchResult = ((activeSearchResult + 1) % 3) + 1;
+      else activeSearchResult = 1;
+      return { current: activeSearchResult, total: 3 };
+    });
+    harness.searchHandle.getSelectedText.mockReturnValue('');
     files.loadDraft.mockResolvedValue({
       path: '/tmp/research.md',
       name: 'research.md',
@@ -234,6 +263,60 @@ describe('App autosave cursor stability', () => {
     expect(Array.from(host.querySelectorAll('button')).some((button) => button.textContent === '新增')).toBe(true);
     expect(document.documentElement.lang).toBe('zh-Hant');
     expect(files.savePreferences).toHaveBeenLastCalledWith(expect.objectContaining({ language: 'zh-Hant' }));
+  });
+
+  it('opens document search with Command-F, navigates, and restores editor focus on Escape', async () => {
+    harness.searchHandle.getSelectedText.mockReturnValue('研究');
+    const shortcut = new KeyboardEvent('keydown', {
+      key: 'f',
+      metaKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+
+    await act(async () => {
+      window.dispatchEvent(shortcut);
+      await flushEffects();
+    });
+
+    const input = host.querySelector<HTMLInputElement>('input[type="search"]');
+    expect(shortcut.defaultPrevented).toBe(true);
+    expect(input?.value).toBe('研究');
+    expect(document.activeElement).toBe(input);
+    expect(harness.searchHandle.search).toHaveBeenLastCalledWith('研究', 'reset');
+    expect(host.querySelector('.document-search__result')?.textContent).toBe('1 / 3');
+
+    await act(async () => {
+      input?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    });
+    expect(harness.searchHandle.search).toHaveBeenLastCalledWith('研究', 'next');
+    expect(host.querySelector('.document-search__result')?.textContent).toBe('2 / 3');
+
+    await act(async () => {
+      input?.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Enter',
+          shiftKey: true,
+          bubbles: true,
+        }),
+      );
+    });
+    expect(harness.searchHandle.search).toHaveBeenLastCalledWith('研究', 'previous');
+    expect(host.querySelector('.document-search__result')?.textContent).toBe('1 / 3');
+
+    await act(async () => {
+      input?.form?.dispatchEvent(new SubmitEvent('submit', { bubbles: true, cancelable: true }));
+    });
+    expect(harness.searchHandle.search).toHaveBeenLastCalledWith('研究', 'next');
+    expect(host.querySelector('.document-search__result')?.textContent).toBe('2 / 3');
+
+    await act(async () => {
+      input?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      await flushEffects();
+    });
+    expect(host.querySelector('.document-search')).toBeNull();
+    expect(harness.searchHandle.clearSearch).toHaveBeenCalledOnce();
+    expect(harness.searchHandle.focus).toHaveBeenCalledOnce();
   });
 
   it('applies and persists an adjusted line spacing without marking the document dirty', async () => {
@@ -395,7 +478,65 @@ describe('App autosave cursor stability', () => {
     });
 
     expect(files.hideRecentFile).toHaveBeenCalledWith('/tmp/recent.md');
+    expect(files.removeRecentFile).not.toHaveBeenCalled();
     expect(host.querySelector('.recent-list')).toBeNull();
     expect(host.textContent).toContain('尚未有最近文件');
+  });
+
+  it('alerts and removes a recent document that no longer exists', async () => {
+    const alert = vi.spyOn(window, 'alert').mockImplementation(() => undefined);
+    files.openRecent.mockResolvedValueOnce(null as never);
+    const recent = host.querySelector<HTMLButtonElement>('.recent-list button');
+
+    await act(async () => {
+      recent?.click();
+      await flushEffects();
+    });
+
+    expect(alert).toHaveBeenCalledWith(
+      '找不到「recent.md」。文件可能已被移動、重新命名或刪除，已自動從最近文件中移除。',
+    );
+    expect(files.removeRecentFile).toHaveBeenCalledWith('/tmp/recent.md');
+    expect(files.hideRecentFile).not.toHaveBeenCalled();
+    expect(host.querySelector('.recent-list')).toBeNull();
+    expect(host.textContent).toContain('尚未有最近文件');
+    alert.mockRestore();
+  });
+
+  it('keeps a recent document when opening fails for a reason other than a missing file', async () => {
+    const alert = vi.spyOn(window, 'alert').mockImplementation(() => undefined);
+    files.openRecent.mockRejectedValueOnce(new Error('沒有權限讀取文件'));
+    const recent = host.querySelector<HTMLButtonElement>('.recent-list button');
+
+    await act(async () => {
+      recent?.click();
+      await flushEffects();
+    });
+
+    expect(alert).not.toHaveBeenCalled();
+    expect(files.removeRecentFile).not.toHaveBeenCalled();
+    expect(files.hideRecentFile).not.toHaveBeenCalled();
+    expect(host.querySelector('.recent-list button')?.textContent).toBe('recent.md');
+    expect(host.querySelector('.status-message')?.textContent).toContain('沒有權限讀取文件');
+    alert.mockRestore();
+  });
+
+  it('collapses recent documents while keeping the outline visible and persists the choice', async () => {
+    const toggle = host.querySelector<HTMLButtonElement>('.sidebar-section-toggle');
+
+    expect(toggle?.getAttribute('aria-expanded')).toBe('true');
+    expect(host.querySelector('.recent-list')).not.toBeNull();
+    expect(host.textContent).toContain('大綱');
+
+    await act(async () => {
+      toggle?.click();
+      await flushEffects();
+    });
+
+    expect(toggle?.getAttribute('aria-expanded')).toBe('false');
+    expect(toggle?.title).toBe('展開最近文件');
+    expect(host.querySelector('#recent-files-panel')).toBeNull();
+    expect(host.textContent).toContain('大綱');
+    expect(files.savePreferences).toHaveBeenLastCalledWith(expect.objectContaining({ recentFilesExpanded: false }));
   });
 });

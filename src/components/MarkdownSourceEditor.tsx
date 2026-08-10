@@ -1,10 +1,11 @@
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands';
 import { markdown } from '@codemirror/lang-markdown';
 import { HighlightStyle, bracketMatching, syntaxHighlighting } from '@codemirror/language';
-import { Compartment, EditorState } from '@codemirror/state';
-import { EditorView, highlightActiveLine, keymap, lineNumbers } from '@codemirror/view';
+import { Compartment, EditorState, StateEffect, StateField } from '@codemirror/state';
+import { Decoration, EditorView, highlightActiveLine, keymap, lineNumbers } from '@codemirror/view';
 import { tags } from '@lezer/highlight';
-import { useEffect, useRef } from 'react';
+import { forwardRef, useEffect, useImperativeHandle, useRef } from 'react';
+import { findTextMatches, resolveActiveMatch, type SearchableEditorHandle } from '../editor/search';
 import { getMessages, type Language } from '../i18n';
 
 type Props = {
@@ -43,13 +44,43 @@ const markdownHighlightStyle = HighlightStyle.define([
   { tag: tags.punctuation, color: 'var(--markdown-punctuation)' },
 ]);
 
+const setSearchDecorations = StateEffect.define<{
+  matches: ReturnType<typeof findTextMatches>;
+  active: number;
+}>();
+
+const searchDecorations = StateField.define({
+  create: () => Decoration.none,
+  update: (decorations, transaction) => {
+    for (const effect of transaction.effects) {
+      if (!effect.is(setSearchDecorations)) continue;
+      return Decoration.set(
+        effect.value.matches.map((match, index) =>
+          Decoration.mark({
+            class:
+              index === effect.value.active
+                ? 'cm-document-search-match cm-document-search-match--active'
+                : 'cm-document-search-match',
+          }).range(match.from, match.to),
+        ),
+      );
+    }
+    return decorations.map(transaction.changes);
+  },
+  provide: (field) => EditorView.decorations.from(field),
+});
+
 /** A controlled CodeMirror surface for editable, syntax-coloured Markdown. */
-export function MarkdownSourceEditor({ language, value, onChange }: Props) {
+export const MarkdownSourceEditor = forwardRef<SearchableEditorHandle, Props>(function MarkdownSourceEditor(
+  { language, value, onChange },
+  ref,
+) {
   const host = useRef<HTMLDivElement>(null);
   const view = useRef<EditorView | null>(null);
   const contentAttributes = useRef(new Compartment()).current;
   const initialValue = useRef(value);
   const onChangeRef = useRef(onChange);
+  const currentSearch = useRef({ query: '', active: -1 });
   onChangeRef.current = onChange;
 
   useEffect(() => {
@@ -65,6 +96,7 @@ export function MarkdownSourceEditor({ language, value, onChange }: Props) {
           keymap.of([...defaultKeymap, ...historyKeymap, indentWithTab]),
           markdown(),
           syntaxHighlighting(markdownHighlightStyle),
+          searchDecorations,
           EditorView.lineWrapping,
           contentAttributes.of(
             EditorView.contentAttributes.of({
@@ -112,5 +144,53 @@ export function MarkdownSourceEditor({ language, value, onChange }: Props) {
     });
   }, [value]);
 
+  useImperativeHandle(
+    ref,
+    () => ({
+      search: (query, direction) => {
+        const editor = view.current;
+        if (!editor) return { current: 0, total: 0 };
+        const matches = findTextMatches(editor.state.doc.toString(), query);
+        const active = resolveActiveMatch(
+          matches,
+          query,
+          direction,
+          currentSearch.current.query,
+          currentSearch.current.active,
+          editor.state.selection.main.from,
+        );
+        currentSearch.current = { query, active };
+        const effects: StateEffect<unknown>[] = [setSearchDecorations.of({ matches, active })];
+        if (active >= 0) {
+          effects.push(EditorView.scrollIntoView(matches[active].from, { y: 'center' }));
+          editor.dispatch({
+            selection: {
+              anchor: matches[active].from,
+              head: matches[active].to,
+            },
+            effects,
+          });
+        } else {
+          editor.dispatch({ effects });
+        }
+        return { current: active + 1, total: matches.length };
+      },
+      clearSearch: () => {
+        currentSearch.current = { query: '', active: -1 };
+        view.current?.dispatch({
+          effects: setSearchDecorations.of({ matches: [], active: -1 }),
+        });
+      },
+      focus: () => view.current?.focus(),
+      getSelectedText: () => {
+        const editor = view.current;
+        if (!editor) return '';
+        const { from, to } = editor.state.selection.main;
+        return editor.state.sliceDoc(from, to);
+      },
+    }),
+    [],
+  );
+
   return <div ref={host} className="markdown-source-editor" />;
-}
+});

@@ -6,6 +6,7 @@ import { CanvasEditor } from './components/CanvasEditor';
 import { MarkdownSourceEditor } from './components/MarkdownSourceEditor';
 import { documentsEqual } from './editor/documentSync';
 import { collectOutline, documentToMarkdown, markdownToDocument } from './editor/markdown';
+import type { SearchDirection, SearchResult, SearchableEditorHandle } from './editor/search';
 import { getMessages, setCurrentLanguage, type Language } from './i18n';
 import { maximumFontSize, minimumFontSize, normalizeFontSize } from './lib/fontSize';
 import { maximumLineSpacing, minimumLineSpacing, normalizeLineSpacing } from './lib/lineSpacing';
@@ -22,6 +23,7 @@ import {
   newEditorFile,
   openMarkdownFile,
   openRecent,
+  removeRecentFile,
   revealFileInFolder,
   renameEditorFile,
   saveEditorFile,
@@ -65,6 +67,12 @@ export default function App() {
   }>();
   const [sourceMode, setSourceMode] = useState(false);
   const [rawMarkdown, setRawMarkdown] = useState('');
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchResult, setSearchResult] = useState<SearchResult>({
+    current: 0,
+    total: 0,
+  });
   const [pdfExporting, setPdfExporting] = useState(false);
   const [preferences, setPreferences] = useState<AppPreferences>({
     theme: 'light',
@@ -72,6 +80,7 @@ export default function App() {
     fontSize: 18,
     lineSpacing: 1.78,
     sidebarOpen: true,
+    recentFilesExpanded: true,
     language: 'zh-Hant',
   });
   const text = getMessages(preferences.language);
@@ -88,6 +97,9 @@ export default function App() {
   const openedByOperatingSystem = useRef(false);
   const recentExternalOpen = useRef(new Map<string, number>());
   const exportMenu = useRef<HTMLDetailsElement>(null);
+  const searchInput = useRef<HTMLInputElement>(null);
+  const canvasSearch = useRef<SearchableEditorHandle>(null);
+  const markdownSearch = useRef<SearchableEditorHandle>(null);
   const outlineRequest = useRef(0);
   const pdfExportingRef = useRef(false);
   fileRef.current = file;
@@ -336,6 +348,18 @@ export default function App() {
       setRecentContextMenu(null);
       try {
         const nextFile = await openRecent(item);
+        if (!nextFile) {
+          const missingMessage = getMessages().missingRecentFile(item.name);
+          setRecent((current) => current.filter((recentItem) => recentItem.path !== item.path));
+          window.alert(missingMessage);
+          try {
+            setRecent(await removeRecentFile(item.path));
+            setMessage(missingMessage);
+          } catch {
+            setMessage(`${missingMessage} ${getMessages().removeMissingRecentFailed}`);
+          }
+          return;
+        }
         await replaceWithOpenedFile(nextFile);
       } catch (error) {
         setMessage(error instanceof Error ? error.message : getMessages().recentOpenFailed);
@@ -412,6 +436,54 @@ export default function App() {
     }
   }, []);
 
+  const activeSearchEditor = useCallback(
+    () => (sourceModeRef.current ? markdownSearch.current : canvasSearch.current),
+    [],
+  );
+
+  const runSearch = useCallback(
+    (query: string, direction: SearchDirection) => {
+      const result = activeSearchEditor()?.search(query, direction) ?? {
+        current: 0,
+        total: 0,
+      };
+      setSearchResult(result);
+    },
+    [activeSearchEditor],
+  );
+
+  const openSearch = useCallback(() => {
+    if (searchOpen) {
+      searchInput.current?.focus();
+      searchInput.current?.select();
+      return;
+    }
+    const selectedText = activeSearchEditor()?.getSelectedText() ?? '';
+    const selectedQuery =
+      selectedText.trim() && selectedText.length <= 200 && !/[\r\n]/.test(selectedText) ? selectedText : '';
+    if (selectedQuery) setSearchQuery(selectedQuery);
+    setSearchOpen(true);
+  }, [activeSearchEditor, searchOpen]);
+
+  const closeSearch = useCallback(() => {
+    const editor = activeSearchEditor();
+    editor?.clearSearch();
+    setSearchOpen(false);
+    setSearchResult({ current: 0, total: 0 });
+    editor?.focus();
+  }, [activeSearchEditor]);
+
+  useEffect(() => {
+    if (!searchOpen) return;
+    searchInput.current?.focus();
+    searchInput.current?.select();
+  }, [searchOpen]);
+
+  useEffect(() => {
+    if (!searchOpen) return;
+    runSearch(searchQuery, 'reset');
+  }, [documentId, editRevision, preferences.language, runSearch, searchOpen, searchQuery, sourceMode]);
+
   const toggleSourceMode = () => {
     if (!sourceMode) {
       const markdown = documentToMarkdown(file.document);
@@ -437,8 +509,18 @@ export default function App() {
 
   useEffect(() => {
     const shortcuts = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && searchOpen) {
+        event.preventDefault();
+        closeSearch();
+        return;
+      }
       if (!(event.metaKey || event.ctrlKey)) return;
       const key = event.key.toLowerCase();
+      if (key === 'f') {
+        event.preventDefault();
+        openSearch();
+        return;
+      }
       if (key === 's' && event.shiftKey) {
         event.preventDefault();
         void saveCurrent(true);
@@ -459,7 +541,7 @@ export default function App() {
     };
     window.addEventListener('keydown', shortcuts);
     return () => window.removeEventListener('keydown', shortcuts);
-  }, [newFile, openFile, saveCurrent]);
+  }, [closeSearch, newFile, openFile, openSearch, saveCurrent, searchOpen]);
 
   const outline = useMemo(() => collectOutline(file.document), [file.document]);
   const metrics = useMemo(() => documentMetrics(file.document), [file.document]);
@@ -585,6 +667,16 @@ export default function App() {
             {sourceMode ? text.backToCanvas : text.showMarkdownSource}
           </button>
         </nav>
+        <button
+          className="icon-button search-button"
+          type="button"
+          aria-keyshortcuts="Meta+F Control+F"
+          aria-label={text.findDocument}
+          title={text.findShortcut}
+          onClick={openSearch}
+        >
+          ⌕
+        </button>
         <div className="topbar-spacer" />
         <label className="compact-control">
           {text.font}{' '}
@@ -674,36 +766,120 @@ export default function App() {
           {preferences.theme === 'light' ? '◐' : '◑'}
         </button>
       </header>
+      {searchOpen && (
+        <form
+          className="document-search"
+          role="search"
+          aria-label={text.findDocument}
+          onSubmit={(event) => {
+            event.preventDefault();
+            runSearch(searchQuery, 'next');
+          }}
+        >
+          <input
+            ref={searchInput}
+            type="search"
+            value={searchQuery}
+            aria-label={text.findDocument}
+            placeholder={text.findPlaceholder}
+            autoComplete="off"
+            spellCheck="false"
+            onChange={(event) => setSearchQuery(event.currentTarget.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') {
+                event.preventDefault();
+                runSearch(searchQuery, event.shiftKey ? 'previous' : 'next');
+              }
+              if (event.key === 'Escape') {
+                event.preventDefault();
+                event.stopPropagation();
+                closeSearch();
+              }
+            }}
+          />
+          <span className="document-search__result" aria-live="polite" aria-atomic="true">
+            {!searchQuery
+              ? text.findTypeToSearch
+              : searchResult.total === 0
+                ? text.findNoResults
+                : text.findResults(searchResult.current, searchResult.total)}
+          </span>
+          <button
+            type="button"
+            aria-label={text.findPrevious}
+            title={text.findPrevious}
+            disabled={searchResult.total === 0}
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={() => runSearch(searchQuery, 'previous')}
+          >
+            ‹
+          </button>
+          <button
+            type="button"
+            aria-label={text.findNext}
+            title={text.findNext}
+            disabled={searchResult.total === 0}
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={() => runSearch(searchQuery, 'next')}
+          >
+            ›
+          </button>
+          <button type="button" aria-label={text.closeFind} title={text.closeFind} onClick={closeSearch}>
+            ×
+          </button>
+        </form>
+      )}
       <section className="workspace">
         {preferences.sidebarOpen && (
           <aside className="sidebar">
-            <section>
-              <div className="sidebar-heading">{text.recentFiles}</div>
-              {recent.length === 0 ? (
-                <p className="muted">{text.noRecentFiles}</p>
-              ) : (
-                <ul className="recent-list">
-                  {recent.map((item) => (
-                    <li key={item.path}>
-                      <button
-                        title={item.path}
-                        onClick={() => void openRecentFile(item)}
-                        onContextMenu={(event) => {
-                          event.preventDefault();
-                          const menuWidth = 196;
-                          const menuHeight = 116;
-                          setRecentContextMenu({
-                            item,
-                            x: Math.max(8, Math.min(event.clientX, window.innerWidth - menuWidth - 8)),
-                            y: Math.max(8, Math.min(event.clientY, window.innerHeight - menuHeight - 8)),
-                          });
-                        }}
-                      >
-                        {item.name}
-                      </button>
-                    </li>
-                  ))}
-                </ul>
+            <section className={preferences.recentFilesExpanded ? '' : 'recent-section--collapsed'}>
+              <button
+                type="button"
+                className="sidebar-heading sidebar-section-toggle"
+                aria-expanded={preferences.recentFilesExpanded}
+                aria-controls="recent-files-panel"
+                title={preferences.recentFilesExpanded ? text.collapseRecentFiles : text.expandRecentFiles}
+                onClick={() =>
+                  setPreferences((current) => ({
+                    ...current,
+                    recentFilesExpanded: !current.recentFilesExpanded,
+                  }))
+                }
+              >
+                <span className="sidebar-section-chevron" aria-hidden="true">
+                  {preferences.recentFilesExpanded ? '▾' : '▸'}
+                </span>
+                {text.recentFiles}
+              </button>
+              {preferences.recentFilesExpanded && (
+                <div id="recent-files-panel">
+                  {recent.length === 0 ? (
+                    <p className="muted">{text.noRecentFiles}</p>
+                  ) : (
+                    <ul className="recent-list">
+                      {recent.map((item) => (
+                        <li key={item.path}>
+                          <button
+                            title={item.path}
+                            onClick={() => void openRecentFile(item)}
+                            onContextMenu={(event) => {
+                              event.preventDefault();
+                              const menuWidth = 196;
+                              const menuHeight = 116;
+                              setRecentContextMenu({
+                                item,
+                                x: Math.max(8, Math.min(event.clientX, window.innerWidth - menuWidth - 8)),
+                                y: Math.max(8, Math.min(event.clientY, window.innerHeight - menuHeight - 8)),
+                              });
+                            }}
+                          >
+                            {item.name}
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
               )}
             </section>
             <section>
@@ -740,6 +916,7 @@ export default function App() {
         >
           {sourceMode ? (
             <MarkdownSourceEditor
+              ref={markdownSearch}
               language={preferences.language}
               value={rawMarkdown}
               onChange={(value) => {
@@ -750,6 +927,7 @@ export default function App() {
             />
           ) : (
             <CanvasEditor
+              ref={canvasSearch}
               language={preferences.language}
               documentId={documentId}
               initialDocument={file.document}
