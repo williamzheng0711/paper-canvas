@@ -107,7 +107,14 @@ jobs:
             throw "PaperCanvas was not registered as an installed application."
           }
 
-          $application = Get-ChildItem -LiteralPath $paperCanvas.InstallLocation |
+          $installLocation = [Environment]::ExpandEnvironmentVariables(
+            ([string] $paperCanvas.InstallLocation).Trim('"')
+          )
+          if (-not $installLocation -or -not (Test-Path -LiteralPath $installLocation -PathType Container)) {
+            throw "The registered PaperCanvas installation directory does not exist."
+          }
+
+          $application = Get-ChildItem -LiteralPath $installLocation |
             Where-Object {
               -not $_.PSIsContainer -and
               $_.Extension -eq ".exe" -and
