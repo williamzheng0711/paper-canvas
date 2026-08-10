@@ -358,21 +358,31 @@ button {
   min-width: 0;
   flex: 1;
   overflow: auto;
+  overflow-anchor: none;
   background: var(--surface);
+}
+.editor-mode-pane {
+  min-width: 0;
+  min-height: 100%;
+  opacity: 1;
+  transition: opacity 90ms ease-out;
+}
+.canvas-area.is-switching-mode .editor-mode-pane {
+  opacity: 0;
 }
 .paper-editor,
 .markdown-source-editor {
   width: calc(100% - 56px);
   min-height: calc(100vh - 71px);
   margin: 0 auto;
-  padding: 55px 38px 100px;
   border-right: 1px solid var(--line);
   border-left: 1px solid var(--line);
   outline: none;
-  font-size: var(--editor-size);
-  line-height: var(--editor-line-height);
 }
 .paper-editor {
+  padding: 55px 38px 100px;
+  font-size: var(--editor-size);
+  line-height: var(--editor-line-height);
   caret-color: var(--accent);
 }
 .document-search-match,
@@ -759,9 +769,16 @@ button {
   white-space: pre-wrap;
 }
 .markdown-source-editor {
+  padding: 0;
   color: var(--text);
   background: transparent;
   font-size: 14px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .editor-mode-pane {
+    transition: none;
+  }
 }
 .markdown-source-editor .cm-editor {
   min-height: calc(100vh - 160px);

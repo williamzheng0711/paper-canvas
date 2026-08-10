@@ -1,9 +1,9 @@
 import type { JSONContent } from '@tiptap/core';
-import { act } from 'react';
+import { act, useEffect } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import App from './App';
-import type { SearchableEditorHandle } from './editor/search';
+import type { SwitchableEditorHandle } from './editor/search';
 
 type CanvasProps = {
   documentId: number;
@@ -14,6 +14,8 @@ type CanvasProps = {
 
 const harness = vi.hoisted(() => ({
   canvasProps: null as CanvasProps | null,
+  canvasMounts: 0,
+  canvasUnmounts: 0,
   searchHandle: {
     search: vi.fn<(query: string, direction: 'reset' | 'next' | 'previous') => { current: number; total: number }>(
       () => ({ current: 0, total: 0 }),
@@ -21,6 +23,15 @@ const harness = vi.hoisted(() => ({
     clearSearch: vi.fn(),
     focus: vi.fn(),
     getSelectedText: vi.fn(() => ''),
+    getSelectionProgress: vi.fn(() => 0.5),
+    getSelectionViewportOffset: vi.fn<() => number | undefined>(() => undefined),
+    setSelectionProgress: vi.fn(),
+    getMarkdownSelection: vi.fn<() => { markdown: string; offset: number } | undefined>(() => undefined),
+    getMarkdownOffset: vi.fn<() => number | undefined>(() => undefined),
+    setMarkdownOffset: vi.fn(() => true),
+    setDocumentSelection: vi.fn(() => true),
+    isFocused: vi.fn(() => false),
+    requestMeasure: vi.fn(),
   },
 }));
 
@@ -61,17 +72,34 @@ vi.mock('@tauri-apps/api/core', () => ({
 }));
 vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn() }));
 vi.mock('./components/CanvasEditor', () => ({
-  CanvasEditor: (props: CanvasProps & { ref?: React.Ref<SearchableEditorHandle> }) => {
+  CanvasEditor: (
+    props: CanvasProps & {
+      ref?: React.Ref<SwitchableEditorHandle>;
+      onReady?: () => void;
+    },
+  ) => {
+    const { onReady } = props;
     harness.canvasProps = props;
     if (typeof props.ref === 'function') props.ref(harness.searchHandle);
     if (props.ref && typeof props.ref === 'object') props.ref.current = harness.searchHandle;
+    useEffect(() => {
+      harness.canvasMounts += 1;
+      onReady?.();
+      return () => {
+        harness.canvasUnmounts += 1;
+      };
+    }, [onReady]);
     return null;
   },
 }));
 vi.mock('./components/MarkdownSourceEditor', () => ({
-  MarkdownSourceEditor: (props: { ref?: React.Ref<SearchableEditorHandle> }) => {
+  MarkdownSourceEditor: (props: { ref?: React.Ref<SwitchableEditorHandle>; onReady?: () => void }) => {
+    const { onReady } = props;
     if (typeof props.ref === 'function') props.ref(harness.searchHandle);
     if (props.ref && typeof props.ref === 'object') props.ref.current = harness.searchHandle;
+    useEffect(() => {
+      onReady?.();
+    }, [onReady]);
     return null;
   },
 }));
@@ -124,6 +152,8 @@ describe('App autosave cursor stability', () => {
     vi.useFakeTimers();
     vi.clearAllMocks();
     harness.canvasProps = null;
+    harness.canvasMounts = 0;
+    harness.canvasUnmounts = 0;
     let activeSearchResult = 0;
     harness.searchHandle.search.mockImplementation((query, direction) => {
       if (!query) return { current: 0, total: 0 };
@@ -133,6 +163,13 @@ describe('App autosave cursor stability', () => {
       return { current: activeSearchResult, total: 3 };
     });
     harness.searchHandle.getSelectedText.mockReturnValue('');
+    harness.searchHandle.getSelectionProgress.mockReturnValue(0.5);
+    harness.searchHandle.getSelectionViewportOffset.mockReturnValue(undefined);
+    harness.searchHandle.getMarkdownSelection.mockReturnValue(undefined);
+    harness.searchHandle.getMarkdownOffset.mockReturnValue(undefined);
+    harness.searchHandle.setMarkdownOffset.mockReturnValue(true);
+    harness.searchHandle.setDocumentSelection.mockReturnValue(true);
+    harness.searchHandle.isFocused.mockReturnValue(false);
     files.loadDraft.mockResolvedValue({
       path: '/tmp/research.md',
       name: 'research.md',
@@ -175,6 +212,108 @@ describe('App autosave cursor stability', () => {
     expect(files.saveEditorFile).toHaveBeenCalledOnce();
     expect(harness.canvasProps?.documentId).toBe(initialDocumentId);
     expect(harness.canvasProps?.initialDocument).toEqual(editedDocument);
+  });
+
+  it('keeps the canvas mounted and does not reload an unchanged Markdown round trip', async () => {
+    const initialDocumentId = harness.canvasProps?.documentId;
+    const showSource = Array.from(host.querySelectorAll<HTMLButtonElement>('button')).find(
+      (button) => button.textContent === '顯示原始 Markdown',
+    );
+
+    await act(async () => {
+      showSource?.click();
+      await flushEffects();
+      await vi.advanceTimersByTimeAsync(50);
+    });
+
+    expect(host.querySelector('.editor-mode-pane--canvas')?.hasAttribute('hidden')).toBe(true);
+    expect(harness.canvasMounts).toBe(1);
+    expect(harness.canvasUnmounts).toBe(0);
+
+    const backToCanvas = Array.from(host.querySelectorAll<HTMLButtonElement>('button')).find(
+      (button) => button.textContent === '返回畫布',
+    );
+    await act(async () => {
+      backToCanvas?.click();
+      await flushEffects();
+      await vi.advanceTimersByTimeAsync(50);
+    });
+
+    expect(harness.canvasProps?.documentId).toBe(initialDocumentId);
+    expect(host.querySelector('.editor-mode-pane--canvas')?.hasAttribute('hidden')).toBe(false);
+    expect(harness.canvasMounts).toBe(1);
+    expect(harness.canvasUnmounts).toBe(0);
+  });
+
+  it('carries a visible focused selection directly into Markdown mode', async () => {
+    const viewport = host.querySelector<HTMLElement>('.canvas-area');
+    if (!viewport) throw new Error('Expected the editor viewport');
+    Object.defineProperties(viewport, {
+      clientHeight: { configurable: true, value: 600 },
+      scrollHeight: { configurable: true, value: 2_600 },
+      scrollTop: { configurable: true, value: 1_000, writable: true },
+    });
+    harness.searchHandle.isFocused.mockReturnValue(true);
+    harness.searchHandle.getSelectionProgress.mockReturnValue(0.42);
+    harness.searchHandle.getSelectionViewportOffset.mockReturnValue(240);
+    const showSource = Array.from(host.querySelectorAll<HTMLButtonElement>('button')).find(
+      (button) => button.textContent === '顯示原始 Markdown',
+    );
+
+    await act(async () => {
+      showSource?.click();
+      await flushEffects();
+      await vi.advanceTimersByTimeAsync(50);
+    });
+
+    expect(harness.searchHandle.setSelectionProgress).toHaveBeenCalledWith(0.42);
+    expect(harness.searchHandle.focus).toHaveBeenCalled();
+    expect(host.querySelector('.editor-mode-pane--canvas')?.hasAttribute('hidden')).toBe(true);
+  });
+
+  it('maps the exact canvas caret into Markdown and back into the parsed text block', async () => {
+    const viewport = host.querySelector<HTMLElement>('.canvas-area');
+    if (!viewport) throw new Error('Expected the editor viewport');
+    Object.defineProperties(viewport, {
+      clientHeight: { configurable: true, value: 600 },
+      scrollHeight: { configurable: true, value: 2_600 },
+      scrollTop: { configurable: true, value: 1_000, writable: true },
+    });
+    harness.searchHandle.isFocused.mockReturnValue(true);
+    harness.searchHandle.getSelectionViewportOffset.mockReturnValue(240);
+    harness.searchHandle.getMarkdownSelection.mockReturnValue({
+      markdown: '原始內容\n',
+      offset: 3,
+    });
+    const showSource = Array.from(host.querySelectorAll<HTMLButtonElement>('button')).find(
+      (button) => button.textContent === '顯示原始 Markdown',
+    );
+
+    await act(async () => {
+      showSource?.click();
+      await flushEffects();
+      await vi.advanceTimersByTimeAsync(50);
+    });
+
+    expect(harness.searchHandle.setMarkdownOffset).toHaveBeenCalledWith(3);
+    expect(harness.searchHandle.focus).toHaveBeenCalled();
+
+    harness.searchHandle.setDocumentSelection.mockClear();
+    harness.searchHandle.getMarkdownOffset.mockReturnValue(5);
+    const backToCanvas = Array.from(host.querySelectorAll<HTMLButtonElement>('button')).find(
+      (button) => button.textContent === '返回畫布',
+    );
+    await act(async () => {
+      backToCanvas?.click();
+      await flushEffects();
+      await vi.advanceTimersByTimeAsync(50);
+    });
+
+    expect(harness.searchHandle.setDocumentSelection).toHaveBeenCalledWith({
+      kind: 'text',
+      path: [0],
+      offset: 4,
+    });
   });
 
   it('does not overwrite newer typing when an older save finishes later', async () => {

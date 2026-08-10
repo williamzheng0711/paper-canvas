@@ -2,6 +2,7 @@ import { Extension, type Editor } from '@tiptap/core';
 import type { Node as ProseMirrorNode } from '@tiptap/pm/model';
 import { Plugin, PluginKey, TextSelection } from '@tiptap/pm/state';
 import { Decoration, DecorationSet } from '@tiptap/pm/view';
+import type { DocumentSelectionAnchor, MarkdownSelection } from './selectionMapping';
 
 export type SearchDirection = 'reset' | 'next' | 'previous';
 
@@ -20,6 +21,22 @@ export type SearchableEditorHandle = {
   clearSearch: () => void;
   focus: () => void;
   getSelectedText: () => string;
+};
+
+export type SwitchableEditorHandle = SearchableEditorHandle & {
+  getSelectionProgress: () => number;
+  getSelectionViewportOffset: () => number | undefined;
+  setSelectionProgress: (progress: number) => void;
+  /** Canvas-only: serialize the document with its exact caret location. */
+  getMarkdownSelection?: () => MarkdownSelection | undefined;
+  /** Markdown-only: return the current UTF-16 source offset. */
+  getMarkdownOffset?: () => number | undefined;
+  /** Markdown-only: restore an exact UTF-16 source offset. */
+  setMarkdownOffset?: (offset: number) => boolean;
+  /** Canvas-only: restore a parsed structural/text anchor. */
+  setDocumentSelection?: (anchor: DocumentSelectionAnchor) => boolean;
+  isFocused: () => boolean;
+  requestMeasure: () => void;
 };
 
 type DocumentSearchState = {

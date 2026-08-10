@@ -4,14 +4,16 @@ import { HighlightStyle, bracketMatching, syntaxHighlighting } from '@codemirror
 import { Compartment, EditorState, StateEffect, StateField } from '@codemirror/state';
 import { Decoration, EditorView, highlightActiveLine, keymap, lineNumbers } from '@codemirror/view';
 import { tags } from '@lezer/highlight';
-import { forwardRef, useEffect, useImperativeHandle, useRef } from 'react';
-import { findTextMatches, resolveActiveMatch, type SearchableEditorHandle } from '../editor/search';
+import { forwardRef, useEffect, useImperativeHandle, useLayoutEffect, useRef } from 'react';
+import { offsetAtProgress } from '../editor/modeTransition';
+import { findTextMatches, resolveActiveMatch, type SwitchableEditorHandle } from '../editor/search';
 import { getMessages, type Language } from '../i18n';
 
 type Props = {
   language: Language;
   value: string;
   onChange: (value: string) => void;
+  onReady?: () => void;
 };
 
 const markdownHighlightStyle = HighlightStyle.define([
@@ -71,8 +73,8 @@ const searchDecorations = StateField.define({
 });
 
 /** A controlled CodeMirror surface for editable, syntax-coloured Markdown. */
-export const MarkdownSourceEditor = forwardRef<SearchableEditorHandle, Props>(function MarkdownSourceEditor(
-  { language, value, onChange },
+export const MarkdownSourceEditor = forwardRef<SwitchableEditorHandle, Props>(function MarkdownSourceEditor(
+  { language, value, onChange, onReady },
   ref,
 ) {
   const host = useRef<HTMLDivElement>(null);
@@ -80,10 +82,13 @@ export const MarkdownSourceEditor = forwardRef<SearchableEditorHandle, Props>(fu
   const contentAttributes = useRef(new Compartment()).current;
   const initialValue = useRef(value);
   const onChangeRef = useRef(onChange);
+  const onReadyRef = useRef(onReady);
+  const applyingExternalValue = useRef(false);
   const currentSearch = useRef({ query: '', active: -1 });
   onChangeRef.current = onChange;
+  onReadyRef.current = onReady;
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!host.current) return;
     const editor = new EditorView({
       state: EditorState.create({
@@ -105,13 +110,18 @@ export const MarkdownSourceEditor = forwardRef<SearchableEditorHandle, Props>(fu
             }),
           ),
           EditorView.updateListener.of((update) => {
-            if (update.docChanged) onChangeRef.current(update.state.doc.toString());
+            if (update.docChanged && !applyingExternalValue.current) {
+              onChangeRef.current(update.state.doc.toString());
+            }
           }),
         ],
       }),
       parent: host.current,
     });
     view.current = editor;
+    queueMicrotask(() => {
+      if (view.current === editor) onReadyRef.current?.();
+    });
     return () => {
       if (view.current === editor) view.current = null;
       editor.destroy();
@@ -135,13 +145,18 @@ export const MarkdownSourceEditor = forwardRef<SearchableEditorHandle, Props>(fu
     const current = editor.state.doc.toString();
     if (current === value) return;
     const { anchor, head } = editor.state.selection.main;
-    editor.dispatch({
-      changes: { from: 0, to: current.length, insert: value },
-      selection: {
-        anchor: Math.min(anchor, value.length),
-        head: Math.min(head, value.length),
-      },
-    });
+    applyingExternalValue.current = true;
+    try {
+      editor.dispatch({
+        changes: { from: 0, to: current.length, insert: value },
+        selection: {
+          anchor: Math.min(anchor, value.length),
+          head: Math.min(head, value.length),
+        },
+      });
+    } finally {
+      applyingExternalValue.current = false;
+    }
   }, [value]);
 
   useImperativeHandle(
@@ -188,6 +203,41 @@ export const MarkdownSourceEditor = forwardRef<SearchableEditorHandle, Props>(fu
         const { from, to } = editor.state.selection.main;
         return editor.state.sliceDoc(from, to);
       },
+      getSelectionProgress: () => {
+        const editor = view.current;
+        if (!editor) return 0;
+        const documentLength = Math.max(1, editor.state.doc.length);
+        return editor.state.selection.main.head / documentLength;
+      },
+      getSelectionViewportOffset: () => {
+        const editor = view.current;
+        const viewport = host.current?.closest<HTMLElement>('.canvas-area');
+        if (!editor || !viewport) return undefined;
+        const coordinates = editor.coordsAtPos(editor.state.selection.main.head);
+        return coordinates ? coordinates.top - viewport.getBoundingClientRect().top : undefined;
+      },
+      setSelectionProgress: (progress) => {
+        const editor = view.current;
+        if (!editor) return;
+        editor.dispatch({
+          selection: {
+            anchor: offsetAtProgress(editor.state.doc.length, progress),
+          },
+        });
+      },
+      getMarkdownOffset: () => view.current?.state.selection.main.head,
+      setMarkdownOffset: (offset) => {
+        const editor = view.current;
+        if (!editor) return false;
+        const position = Math.min(
+          editor.state.doc.length,
+          Math.max(0, Math.round(Number.isFinite(offset) ? offset : 0)),
+        );
+        editor.dispatch({ selection: { anchor: position } });
+        return true;
+      },
+      isFocused: () => view.current?.hasFocus ?? false,
+      requestMeasure: () => view.current?.requestMeasure(),
     }),
     [],
   );

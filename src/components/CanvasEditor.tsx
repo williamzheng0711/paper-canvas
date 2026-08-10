@@ -7,21 +7,27 @@ import TaskList from '@tiptap/extension-task-list';
 import { EditorContent, useEditor } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
 import { common, createLowlight } from 'lowlight';
-import { forwardRef, useEffect, useImperativeHandle, useRef } from 'react';
+import { forwardRef, useEffect, useImperativeHandle, useLayoutEffect, useRef } from 'react';
 import type { JSONContent } from '@tiptap/core';
+import { Selection } from '@tiptap/pm/state';
 import type { EditorView } from '@tiptap/pm/view';
 import { BlockFormula, InlineFormula } from '../editor/Formula';
 import { replaceDocumentPreservingSelection } from '../editor/documentSync';
 import { insertPastedFormula, insertPastedMarkdown, sanitizePastedHtml } from '../editor/paste';
 import { PaperImage } from '../editor/PaperImage';
 import { scrollToOutlineHeading } from '../editor/outline';
+import {
+  markdownSelectionFromMarkedDocument,
+  positionFromDocumentAnchor,
+  selectionMarker,
+} from '../editor/selectionMapping';
 import { UnsupportedMarkdown } from '../editor/UnsupportedMarkdown';
 import {
   clearDocumentSearch,
   DocumentSearch,
   getSelectedDocumentText,
   searchDocument,
-  type SearchableEditorHandle,
+  type SwitchableEditorHandle,
 } from '../editor/search';
 import { getMessages, type Language } from '../i18n';
 
@@ -33,6 +39,7 @@ type Props = {
   initialDocument: JSONContent;
   outlineTarget?: { index: number; request: number };
   onChange: (document: JSONContent) => void;
+  onReady?: () => void;
 };
 
 function readImage(file: File): Promise<string> {
@@ -56,8 +63,8 @@ function insertImage(view: EditorView, src: string, alt = '', position?: number)
   view.focus();
 }
 
-export const CanvasEditor = forwardRef<SearchableEditorHandle, Props>(function CanvasEditor(
-  { language, documentId, initialDocument, outlineTarget, onChange },
+export const CanvasEditor = forwardRef<SwitchableEditorHandle, Props>(function CanvasEditor(
+  { language, documentId, initialDocument, outlineTarget, onChange, onReady },
   ref,
 ) {
   const text = getMessages(language);
@@ -141,10 +148,14 @@ export const CanvasEditor = forwardRef<SearchableEditorHandle, Props>(function C
     [language],
   );
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!editor) return;
     replaceDocumentPreservingSelection(editor, initialDocumentRef.current);
   }, [documentId, editor]);
+
+  useEffect(() => {
+    if (editor) onReady?.();
+  }, [editor, onReady]);
 
   useEffect(() => {
     if (!editor || !outlineTarget) return;
@@ -158,8 +169,47 @@ export const CanvasEditor = forwardRef<SearchableEditorHandle, Props>(function C
       clearSearch: () => {
         if (editor) clearDocumentSearch(editor);
       },
-      focus: () => editor?.commands.focus(),
+      focus: () => editor?.view.focus(),
       getSelectedText: () => (editor ? getSelectedDocumentText(editor) : ''),
+      getSelectionProgress: () => {
+        if (!editor) return 0;
+        const documentSize = Math.max(1, editor.state.doc.content.size);
+        return editor.state.selection.head / documentSize;
+      },
+      getSelectionViewportOffset: () => {
+        if (!editor) return undefined;
+        const viewport = editor.view.dom.closest<HTMLElement>('.canvas-area');
+        if (!viewport) return undefined;
+        const coordinates = editor.view.coordsAtPos(editor.state.selection.head);
+        return coordinates.top - viewport.getBoundingClientRect().top;
+      },
+      setSelectionProgress: (progress) => {
+        if (!editor) return;
+        const documentSize = editor.state.doc.content.size;
+        const position = Math.round(Math.min(1, Math.max(0, progress)) * documentSize);
+        const selection = Selection.near(editor.state.doc.resolve(position));
+        editor.view.dispatch(editor.state.tr.setSelection(selection));
+      },
+      getMarkdownSelection: () => {
+        if (!editor) return undefined;
+        try {
+          const position = editor.state.selection.head;
+          const markedDocument = editor.state.tr.insertText(selectionMarker, position, position).doc.toJSON();
+          return markdownSelectionFromMarkedDocument(editor.getJSON(), markedDocument);
+        } catch {
+          return undefined;
+        }
+      },
+      setDocumentSelection: (anchor) => {
+        if (!editor) return false;
+        const resolved = positionFromDocumentAnchor(editor.state.doc, anchor);
+        if (!resolved) return false;
+        const selection = Selection.near(editor.state.doc.resolve(resolved.position), resolved.affinity);
+        editor.view.dispatch(editor.state.tr.setSelection(selection));
+        return true;
+      },
+      isFocused: () => editor?.view.hasFocus() ?? false,
+      requestMeasure: () => undefined,
     }),
     [editor],
   );

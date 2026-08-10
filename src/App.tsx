@@ -1,12 +1,14 @@
 import { invoke, isTauri } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import type { JSONContent } from '@tiptap/core';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { CanvasEditor } from './components/CanvasEditor';
 import { MarkdownSourceEditor } from './components/MarkdownSourceEditor';
 import { documentsEqual } from './editor/documentSync';
 import { collectOutline, documentToMarkdown, markdownToDocument } from './editor/markdown';
-import type { SearchDirection, SearchResult, SearchableEditorHandle } from './editor/search';
+import { captureViewport, restoreViewport, type ViewportSnapshot } from './editor/modeTransition';
+import type { SearchDirection, SearchResult, SwitchableEditorHandle } from './editor/search';
+import { markdownToDocumentWithSelection, type DocumentSelectionAnchor } from './editor/selectionMapping';
 import { getMessages, setCurrentLanguage, type Language } from './i18n';
 import { maximumFontSize, minimumFontSize, normalizeFontSize } from './lib/fontSize';
 import { maximumLineSpacing, minimumLineSpacing, normalizeLineSpacing } from './lib/lineSpacing';
@@ -36,6 +38,17 @@ import {
 
 type SaveStatus = 'saved' | 'saving' | 'draft' | 'error' | 'unsaved';
 type RecentContextMenu = { item: RecentFile; x: number; y: number };
+type EditorMode = 'canvas' | 'source';
+type SemanticModeSelection =
+  { kind: 'markdown'; offset: number } | { kind: 'document'; anchor: DocumentSelectionAnchor };
+type PendingModeTransition = {
+  target: EditorMode;
+  viewport: ViewportSnapshot;
+  selectionProgress: number;
+  semanticSelection?: SemanticModeSelection;
+  selectionViewportOffset?: number;
+  restoreFocus: boolean;
+};
 
 function documentMetrics(document: JSONContent): {
   characters: number;
@@ -66,6 +79,7 @@ export default function App() {
     request: number;
   }>();
   const [sourceMode, setSourceMode] = useState(false);
+  const [modeTransitioning, setModeTransitioning] = useState(false);
   const [rawMarkdown, setRawMarkdown] = useState('');
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -98,8 +112,11 @@ export default function App() {
   const recentExternalOpen = useRef(new Map<string, number>());
   const exportMenu = useRef<HTMLDetailsElement>(null);
   const searchInput = useRef<HTMLInputElement>(null);
-  const canvasSearch = useRef<SearchableEditorHandle>(null);
-  const markdownSearch = useRef<SearchableEditorHandle>(null);
+  const canvasSearch = useRef<SwitchableEditorHandle>(null);
+  const markdownSearch = useRef<SwitchableEditorHandle>(null);
+  const canvasArea = useRef<HTMLElement>(null);
+  const pendingModeTransition = useRef<PendingModeTransition | undefined>(undefined);
+  const modeTransitionFrame = useRef<number | undefined>(undefined);
   const outlineRequest = useRef(0);
   const pdfExportingRef = useRef(false);
   fileRef.current = file;
@@ -484,9 +501,92 @@ export default function App() {
     runSearch(searchQuery, 'reset');
   }, [documentId, editRevision, preferences.language, runSearch, searchOpen, searchQuery, sourceMode]);
 
+  const restoreModeTransition = useCallback((target: EditorMode) => {
+    const pending = pendingModeTransition.current;
+    const viewport = canvasArea.current;
+    const editor = target === 'source' ? markdownSearch.current : canvasSearch.current;
+    if (!pending || pending.target !== target || !viewport || !editor) return false;
+
+    if (modeTransitionFrame.current !== undefined) cancelAnimationFrame(modeTransitionFrame.current);
+    const semanticRestored =
+      pending.semanticSelection?.kind === 'markdown'
+        ? (editor.setMarkdownOffset?.(pending.semanticSelection.offset) ?? false)
+        : pending.semanticSelection?.kind === 'document'
+          ? (editor.setDocumentSelection?.(pending.semanticSelection.anchor) ?? false)
+          : false;
+    if (!semanticRestored) editor.setSelectionProgress(pending.selectionProgress);
+    editor.requestMeasure();
+    if (pending.restoreFocus) editor.focus();
+    restoreViewport(viewport, pending.viewport);
+
+    let remainingPasses = 2;
+    const settle = () => {
+      if (pendingModeTransition.current !== pending) return;
+      editor.requestMeasure();
+      const selectionOffset = editor.getSelectionViewportOffset();
+      if (pending.selectionViewportOffset !== undefined && selectionOffset !== undefined) {
+        const maximumScroll = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
+        viewport.scrollTop = Math.min(
+          maximumScroll,
+          Math.max(0, viewport.scrollTop + selectionOffset - pending.selectionViewportOffset),
+        );
+      } else {
+        restoreViewport(viewport, pending.viewport);
+      }
+      remainingPasses -= 1;
+      if (remainingPasses > 0) {
+        modeTransitionFrame.current = requestAnimationFrame(settle);
+        return;
+      }
+      pendingModeTransition.current = undefined;
+      modeTransitionFrame.current = undefined;
+      setModeTransitioning(false);
+    };
+    modeTransitionFrame.current = requestAnimationFrame(settle);
+    return true;
+  }, []);
+
+  const canvasReady = useCallback(() => restoreModeTransition('canvas'), [restoreModeTransition]);
+  const sourceReady = useCallback(() => restoreModeTransition('source'), [restoreModeTransition]);
+
+  useLayoutEffect(() => {
+    restoreModeTransition(sourceMode ? 'source' : 'canvas');
+  }, [documentId, restoreModeTransition, sourceMode]);
+
+  useEffect(
+    () => () => {
+      if (modeTransitionFrame.current !== undefined) cancelAnimationFrame(modeTransitionFrame.current);
+    },
+    [],
+  );
+
+  const beginModeTransition = (target: EditorMode, semanticSelection?: SemanticModeSelection) => {
+    const viewport = canvasArea.current;
+    const editor = sourceModeRef.current ? markdownSearch.current : canvasSearch.current;
+    if (!viewport) return;
+    const snapshot = captureViewport(viewport);
+    const editorFocused = editor?.isFocused() ?? false;
+    const selectionViewportOffset = editorFocused ? editor?.getSelectionViewportOffset() : undefined;
+    const selectionVisible =
+      selectionViewportOffset !== undefined &&
+      selectionViewportOffset >= 0 &&
+      selectionViewportOffset <= viewport.clientHeight;
+    pendingModeTransition.current = {
+      target,
+      viewport: snapshot,
+      selectionProgress: selectionVisible ? (editor?.getSelectionProgress() ?? snapshot.progress) : snapshot.progress,
+      semanticSelection: selectionVisible ? semanticSelection : undefined,
+      selectionViewportOffset: selectionVisible ? selectionViewportOffset : undefined,
+      restoreFocus: editorFocused,
+    };
+    setModeTransitioning(true);
+  };
+
   const toggleSourceMode = () => {
     if (!sourceMode) {
-      const markdown = documentToMarkdown(file.document);
+      const mappedSelection = canvasSearch.current?.getMarkdownSelection?.();
+      const markdown = mappedSelection?.markdown ?? documentToMarkdown(fileRef.current.document);
+      beginModeTransition('source', mappedSelection ? { kind: 'markdown', offset: mappedSelection.offset } : undefined);
       rawMarkdownRef.current = markdown;
       setRawMarkdown(markdown);
       sourceModeRef.current = true;
@@ -494,12 +594,22 @@ export default function App() {
       return;
     }
     try {
-      const nextDocument = markdownToDocument(rawMarkdown);
-      const nextFile = { ...fileRef.current, document: nextDocument };
-      fileRef.current = nextFile;
-      setFile(nextFile);
-      setDocumentId((id) => id + 1);
-      markEdited();
+      const parsedSelection = markdownToDocumentWithSelection(
+        rawMarkdownRef.current,
+        markdownSearch.current?.getMarkdownOffset?.(),
+      );
+      const nextDocument = parsedSelection.document;
+      const currentFile = fileRef.current;
+      beginModeTransition(
+        'canvas',
+        parsedSelection.anchor ? { kind: 'document', anchor: parsedSelection.anchor } : undefined,
+      );
+      if (!documentsEqual(currentFile.document, nextDocument)) {
+        const nextFile = { ...currentFile, document: nextDocument };
+        fileRef.current = nextFile;
+        setFile(nextFile);
+        setDocumentId((id) => id + 1);
+      }
       sourceModeRef.current = false;
       setSourceMode(false);
     } catch (error) {
@@ -662,6 +772,9 @@ export default function App() {
           </details>
           <button
             className={sourceMode ? 'source-mode-button is-active' : 'source-mode-button'}
+            onPointerDown={(event) => {
+              if (event.button === 0) event.preventDefault();
+            }}
             onClick={toggleSourceMode}
           >
             {sourceMode ? text.backToCanvas : text.showMarkdownSource}
@@ -906,7 +1019,9 @@ export default function App() {
           </aside>
         )}
         <section
-          className="canvas-area"
+          ref={canvasArea}
+          className={modeTransitioning ? 'canvas-area is-switching-mode' : 'canvas-area'}
+          aria-busy={modeTransitioning || undefined}
           style={
             {
               '--editor-size': `${preferences.fontSize}px`,
@@ -914,24 +1029,14 @@ export default function App() {
             } as React.CSSProperties
           }
         >
-          {sourceMode ? (
-            <MarkdownSourceEditor
-              ref={markdownSearch}
-              language={preferences.language}
-              value={rawMarkdown}
-              onChange={(value) => {
-                rawMarkdownRef.current = value;
-                setRawMarkdown(value);
-                markEdited();
-              }}
-            />
-          ) : (
+          <div className="editor-mode-pane editor-mode-pane--canvas" hidden={sourceMode}>
             <CanvasEditor
               ref={canvasSearch}
               language={preferences.language}
               documentId={documentId}
               initialDocument={file.document}
               outlineTarget={outlineTarget}
+              onReady={canvasReady}
               onChange={(document) => {
                 setFile((current) => {
                   const nextFile = { ...current, document };
@@ -941,6 +1046,21 @@ export default function App() {
                 markEdited();
               }}
             />
+          </div>
+          {sourceMode && (
+            <div className="editor-mode-pane editor-mode-pane--source">
+              <MarkdownSourceEditor
+                ref={markdownSearch}
+                language={preferences.language}
+                value={rawMarkdown}
+                onReady={sourceReady}
+                onChange={(value) => {
+                  rawMarkdownRef.current = value;
+                  setRawMarkdown(value);
+                  markEdited();
+                }}
+              />
+            </div>
           )}
         </section>
       </section>
