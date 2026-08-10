@@ -71,3 +71,53 @@ jobs:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
+
+  verify-windows:
+    name: Verify public Windows installer
+    needs: deploy
+    runs-on: windows-latest
+    steps:
+      - name: Download, install, and launch PaperCanvas
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $installer = Join-Path $env:RUNNER_TEMP "PaperCanvas-Windows-x64-Setup.exe"
+          $downloadUrl = "https://williamzheng0711.github.io/paper-canvas/download/PaperCanvas-Windows-x64-Setup.exe"
+
+          Invoke-WebRequest -Uri $downloadUrl -OutFile $installer
+          if ((Get-Item $installer).Length -lt 1MB) {
+            throw "The public Windows installer is unexpectedly small."
+          }
+
+          $installation = Start-Process -FilePath $installer -ArgumentList "/S" -Wait -PassThru
+          if ($installation.ExitCode -ne 0) {
+            throw "The Windows installer exited with code $($installation.ExitCode)."
+          }
+
+          $uninstallEntries = @(
+            "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*",
+            "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*",
+            "HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"
+          )
+          $paperCanvas = Get-ItemProperty $uninstallEntries -ErrorAction SilentlyContinue |
+            Where-Object { $_.DisplayName -eq "PaperCanvas" } |
+            Select-Object -First 1
+
+          if (-not $paperCanvas) {
+            throw "PaperCanvas was not registered as an installed application."
+          }
+
+          $application = Get-ChildItem -Path $paperCanvas.InstallLocation -Filter "*.exe" -File |
+            Where-Object { $_.Name -notmatch "uninstall" } |
+            Select-Object -First 1
+          if (-not $application) {
+            throw "The installed PaperCanvas executable was not found."
+          }
+
+          $process = Start-Process -FilePath $application.FullName -PassThru
+          Start-Sleep -Seconds 10
+          if ($process.HasExited) {
+            throw "PaperCanvas exited during its launch smoke test with code $($process.ExitCode)."
+          }
+
+          Stop-Process -Id $process.Id -Force
