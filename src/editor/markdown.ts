@@ -166,6 +166,14 @@ export function normalizeLatexDelimiters(markdown: string): string {
       continue;
     }
 
+    const sameLineBracketDisplay = /^\s*\\\[\s*([\s\S]*?\S)\s*\\\]\s*$/.exec(
+      line,
+    );
+    if (sameLineBracketDisplay) {
+      normalized.push(`$$${sameLineBracketDisplay[1]}$$`);
+      continue;
+    }
+
     if (/^\s*\\\[\s*$/.test(line)) {
       bracketOpeningIndex = normalized.length;
       bracketOpeningSource = line;

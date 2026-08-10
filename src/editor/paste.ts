@@ -1,4 +1,85 @@
 import DOMPurify from 'dompurify';
+import type { JSONContent } from '@tiptap/core';
+import { Slice } from '@tiptap/pm/model';
+import { AllSelection } from '@tiptap/pm/state';
+import type { EditorView } from '@tiptap/pm/view';
+import { displayFormulaAfterTextInsertion, formulaFromClipboard } from './formulaInput';
+import { markdownToDocument } from './markdown';
+
+function containsFormula(node: JSONContent): boolean {
+  return node.type === 'inlineFormula' || node.type === 'blockFormula' || (node.content ?? []).some(containsFormula);
+}
+
+/** Parse mixed plain-text Markdown only when it contains explicit math. */
+export function markdownDocumentFromClipboard(text: string): JSONContent | null {
+  if (!text.trim()) return null;
+  const document = markdownToDocument(text);
+  return containsFormula(document) ? document : null;
+}
+
+/** Insert mixed Markdown/math as a structural slice instead of one formula. */
+export function insertPastedMarkdown(view: EditorView, text: string): boolean {
+  const document = markdownDocumentFromClipboard(text);
+  if (!document) return false;
+  const parsed = view.state.schema.nodeFromJSON(document);
+  const transaction =
+    view.state.selection instanceof AllSelection
+      ? view.state.tr.replaceWith(0, view.state.doc.content.size, parsed.content)
+      : view.state.tr.replaceSelection(Slice.maxOpen(parsed.content));
+  view.dispatch(transaction.scrollIntoView());
+  return true;
+}
+
+/** Insert standalone TeX, including source pasted into prewritten delimiters. */
+export function insertPastedFormula(view: EditorView, text: string): boolean {
+  const formula = formulaFromClipboard(text);
+  const { selection, schema } = view.state;
+  const $from = selection.$from;
+  const $to = selection.$to;
+  if ($from.sameParent($to) && $from.parent.type.name === 'paragraph') {
+    const insertedText = formula?.latex ?? text;
+    const parsed = displayFormulaAfterTextInsertion({
+      parentText: $from.parent.textContent,
+      from: $from.parentOffset,
+      to: $to.parentOffset,
+      insertedText,
+    });
+    const codeMark = schema.marks.code;
+    const blockFormula = schema.nodes.blockFormula;
+    if (parsed && blockFormula && !(codeMark && $from.parent.rangeHasMark(0, $from.parent.content.size, codeMark))) {
+      view.dispatch(
+        view.state.tr
+          .replaceWith(
+            $from.before(),
+            $from.after(),
+            blockFormula.create({
+              latex: parsed.latex,
+              autoEdit: true,
+              sourceCaret: parsed.caret,
+            }),
+          )
+          .scrollIntoView(),
+      );
+      return true;
+    }
+  }
+
+  if (!formula) return false;
+  const formulaNode = schema.nodes[formula.kind === 'block' ? 'blockFormula' : 'inlineFormula'];
+  if (!formulaNode) return false;
+  view.dispatch(
+    view.state.tr
+      .replaceSelectionWith(
+        formulaNode.create({
+          latex: formula.latex,
+          autoEdit: formula.sourceCaret !== undefined,
+          sourceCaret: formula.sourceCaret ?? null,
+        }),
+      )
+      .scrollIntoView(),
+  );
+  return true;
+}
 
 /**
  * Keep the HTML path deliberately small. ProseMirror will turn this into its
@@ -9,6 +90,8 @@ export function sanitizePastedHtml(html: string): string {
   return DOMPurify.sanitize(html, {
     ALLOWED_TAGS: [
       'p',
+      'div',
+      'span',
       'br',
       'strong',
       'b',
@@ -37,7 +120,18 @@ export function sanitizePastedHtml(html: string): string {
       'td',
       'img',
     ],
-    ALLOWED_ATTR: ['href', 'src', 'alt', 'title'],
+    ALLOWED_ATTR: [
+      'href',
+      'src',
+      'alt',
+      'title',
+      // Formula nodes use inert source attributes during editor-to-editor copy.
+      // KaTeX still renders them with `trust: false` after ProseMirror parses
+      // the sanitized element back into a formula node.
+      'latex',
+      'data-formula-kind',
+      'data-latex',
+    ],
     ALLOW_DATA_ATTR: false,
   });
 }

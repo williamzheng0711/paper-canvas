@@ -12,8 +12,7 @@ import type { JSONContent } from '@tiptap/core';
 import type { EditorView } from '@tiptap/pm/view';
 import { BlockFormula, InlineFormula } from '../editor/Formula';
 import { replaceDocumentPreservingSelection } from '../editor/documentSync';
-import { formulaFromClipboard } from '../editor/formulaInput';
-import { sanitizePastedHtml } from '../editor/paste';
+import { insertPastedFormula, insertPastedMarkdown, sanitizePastedHtml } from '../editor/paste';
 import { PaperImage } from '../editor/PaperImage';
 import { scrollToOutlineHeading } from '../editor/outline';
 import { UnsupportedMarkdown } from '../editor/UnsupportedMarkdown';
@@ -101,23 +100,19 @@ export function CanvasEditor({ language, documentId, initialDocument, outlineTar
             void readImage(image).then((src) => insertImage(view, src, image.name));
             return true;
           }
-          const formula = formulaFromClipboard(event.clipboardData?.getData('text/plain') ?? '');
-          if (!formula) return false;
-          const formulaNode = view.state.schema.nodes[formula.kind === 'block' ? 'blockFormula' : 'inlineFormula'];
-          if (!formulaNode) return false;
-          view.dispatch(
-            view.state.tr
-              .replaceSelectionWith(
-                formulaNode.create({
-                  latex: formula.latex,
-                  autoEdit: formula.sourceCaret !== undefined,
-                  sourceCaret: formula.sourceCaret ?? null,
-                }),
-              )
-              .scrollIntoView(),
-          );
-          view.focus();
-          return true;
+          const plainText = event.clipboardData?.getData('text/plain') ?? '';
+          if (insertPastedFormula(view, plainText)) {
+            view.focus();
+            return true;
+          }
+          // Preserve rich HTML through ProseMirror's sanitized HTML path. For
+          // plain text, parse mixed Markdown/math as one structural slice so a
+          // citation command cannot collapse several paragraphs into one node.
+          if (!event.clipboardData?.getData('text/html') && insertPastedMarkdown(view, plainText)) {
+            view.focus();
+            return true;
+          }
+          return false;
         },
         handleDrop: (view, event) => {
           const image = Array.from(event.dataTransfer?.files ?? []).find((file) => file.type.startsWith('image/'));

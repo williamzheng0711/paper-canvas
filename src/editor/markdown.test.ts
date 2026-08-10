@@ -95,6 +95,15 @@ S(\\theta')\\le n\\ \\text{MB},
     expect(nodesOfType(reopened, "blockFormula")).toHaveLength(2);
   });
 
+  it("imports a same-line Typora display formula without leaving literal brackets", () => {
+    const document = markdownToDocument("Before\n\n\\[x^2+y^2\\]\n\nAfter");
+    const blocks = nodesOfType(document, "blockFormula");
+
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0].attrs?.latex).toBe("x^2+y^2");
+    expect(JSON.stringify(document)).not.toContain("\\\\[");
+  });
+
   it("imports standalone LaTeX display environments and keeps their wrappers", () => {
     const source = `Before
 

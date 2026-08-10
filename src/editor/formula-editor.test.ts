@@ -22,6 +22,17 @@ function typeThroughInputRules(editor: Editor, text: string): void {
   }
 }
 
+function holdAnimationFrames(): () => void {
+  const frames: FrameRequestCallback[] = [];
+  vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+    frames.push(callback);
+    return frames.length;
+  });
+  return () => {
+    while (frames.length > 0) frames.shift()?.(0);
+  };
+}
+
 describe("inline formula input rule", () => {
   it("replaces completed dollar-delimited input with a visual formula node", () => {
     const editor = new Editor({
@@ -101,6 +112,193 @@ describe("inline formula input rule", () => {
     source!.dispatchEvent(new Event("input", { bubbles: true }));
 
     expect(editor.getJSON().content?.[0].attrs?.latex).toBe("f(x)");
+  });
+
+  it("keeps every rapid physical keystroke between prewritten display delimiters", () => {
+    const frames: FrameRequestCallback[] = [];
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      frames.push(callback);
+      return frames.length;
+    });
+    const editor = new Editor({
+      extensions: [StarterKit, InlineFormula, BlockFormula],
+      content: "<p>$$$$</p>",
+    });
+    editors.push(editor);
+    editor.commands.setTextSelection(3);
+
+    typeThroughInputRules(editor, "\\theta");
+    while (frames.length > 0) frames.shift()?.(0);
+
+    expect(editor.getJSON().content?.[0]).toMatchObject({
+      type: "blockFormula",
+      attrs: { latex: "\\theta" },
+    });
+    expect(JSON.stringify(editor.getJSON())).not.toContain('"text":"theta"');
+  });
+
+  it("keeps a multi-character composition commit inside a pending formula", () => {
+    const flushFrames = holdAnimationFrames();
+    const editor = new Editor({
+      extensions: [StarterKit, InlineFormula, BlockFormula],
+      content: "<p>$$$$</p>",
+    });
+    editors.push(editor);
+    editor.commands.setTextSelection(3);
+    typeThroughInputRules(editor, "\\");
+
+    const { from, to } = editor.state.selection;
+    const handled = editor.view.someProp("handleTextInput", (handler) =>
+      handler(editor.view, from, to, "theta+θ", () =>
+        editor.state.tr.insertText("theta+θ", from, to),
+      ),
+    );
+    flushFrames();
+
+    expect(handled).toBe(true);
+    expect(editor.getJSON().content?.[0]).toMatchObject({
+      type: "blockFormula",
+      attrs: { latex: "\\theta+θ" },
+    });
+  });
+
+  it("replaces a selected display source without leaking rapid follow-up keys", () => {
+    const flushFrames = holdAnimationFrames();
+    const editor = new Editor({
+      extensions: [StarterKit, InlineFormula, BlockFormula],
+      content: "<p>$$old$$</p>",
+    });
+    editors.push(editor);
+    editor.commands.setTextSelection({ from: 3, to: 6 });
+
+    typeThroughInputRules(editor, "\\theta");
+    flushFrames();
+
+    expect(editor.getJSON().content?.[0]).toMatchObject({
+      type: "blockFormula",
+      attrs: { latex: "\\theta" },
+    });
+    expect(editor.getText()).not.toContain("old");
+  });
+
+  it("supports both sequential and prewritten bracket display delimiters", () => {
+    const sequential = new Editor({
+      extensions: [StarterKit, InlineFormula, BlockFormula],
+      content: "<p></p>",
+    });
+    editors.push(sequential);
+    typeThroughInputRules(sequential, "\\[\\theta\\]");
+    expect(sequential.getJSON().content?.[0]).toMatchObject({
+      type: "blockFormula",
+      attrs: { latex: "\\theta" },
+    });
+
+    const flushFrames = holdAnimationFrames();
+    const prewritten = new Editor({
+      extensions: [StarterKit, InlineFormula, BlockFormula],
+      content: "<p>\\[\\]</p>",
+    });
+    editors.push(prewritten);
+    prewritten.commands.setTextSelection(3);
+    typeThroughInputRules(prewritten, "\\theta");
+    flushFrames();
+    expect(prewritten.getJSON().content?.[0]).toMatchObject({
+      type: "blockFormula",
+      attrs: { latex: "\\theta" },
+    });
+  });
+
+  it("supports content inserted between prewritten inline delimiters", () => {
+    const flushFrames = holdAnimationFrames();
+    const dollar = new Editor({
+      extensions: [StarterKit, InlineFormula, BlockFormula],
+      content: "<p>Before $$ after</p>",
+    });
+    editors.push(dollar);
+    dollar.commands.setTextSelection(9);
+    typeThroughInputRules(dollar, "x^2");
+
+    const parenthesized = new Editor({
+      extensions: [StarterKit, InlineFormula, BlockFormula],
+      content: "<p>Before \\(\\) after</p>",
+    });
+    editors.push(parenthesized);
+    parenthesized.commands.setTextSelection(10);
+    typeThroughInputRules(parenthesized, "\\theta");
+    flushFrames();
+
+    expect(dollar.getJSON().content?.[0].content?.[1]).toMatchObject({
+      type: "inlineFormula",
+      attrs: { latex: "x^2" },
+    });
+    expect(parenthesized.getJSON().content?.[0].content?.[1]).toMatchObject({
+      type: "inlineFormula",
+      attrs: { latex: "\\theta" },
+    });
+  });
+
+  it("supports sequential parenthesized inline delimiters", () => {
+    const editor = new Editor({
+      extensions: [StarterKit, InlineFormula, BlockFormula],
+      content: "<p>Before </p>",
+    });
+    editors.push(editor);
+    editor.commands.setTextSelection(8);
+
+    typeThroughInputRules(editor, "\\(x^2\\) after");
+
+    expect(editor.getJSON().content?.[0].content?.[1]).toMatchObject({
+      type: "inlineFormula",
+      attrs: { latex: "x^2" },
+    });
+  });
+
+  it("keeps formula-like delimiters literal inside inline code", () => {
+    const editor = new Editor({
+      extensions: [StarterKit, InlineFormula, BlockFormula],
+      content: {
+        type: "doc",
+        content: [
+          {
+            type: "paragraph",
+            content: [
+              { type: "text", marks: [{ type: "code" }], text: "$$$$" },
+            ],
+          },
+        ],
+      },
+    });
+    editors.push(editor);
+    editor.commands.setTextSelection(3);
+
+    typeThroughInputRules(editor, "\\theta");
+
+    expect(editor.getText()).toBe("$$\\theta$$");
+    expect(JSON.stringify(editor.getJSON())).not.toContain("Formula");
+  });
+
+  it("undoes and redoes delimiter normalization as one document change", () => {
+    const flushFrames = holdAnimationFrames();
+    const editor = new Editor({
+      extensions: [StarterKit, InlineFormula, BlockFormula],
+      content: "<p>$$$$</p>",
+    });
+    editors.push(editor);
+    editor.commands.setTextSelection(3);
+
+    editor.commands.insertContent("θ");
+    expect(editor.getJSON().content?.[0]).toMatchObject({
+      type: "blockFormula",
+      attrs: { latex: "θ" },
+    });
+    expect(editor.commands.undo()).toBe(true);
+    expect(editor.getText()).toBe("$$$$");
+    expect(editor.commands.redo()).toBe(true);
+    flushFrames();
+    expect(editor.getJSON().content?.[0]).toMatchObject({
+      type: "blockFormula",
+      attrs: { latex: "θ" },
+    });
   });
 
   it("starts a supported standalone environment as an editable block formula", () => {

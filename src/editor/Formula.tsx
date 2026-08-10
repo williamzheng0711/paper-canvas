@@ -7,10 +7,13 @@ import {
 } from "@tiptap/core";
 import { NodeSelection, TextSelection } from "@tiptap/pm/state";
 import { Plugin } from "@tiptap/pm/state";
+import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
 import katex from "katex";
 import {
+  displayFormulaFromBracketedLine,
   displayFormulaFromDelimitedLine,
   displayFormulaAfterTextInsertion,
+  inlineFormulaAroundCaret,
   isDisplayLatexEnvironment,
   latexEnvironmentClosure,
   shouldCompleteRawLatexEnvironment,
@@ -78,6 +81,10 @@ export function completeFormulaSourceInput(
   const beforeCaret = value.slice(0, caret);
   const closure = latexEnvironmentClosure(beforeCaret);
   if (!closure) return { value, caret };
+  // When editing an existing environment, its matching close command is often
+  // already to the right of the caret. Do not duplicate it as soon as the
+  // opening command becomes complete again.
+  if (value.slice(caret).includes(closure)) return { value, caret };
   return {
     value: `${beforeCaret}${closure}${value.slice(caret)}`,
     caret,
@@ -95,6 +102,7 @@ class FormulaNodeView {
   private sourceInput: (() => void) | null = null;
   private sourceKeyDown: ((event: KeyboardEvent) => void) | null = null;
   private sourceBlur: ((event: FocusEvent) => void) | null = null;
+  private destroyed = false;
 
   constructor(props: NodeViewRendererProps, kind: FormulaKind) {
     this.node = props.node;
@@ -107,8 +115,9 @@ class FormulaNodeView {
     this.dom.dataset.formulaKind = kind;
     this.render();
     if (this.node.attrs.autoEdit) {
-      const caret = Number(this.node.attrs.sourceCaret);
       requestAnimationFrame(() => {
+        if (this.destroyed || !this.node.attrs.autoEdit) return;
+        const caret = Number(this.node.attrs.sourceCaret);
         this.enterEditing(Number.isFinite(caret) ? caret : this.latex.length);
         this.clearAutomaticEditingRequest();
       });
@@ -148,6 +157,7 @@ class FormulaNodeView {
   }
 
   destroy(): void {
+    this.destroyed = true;
     this.cleanupSource();
   }
 
@@ -432,6 +442,43 @@ class FormulaNodeView {
   }
 }
 
+function pendingFormulaInputPlugin(nodeName: string): Plugin {
+  return new Plugin({
+    props: {
+      handleTextInput(view, _from, _to, text) {
+        const pending: Array<{ position: number; node: ProseMirrorNode }> = [];
+        view.state.doc.descendants((node, position) => {
+          if (
+            pending.length > 0 ||
+            node.type.name !== nodeName ||
+            !node.attrs.autoEdit
+          )
+            return;
+          pending.push({ position, node });
+          return false;
+        });
+        const match = pending[0];
+        if (!match) return false;
+
+        const { node, position } = match;
+        const latex = String(node.attrs.latex ?? "");
+        const rawCaret = Number(node.attrs.sourceCaret);
+        const caret = Number.isFinite(rawCaret)
+          ? Math.max(0, Math.min(latex.length, rawCaret))
+          : latex.length;
+        view.dispatch(
+          view.state.tr.setNodeMarkup(position, undefined, {
+            ...node.attrs,
+            latex: `${latex.slice(0, caret)}${text}${latex.slice(caret)}`,
+            sourceCaret: caret + text.length,
+          }),
+        );
+        return true;
+      },
+    },
+  });
+}
+
 function createFormulaNode(
   name: "inlineFormula" | "blockFormula",
   kind: FormulaKind,
@@ -470,6 +517,11 @@ function createFormulaNode(
       ];
     },
 
+    renderText({ node }) {
+      const latex = String(node.attrs.latex ?? "");
+      return kind === "block" ? `$$\n${latex}\n$$` : `$${latex}$`;
+    },
+
     addNodeView() {
       return (props) => new FormulaNodeView(props, kind);
     },
@@ -484,10 +536,13 @@ function createFormulaNode(
               const environment = match[1];
               const closure = latexEnvironmentClosure(begin);
               const $from = state.doc.resolve(range.to);
+              const codeMark = state.schema.marks.code;
               const virtualParentText = `${$from.parent.textContent}${begin.at(-1) ?? ""}`;
               if (
                 !closure ||
                 !isDisplayLatexEnvironment(environment) ||
+                (codeMark &&
+                  $from.marks().some((mark) => mark.type === codeMark)) ||
                 $from.parent.type.name !== "paragraph" ||
                 virtualParentText !== begin
               ) {
@@ -510,6 +565,7 @@ function createFormulaNode(
               const $from = state.doc.resolve(range.to);
               const source = match[0];
               const latex = displayFormulaFromDelimitedLine(source);
+              const codeMark = state.schema.marks.code;
               // Input rules run before the final typed character reaches the
               // document. Reconstruct that virtual line for the strict
               // standalone-line check, while replacing the existing paragraph
@@ -517,6 +573,37 @@ function createFormulaNode(
               const virtualParentText = `${$from.parent.textContent}${source.at(-1) ?? ""}`;
               if (
                 !latex ||
+                (codeMark &&
+                  $from.marks().some((mark) => mark.type === codeMark)) ||
+                !shouldCreateBlockFormula({
+                  text: source,
+                  parentType: $from.parent.type.name,
+                  parentText: virtualParentText,
+                  parentOffset: $from.parentOffset + 1,
+                })
+              ) {
+                return null;
+              }
+              state.tr.replaceWith(
+                $from.before(),
+                $from.after(),
+                this.type.create({ latex }),
+              );
+            },
+          }),
+          new InputRule({
+            find: /\\\[([^\n]+)\\\]$/,
+            handler: ({ state, range, match }) => {
+              const $from = state.doc.resolve(range.to);
+              const source = match[0];
+              const latex = displayFormulaFromBracketedLine(source);
+              const codeMark = state.schema.marks.code;
+              const virtualParentText =
+                $from.parent.textContent + (source.at(-1) ?? "");
+              if (
+                !latex ||
+                (codeMark &&
+                  $from.marks().some((mark) => mark.type === codeMark)) ||
                 !shouldCreateBlockFormula({
                   text: source,
                   parentType: $from.parent.type.name,
@@ -559,11 +646,43 @@ function createFormulaNode(
           },
         }),
         new InputRule({
+          find: /\\\(([^\n]+)\\\)$/,
+          handler: ({ state, range, match }) => {
+            const latex = match[1]?.trim();
+            if (!latex) return null;
+            const codeMark = state.schema.marks.code;
+            if (
+              codeMark &&
+              state.doc
+                .resolve(range.to)
+                .marks()
+                .some((mark) => mark.type === codeMark)
+            ) {
+              return null;
+            }
+            state.tr.replaceWith(
+              range.from,
+              range.to,
+              this.type.create({ latex }),
+            );
+          },
+        }),
+        new InputRule({
           find: /\$([^$\n]+)\$$/,
           handler: ({ state, range, match }) => {
             const latex = match[1]?.trim();
             if (!latex) return null;
             const $start = state.doc.resolve(range.from);
+            const codeMark = state.schema.marks.code;
+            if (
+              codeMark &&
+              state.doc
+                .resolve(range.to)
+                .marks()
+                .some((mark) => mark.type === codeMark)
+            ) {
+              return null;
+            }
             // In `$$...$$`, the inline regexp can see the inner `$...$` one
             // keystroke before the display delimiter is complete. Leave that
             // match alone so the block rule receives the final `$`.
@@ -590,8 +709,47 @@ function createFormulaNode(
     },
 
     addProseMirrorPlugins() {
-      if (kind !== "block") return [];
+      const pendingInput = pendingFormulaInputPlugin(name);
+      if (kind === "inline") {
+        return [
+          pendingInput,
+          new Plugin({
+            appendTransaction: (transactions, _oldState, newState) => {
+              if (!transactions.some((transaction) => transaction.docChanged))
+                return null;
+              const selection = newState.selection;
+              if (!(selection instanceof TextSelection) || !selection.empty)
+                return null;
+              const $cursor = selection.$from;
+              if ($cursor.parent.type.name !== "paragraph") return null;
+              const parsed = inlineFormulaAroundCaret(
+                $cursor.parent.textContent,
+                $cursor.parentOffset,
+              );
+              if (!parsed) return null;
+              const codeMark = newState.schema.marks.code;
+              if (
+                codeMark &&
+                $cursor.parent.rangeHasMark(parsed.from, parsed.to, codeMark)
+              ) {
+                return null;
+              }
+              const parentStart = $cursor.start();
+              return newState.tr.replaceWith(
+                parentStart + parsed.from,
+                parentStart + parsed.to,
+                this.type.create({
+                  latex: parsed.latex,
+                  autoEdit: true,
+                  sourceCaret: parsed.caret,
+                }),
+              );
+            },
+          }),
+        ];
+      }
       return [
+        pendingInput,
         new Plugin({
           appendTransaction: (transactions, _oldState, newState) => {
             if (!transactions.some((transaction) => transaction.docChanged))
@@ -601,6 +759,17 @@ function createFormulaNode(
               return null;
             const $cursor = selection.$from;
             if ($cursor.parent.type.name !== "paragraph") return null;
+            const codeMark = newState.schema.marks.code;
+            if (
+              codeMark &&
+              $cursor.parent.rangeHasMark(
+                0,
+                $cursor.parent.content.size,
+                codeMark,
+              )
+            ) {
+              return null;
+            }
             const parsed = displayFormulaAfterTextInsertion({
               parentText: $cursor.parent.textContent,
               from: $cursor.parentOffset,
@@ -612,8 +781,13 @@ function createFormulaNode(
             // A complete formula whose delimiters were already to the right of
             // the caret must remain editable so the next keystroke continues in
             // the formula instead of replacing the new atom.
+            const wrappedSource =
+              ($cursor.parent.textContent.startsWith("$$") &&
+                $cursor.parent.textContent.endsWith("$$")) ||
+              ($cursor.parent.textContent.startsWith("\\[") &&
+                $cursor.parent.textContent.endsWith("\\]"));
             const insideDelimitedSource =
-              $cursor.parent.textContent.startsWith("$$") &&
+              wrappedSource &&
               $cursor.parentOffset >= 2 &&
               $cursor.parentOffset <= $cursor.parent.content.size - 2;
             return newState.tr.replaceWith(
@@ -622,9 +796,7 @@ function createFormulaNode(
               this.type.create({
                 latex: parsed.latex,
                 autoEdit: insideDelimitedSource,
-                sourceCaret: insideDelimitedSource
-                  ? $cursor.parentOffset - 2
-                  : null,
+                sourceCaret: insideDelimitedSource ? parsed.caret : null,
               }),
             );
           },

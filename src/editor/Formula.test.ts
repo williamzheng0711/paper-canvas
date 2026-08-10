@@ -83,4 +83,13 @@ describe("formula safety and cursor boundaries", () => {
       caret: opening.length,
     });
   });
+
+  it("does not duplicate an existing close command while its opening is edited", () => {
+    const opening = "\\begin{equation}";
+    const value = `${opening}x^2\\end{equation}`;
+    expect(completeFormulaSourceInput(value, opening.length)).toEqual({
+      value,
+      caret: opening.length,
+    });
+  });
 });
