@@ -107,8 +107,12 @@ jobs:
             throw "PaperCanvas was not registered as an installed application."
           }
 
-          $application = Get-ChildItem -Path $paperCanvas.InstallLocation -Filter "*.exe" -File |
-            Where-Object { $_.Name -notmatch "uninstall" } |
+          $application = Get-ChildItem -LiteralPath $paperCanvas.InstallLocation |
+            Where-Object {
+              -not $_.PSIsContainer -and
+              $_.Extension -eq ".exe" -and
+              $_.Name -notmatch "uninstall"
+            } |
             Select-Object -First 1
           if (-not $application) {
             throw "The installed PaperCanvas executable was not found."
