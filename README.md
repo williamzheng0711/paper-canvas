@@ -26,16 +26,16 @@
 </p>
 
 <p align="center">
-  <a href="https://williamzheng0711.github.io/paper-canvas/download/PaperCanvas-Windows-x64-Setup.exe?v=0.1.1">
+  <a href="https://williamzheng0711.github.io/paper-canvas/download/PaperCanvas-Windows-x64-Setup.exe?v=0.1.2">
     <img alt="下載 Windows 版 PaperCanvas" src="https://img.shields.io/badge/Download_for_Windows-0078D4?style=for-the-badge&logo=windows11&logoColor=white">
   </a>
-  <a href="https://williamzheng0711.github.io/paper-canvas/download/PaperCanvas-macOS-universal.dmg?v=0.1.1">
+  <a href="https://williamzheng0711.github.io/paper-canvas/download/PaperCanvas-macOS-universal.dmg?v=0.1.2">
     <img alt="下載 macOS 版 PaperCanvas" src="https://img.shields.io/badge/Download_for_macOS-111111?style=for-the-badge&logo=apple&logoColor=white">
   </a>
 </p>
 
 <p align="center">
-  <sub>目前安裝程式版本：v0.1.1 · Windows 10/11 x64 · macOS Intel 與 Apple Silicon · 每個按鈕都會直接下載最新版本。</sub>
+  <sub>目前安裝程式版本：v0.1.2 · Windows 10/11 x64 · macOS Intel 與 Apple Silicon · 每個按鈕都會直接下載最新版本。</sub>
 </p>
 
 <p align="center">
