@@ -12,6 +12,7 @@ import type { JSONContent } from '@tiptap/core';
 import { Selection } from '@tiptap/pm/state';
 import type { EditorView } from '@tiptap/pm/view';
 import { BlockFormula, InlineFormula } from '../editor/Formula';
+import { HtmlPreview, InlineHtmlPreview } from '../editor/HtmlPreview';
 import { replaceDocumentPreservingSelection } from '../editor/documentSync';
 import { insertPastedFormula, insertPastedMarkdown, sanitizePastedHtml } from '../editor/paste';
 import { PaperImage } from '../editor/PaperImage';
@@ -101,6 +102,8 @@ export const CanvasEditor = forwardRef<SwitchableEditorHandle, Props>(function C
         Placeholder.configure({ placeholder: text.canvasPlaceholder }),
         InlineFormula,
         BlockFormula,
+        HtmlPreview,
+        InlineHtmlPreview,
         UnsupportedMarkdown,
         DocumentSearch,
       ],

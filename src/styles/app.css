@@ -559,6 +559,46 @@ button {
   cursor: nwse-resize;
   transform: translate(50%, 50%);
 }
+.html-preview--block {
+  display: block;
+  width: 100%;
+  margin: 1em 0;
+}
+.html-preview--inline {
+  display: inline;
+}
+.html-preview--block > :first-child {
+  margin-top: 0;
+}
+.html-preview--block > :last-child {
+  margin-bottom: 0;
+}
+.html-preview p[align="center"],
+.html-preview h1[align="center"],
+.html-preview h2[align="center"],
+.html-preview h3[align="center"] {
+  text-align: center;
+}
+.html-preview p > img,
+.html-preview p > a > img {
+  display: inline-block;
+  margin: 0.25em 0.2em;
+  vertical-align: middle;
+}
+.html-preview.is-selected {
+  border-radius: 5px;
+  outline: 2px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  outline-offset: 4px;
+}
+.html-preview--blocked {
+  padding: 0.15em 0.35em;
+  color: var(--muted);
+  border-radius: 4px;
+  background: var(--surface-muted);
+  font-family: "SFMono-Regular", Consolas, "Noto Sans Mono CJK TC", monospace;
+  font-size: 0.82em;
+  white-space: pre-wrap;
+}
 .paper-editor ul[data-type="taskList"] {
   padding: 0;
   list-style: none;
@@ -929,6 +969,7 @@ button {
   .paper-editor table,
   .paper-editor blockquote,
   .paper-editor img,
+  .html-preview--block,
   .formula-node--block {
     break-inside: avoid;
   }

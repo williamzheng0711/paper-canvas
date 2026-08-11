@@ -19,6 +19,7 @@ import {
   exportMarkdownFile,
   exportPdfFile,
   hideRecentFile,
+  hydrateDocumentAssets,
   loadDraft,
   loadPreferences,
   loadRecent,
@@ -598,8 +599,8 @@ export default function App() {
         rawMarkdownRef.current,
         markdownSearch.current?.getMarkdownOffset?.(),
       );
-      const nextDocument = parsedSelection.document;
       const currentFile = fileRef.current;
+      const nextDocument = hydrateDocumentAssets(parsedSelection.document, currentFile.path);
       beginModeTransition(
         'canvas',
         parsedSelection.anchor ? { kind: 'document', anchor: parsedSelection.anchor } : undefined,
@@ -673,7 +674,7 @@ export default function App() {
   const jumpToOutline = (index: number) => {
     if (sourceMode) {
       try {
-        const nextDocument = markdownToDocument(rawMarkdownRef.current);
+        const nextDocument = hydrateDocumentAssets(markdownToDocument(rawMarkdownRef.current), fileRef.current.path);
         const nextFile = { ...fileRef.current, document: nextDocument };
         fileRef.current = nextFile;
         setFile(nextFile);
@@ -713,7 +714,7 @@ export default function App() {
       // PDF should always contain the rendered document, even if the author is
       // currently editing its Markdown source.
       if (sourceModeRef.current) {
-        const nextDocument = markdownToDocument(rawMarkdownRef.current);
+        const nextDocument = hydrateDocumentAssets(markdownToDocument(rawMarkdownRef.current), fileRef.current.path);
         const nextFile = { ...fileRef.current, document: nextDocument };
         fileRef.current = nextFile;
         setFile(nextFile);

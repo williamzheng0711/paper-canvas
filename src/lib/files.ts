@@ -102,16 +102,21 @@ async function persistEmbeddedImages(document: JSONContent, path: string): Promi
   return prepared;
 }
 
-function hydrateRelativeImages(document: JSONContent, path: string): JSONContent {
+export function hydrateDocumentAssets(document: JSONContent, path?: string): JSONContent {
   const hydrated = cloneDocument(document);
-  if (!isTauri()) return hydrated;
+  if (!path) return hydrated;
+  const basePath = parentPath(path);
+  const desktop = isTauri();
   visit(hydrated, (node) => {
+    if (node.type === 'htmlPreview' || node.type === 'inlineHtmlPreview') {
+      node.attrs = { ...node.attrs, basePath };
+    }
     const src = node.type === 'image' ? node.attrs?.src : undefined;
-    if (typeof src === 'string' && !isExternalImage(src)) {
+    if (desktop && typeof src === 'string' && !isExternalImage(src)) {
       node.attrs = {
         ...node.attrs,
         originalSrc: src,
-        src: convertFileSrc(joinPath(parentPath(path), src)),
+        src: convertFileSrc(joinPath(basePath, src)),
       };
     }
   });
@@ -171,7 +176,7 @@ export async function openMarkdownFile(path: string): Promise<EditorFile> {
   const file = {
     path,
     name: fileName(path),
-    document: hydrateRelativeImages(markdownToDocument(markdown), path),
+    document: hydrateDocumentAssets(markdownToDocument(markdown), path),
   };
   await rememberRecent({ path: file.path, name: file.name });
   return file;
@@ -263,7 +268,7 @@ export async function saveEditorFile(file: EditorFile, forceSaveAs = false): Pro
   return {
     path,
     name: fileName(path),
-    document: hydrateRelativeImages(withAssets, path),
+    document: hydrateDocumentAssets(withAssets, path),
   };
 }
 
@@ -311,7 +316,7 @@ export async function renameEditorFile(file: EditorFile, newName: string): Promi
     ...file,
     path: target,
     name: fileName(target),
-    document: hydrateRelativeImages(renameDocumentAssetReferences(file.document, file.path, target), target),
+    document: hydrateDocumentAssets(renameDocumentAssetReferences(file.document, file.path, target), target),
   };
 }
 
@@ -443,7 +448,7 @@ export async function openRecent(recent: RecentFile): Promise<EditorFile | null>
   return {
     path: recent.path,
     name: recent.name,
-    document: hydrateRelativeImages(markdownToDocument(markdown), recent.path),
+    document: hydrateDocumentAssets(markdownToDocument(markdown), recent.path),
   };
 }
 

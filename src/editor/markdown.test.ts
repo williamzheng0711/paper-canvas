@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { JSONContent } from "@tiptap/core";
 import {
@@ -165,6 +167,50 @@ unclosed`;
     expect(serialized).toContain("Regular text");
   });
 
+  it("renders safe document HTML as lossless preview nodes", () => {
+    const source = `<p align="center"><strong>PaperCanvas</strong></p>
+
+<table><tr><td width="50%"><img src="docs/preview.png" alt="Preview"></td></tr></table>`;
+    const document = markdownToDocument(source);
+    const previews = nodesOfType(document, "htmlPreview");
+
+    expect(previews).toHaveLength(2);
+    expect(previews.map((node) => node.attrs?.source)).toEqual([
+      '<p align="center"><strong>PaperCanvas</strong></p>',
+      '<table><tr><td width="50%"><img src="docs/preview.png" alt="Preview"></td></tr></table>',
+    ]);
+    expect(nodesOfType(document, "unsupportedMarkdown")).toHaveLength(0);
+    expect(documentToMarkdown(document)).toContain(source);
+  });
+
+  it("keeps inline HTML in an inline preview node instead of creating an invalid paragraph child", () => {
+    const source = "Press <kbd>Command</kbd> while saving.";
+    const document = markdownToDocument(source);
+
+    expect(nodesOfType(document, "inlineHtmlPreview")).toHaveLength(2);
+    expect(nodesOfType(document, "unsupportedMarkdown")).toHaveLength(0);
+    expect(documentToMarkdown(document)).toContain(source);
+  });
+
+  it.each(["README.md", "README.en.md", "README.zh-CN.md"])(
+    "imports every HTML layout block in %s as a lossless preview",
+    (file) => {
+      const source = readFileSync(resolve(process.cwd(), file), "utf8");
+      const document = markdownToDocument(source);
+      const previews = nodesOfType(document, "htmlPreview");
+      const serialized = documentToMarkdown(document);
+
+      expect(previews).toHaveLength(13);
+      expect(nodesOfType(document, "unsupportedMarkdown")).toHaveLength(0);
+      previews.forEach((preview) =>
+        expect(serialized).toContain(String(preview.attrs?.source ?? "")),
+      );
+      expect(documentToMarkdown(markdownToDocument(serialized))).toBe(
+        serialized,
+      );
+    },
+  );
+
   it("preserves image alt text, title, and PaperCanvas resize dimensions", () => {
     const document = {
       type: "doc",
@@ -195,5 +241,24 @@ unclosed`;
       width: 360,
       height: 240,
     });
+  });
+
+  it("uses a hydrated image's original path when entering Markdown source mode", () => {
+    const serialized = documentToMarkdown({
+      type: "doc",
+      content: [
+        {
+          type: "image",
+          attrs: {
+            src: "http://asset.localhost/docs/editor.png",
+            originalSrc: "docs/editor.png",
+            alt: "Editor",
+          },
+        },
+      ],
+    });
+
+    expect(serialized).toContain("docs/editor.png");
+    expect(serialized).not.toContain("asset.localhost");
   });
 });

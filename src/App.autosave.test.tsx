@@ -113,6 +113,7 @@ vi.mock('./lib/files', () => ({
   exportMarkdownFile: files.exportMarkdownFile,
   exportPdfFile: files.exportPdfFile,
   hideRecentFile: files.hideRecentFile,
+  hydrateDocumentAssets: (document: JSONContent) => structuredClone(document),
   loadDraft: files.loadDraft,
   loadPreferences: files.loadPreferences,
   loadRecent: files.loadRecent,
@@ -243,6 +244,30 @@ describe('App autosave cursor stability', () => {
     expect(host.querySelector('.editor-mode-pane--canvas')?.hasAttribute('hidden')).toBe(false);
     expect(harness.canvasMounts).toBe(1);
     expect(harness.canvasUnmounts).toBe(0);
+  });
+
+  it('uses document progress when an unfocused source-mode toggle has no visible caret', async () => {
+    const viewport = host.querySelector<HTMLElement>('.canvas-area');
+    if (!viewport) throw new Error('Expected the editor viewport');
+    Object.defineProperties(viewport, {
+      clientHeight: { configurable: true, value: 600 },
+      scrollHeight: { configurable: true, value: 2_600 },
+      scrollTop: { configurable: true, value: 1_000, writable: true },
+    });
+    harness.searchHandle.isFocused.mockReturnValue(false);
+    harness.searchHandle.setSelectionProgress.mockClear();
+    const showSource = Array.from(host.querySelectorAll<HTMLButtonElement>('button')).find(
+      (button) => button.textContent === '顯示原始 Markdown',
+    );
+
+    await act(async () => {
+      showSource?.click();
+      await flushEffects();
+      await vi.advanceTimersByTimeAsync(50);
+    });
+
+    expect(harness.searchHandle.setSelectionProgress).toHaveBeenCalledWith(0.5);
+    expect(harness.searchHandle.focus).not.toHaveBeenCalled();
   });
 
   it('carries a visible focused selection directly into Markdown mode', async () => {

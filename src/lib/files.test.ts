@@ -1,7 +1,12 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { documentsEqual } from '../editor/documentSync';
+import { documentToMarkdown, markdownToDocument } from '../editor/markdown';
 import {
   documentToPortableMarkdown,
   hideRecentFile,
+  hydrateDocumentAssets,
   isMarkdownFilePath,
   loadPreferences,
   loadRecent,
@@ -33,6 +38,44 @@ describe('preferences', () => {
 });
 
 describe('image asset references', () => {
+  it('attaches the opened document directory to block and inline HTML previews', () => {
+    const hydrated = hydrateDocumentAssets(
+      {
+        type: 'doc',
+        content: [
+          {
+            type: 'htmlPreview',
+            attrs: { source: '<img src="docs/editor.png">' },
+          },
+          {
+            type: 'paragraph',
+            content: [
+              {
+                type: 'inlineHtmlPreview',
+                attrs: { source: '<img src="icon.png">' },
+              },
+            ],
+          },
+        ],
+      },
+      '/Users/example/paper-canvas/README.md',
+    );
+
+    expect(hydrated.content?.[0]?.attrs?.basePath).toBe('/Users/example/paper-canvas');
+    expect(hydrated.content?.[1]?.content?.[0]?.attrs?.basePath).toBe('/Users/example/paper-canvas');
+  });
+
+  it.each(['README.md', 'README.en.md', 'README.zh-CN.md'])(
+    'keeps the hydrated %s document stable across a source-mode round trip',
+    (file) => {
+      const path = resolve(process.cwd(), file);
+      const opened = hydrateDocumentAssets(markdownToDocument(readFileSync(path, 'utf8')), path);
+      const reopened = hydrateDocumentAssets(markdownToDocument(documentToMarkdown(opened)), path);
+
+      expect(documentsEqual(opened, reopened)).toBe(true);
+    },
+  );
+
   it('renames only the companion asset paths when a Markdown file is renamed', () => {
     const document = {
       type: 'doc',

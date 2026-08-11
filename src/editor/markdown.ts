@@ -6,6 +6,7 @@ import remarkParse from "remark-parse";
 import remarkStringify from "remark-stringify";
 import { getMessages } from "../i18n";
 import { isDisplayLatexEnvironment } from "./formulaInput";
+import { isHtmlPreviewCandidate } from "./htmlSafety";
 
 type MdNode = {
   type: string;
@@ -210,8 +211,12 @@ export function normalizeLatexDelimiters(markdown: string): string {
   return normalized.join("\n");
 }
 
-const content = (nodes: MdNode[] | undefined): JSONContent[] =>
-  (nodes ?? []).flatMap(fromMdast);
+type MarkdownContext = "block" | "inline";
+
+const content = (
+  nodes: MdNode[] | undefined,
+  context: MarkdownContext = "block",
+): JSONContent[] => (nodes ?? []).flatMap((node) => fromMdast(node, context));
 
 function unsupported(node: MdNode, reason?: string): JSONContent {
   const source = processor
@@ -275,22 +280,25 @@ function applyMark(
   );
 }
 
-function fromMdast(node: MdNode): JSONContent[] {
+function fromMdast(
+  node: MdNode,
+  context: MarkdownContext = "block",
+): JSONContent[] {
   switch (node.type) {
     case "text":
       return [textNode(node.value)];
     case "emphasis":
-      return applyMark(content(node.children), { type: "italic" });
+      return applyMark(content(node.children, "inline"), { type: "italic" });
     case "strong":
-      return applyMark(content(node.children), { type: "bold" });
+      return applyMark(content(node.children, "inline"), { type: "bold" });
     case "delete":
-      return applyMark(content(node.children), { type: "strike" });
+      return applyMark(content(node.children, "inline"), { type: "strike" });
     case "inlineCode":
       return [
         { type: "text", text: node.value ?? "", marks: [{ type: "code" }] },
       ];
     case "link":
-      return applyMark(content(node.children), {
+      return applyMark(content(node.children, "inline"), {
         type: "link",
         attrs: { href: node.url ?? "" },
       });
@@ -301,7 +309,7 @@ function fromMdast(node: MdNode): JSONContent[] {
     case "break":
       return [{ type: "hardBreak" }];
     case "paragraph": {
-      const children = content(node.children);
+      const children = content(node.children, "inline");
       if (!children.some((child) => child.type === "image")) {
         return [{ type: "paragraph", content: children }];
       }
@@ -332,7 +340,7 @@ function fromMdast(node: MdNode): JSONContent[] {
         {
           type: "heading",
           attrs: { level: node.depth ?? 1 },
-          content: content(node.children),
+          content: content(node.children, "inline"),
         },
       ];
     case "blockquote":
@@ -385,18 +393,30 @@ function fromMdast(node: MdNode): JSONContent[] {
       return [
         {
           type: "tableCell",
-          content: [{ type: "paragraph", content: content(node.children) }],
+          content: [
+            { type: "paragraph", content: content(node.children, "inline") },
+          ],
         },
       ];
     case "tableHeader":
       return [
         {
           type: "tableHeader",
-          content: [{ type: "paragraph", content: content(node.children) }],
+          content: [
+            { type: "paragraph", content: content(node.children, "inline") },
+          ],
         },
       ];
     case "html":
-      return [unsupported(node, getMessages().htmlPreserved)];
+      if (context === "block" && !isHtmlPreviewCandidate(node.value ?? "")) {
+        return [unsupported(node, getMessages().htmlPreserved)];
+      }
+      return [
+        {
+          type: context === "inline" ? "inlineHtmlPreview" : "htmlPreview",
+          attrs: { source: node.value ?? "" },
+        },
+      ];
     default:
       return [unsupported(node)];
   }
@@ -482,7 +502,7 @@ function toMdast(node: JSONContent): MdNode | null {
     case "image":
       return {
         type: "image",
-        url: String(node.attrs?.src ?? ""),
+        url: String(node.attrs?.originalSrc ?? node.attrs?.src ?? ""),
         alt: String(node.attrs?.alt ?? "") || null,
         title: markdownImageTitle(node.attrs),
       };
@@ -498,6 +518,8 @@ function toMdast(node: JSONContent): MdNode | null {
       return { type: "tableCell", children: cellInlineChildren(node) };
     case "tableHeader":
       return { type: "tableHeader", children: cellInlineChildren(node) };
+    case "htmlPreview":
+    case "inlineHtmlPreview":
     case "unsupportedMarkdown":
       return { type: "html", value: String(node.attrs?.source ?? "") };
     default:
