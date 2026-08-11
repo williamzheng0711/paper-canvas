@@ -111,44 +111,6 @@ PaperCanvas 沒有遙測、帳號系統、同步服務、協作後端或 AI/連�
 > [!NOTE]
 > 在設定 Authenticode 憑證之前，Microsoft Defender SmartScreen 可能會提示發行者不明。請先確認安裝程式來自本儲存庫，再選擇 **More info → Run anyway（其他資訊 → 仍要執行）** 繼續。
 
-## 在開發環境中執行
-
-完成目前作業系統所需的準備工作後，執行：
-
-```bash
-npm ci
-npm run tauri dev
-```
-
-僅包含瀏覽器前端的版本可透過 `npm run dev` 啟動，但原生開啟/儲存對話框、檔案關聯、本機圖片存取，以及 macOS 直接匯出 PDF 等功能需要使用 `npm run tauri dev`。
-
-## 開發
-
-PaperCanvas 使用 React 19、Tiptap/ProseMirror、CodeMirror 6、KaTeX、Tauri 2，以及一個小型 Rust 原生層。
-
-常用驗證命令：
-
-```bash
-npm run lint
-npm test
-npm run test:perf
-npm run build
-```
-
-測試涵蓋 Markdown ↔ 編輯器文件往返轉換、數學分隔符、不支援內容的保留、即時公式編輯、公式邊界導覽、文件搜尋與焦點還原、圖片行為、自動儲存穩定性、PDF 匯出邏輯，以及建立 → 公式 → UTF-8 Markdown 儲存/重新開啟的煙霧測試流程。`npm run test:perf` 測量一份 50,000 字元中文文件在本機解析/序列化路徑上的效能；它不代表所有 UI 或輸入法情境的延遲。
-
-發佈前，請參考 [docs/QA.md](docs/QA.md) 檢查原生剪貼簿、圖片、檔案關聯、匯出與視窗行為。
-
-### 疑難排解
-
-| 現象                                                   | 檢查事項                                                                                                                     |
-| ------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------- |
-| 出現 `EBADENGINE`，或 `node --version` 不是 `v22.x`    | 將 Node.js 22 的執行檔目錄放在 `PATH` 最前面，重新開啟終端機，再執行 `npm ci`。                                               |
-| 出現 `Cannot find module '@rollup/rollup-darwin-arm64'` | 在 Apple Silicon 上執行 `npm ci --include=optional`，然後重試該命令。                                                        |
-| Apple Silicon 建置中包含 `x86_64` 執行檔               | 確認 `rustc -Vv` 使用 rustup 的 `aarch64-apple-darwin` 主機；在 `src-tauri` 中執行 `cargo clean --release`，然後重新建置。    |
-| Windows 回報缺少 `link.exe`                            | 修改 Visual Studio Build Tools，安裝 **Desktop development with C++（使用 C++ 的桌面開發）**工作負載與 Windows SDK。        |
-| Tauri 引用了先前簽出的路徑                             | 在 `src-tauri` 中執行 `cargo clean --release`，回到儲存庫根目錄，然後重新建置。                                              |
-
 ## 授權條款
 
 PaperCanvas 採用 [Apache License 2.0](LICENSE) 授權條款。
