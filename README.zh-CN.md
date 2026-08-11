@@ -149,26 +149,6 @@ npm run build
 | Windows 报告缺少 `link.exe`                            | 修改 Visual Studio Build Tools，安装 **Desktop development with C++（使用 C++ 的桌面开发）**工作负载和 Windows SDK。        |
 | Tauri 引用了先前检出的路径                             | 在 `src-tauri` 中运行 `cargo clean --release`，返回仓库根目录，然后重新构建。                                                |
 
-## Markdown 与数学公式支持
-
-PaperCanvas 有意支持一组聚焦的 Markdown 子集：标题、段落、强调、删除线、行内代码、链接、列表与任务列表、块引用、分隔线、围栏代码块、GFM 表格、图像，以及下列数学形式。
-
-- 行内公式：`$...$` 与 `\(...\)`。
-- 独立公式：单独成块的 `$$...$$` 与多行 `\[...\]`。
-- 独立 KaTeX 环境，包括 `equation`、`align`、`gather`、`aligned`、`cases` 及常见矩阵变体。
-- 常用 KaTeX 结构，例如分数、上下标、根式、希腊字母、`\mathbb`、`\mathbf` 与 `\operatorname`。
-
-目前不支持任意 TeX 宏包、期刊模板、自定义宏偏好、公式编号、标签、引用或常规 HTML 执行。无效的 KaTeX 会作为源码留在文档中，并显示本地警告；它不会导致应用崩溃，也不会悄悄删除文档。
-
-PaperCanvas 拥有独立的设计与资源，目标是提供低干扰的单页写作体验，但不声称完全兼容 Markdown、TeX 或 Typora。
-
-## 已知限制
-
-- 尚无同步、协作、命令面板、拼写词典或打字机/专注模式。
-- 表格可以通过 GFM 往返转换，但还没有电子表格式的单元格工具栏。
-- macOS 可直接导出 PDF；其他平台目前使用各自的系统打印流程。
-- 公开版本仍需要 macOS Developer ID 签名/公证与 Windows Authenticode 签名。
-
 ## 许可证
 
 PaperCanvas 采用 [Apache License 2.0](LICENSE) 许可证。

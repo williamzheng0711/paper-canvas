@@ -149,26 +149,6 @@ Use [docs/QA.md](docs/QA.md) for native clipboard, image, file-association, expo
 | Windows reports that `link.exe` is missing             | Modify Visual Studio Build Tools and install the **Desktop development with C++** workload plus a Windows SDK.               |
 | Tauri refers to a previous checkout path               | Run `cargo clean --release` inside `src-tauri`, return to the repository root, and rebuild.                                  |
 
-## Markdown and mathematics support
-
-PaperCanvas intentionally supports a focused Markdown subset: headings, paragraphs, emphasis, strike-through, inline code, links, lists and task lists, block quotes, rules, fenced code, GFM tables, images, and the math forms below.
-
-- Inline math: `$...$` and `\(...\)`.
-- Display math: standalone `$$...$$` and multiline `\[...\]`.
-- Standalone KaTeX environments including `equation`, `align`, `gather`, `aligned`, `cases`, and common matrix variants.
-- Everyday KaTeX constructs such as fractions, scripts, roots, Greek letters, `\mathbb`, `\mathbf`, and `\operatorname`.
-
-Arbitrary TeX packages, journal templates, custom macro preferences, formula numbering, labels, references, and general HTML execution are not supported. Invalid KaTeX stays in the document as source with a local warning; it does not crash or silently delete the document.
-
-PaperCanvas is its own design and asset set. It aims for a low-distraction, single-page writing experience without claiming complete Markdown, TeX, or Typora compatibility.
-
-## Known limits
-
-- No sync, collaboration, command palette, spelling dictionaries, or typewriter/focus mode yet.
-- Tables round-trip through GFM but do not yet have a spreadsheet-style cell toolbar.
-- PDF export is direct on macOS; other platforms currently use their system print flow.
-- Public releases still need macOS Developer ID signing/notarization and Windows Authenticode signing.
-
 ## License
 
 PaperCanvas is available under the [Apache License 2.0](LICENSE).
