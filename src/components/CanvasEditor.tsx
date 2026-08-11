@@ -133,6 +133,8 @@ export const CanvasEditor = forwardRef<SwitchableEditorHandle, Props>(function C
           return false;
         },
         handleDrop: (view, event) => {
+          // Tauri's native file-drop interceptor is disabled in tauri.conf.json
+          // so desktop image files reach this standard DataTransfer handler.
           const image = Array.from(event.dataTransfer?.files ?? []).find((file) => file.type.startsWith('image/'));
           if (!image) return false;
           const position = view.posAtCoords({

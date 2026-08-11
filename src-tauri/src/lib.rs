@@ -389,6 +389,16 @@ mod tests {
     }
 
     #[test]
+    fn html_image_drag_and_drop_is_enabled() {
+        let config = include_str!("../tauri.conf.json");
+
+        assert!(
+            config.contains("\"dragDropEnabled\": false"),
+            "Tauri's native file-drop interceptor must stay disabled so the editor receives HTML5 DataTransfer files"
+        );
+    }
+
+    #[test]
     fn direct_pdf_export_accepts_only_absolute_pdf_paths() {
         let valid = PathBuf::from("/tmp/papercanvas-export.pdf");
         let uppercase_extension = PathBuf::from("/tmp/papercanvas-export.PDF");

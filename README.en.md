@@ -56,27 +56,9 @@
 > [!IMPORTANT]
 > Desktop installers are built from each version tag by [the release workflow](.github/workflows/release-desktop.yml), then copied to a public download site by [the Pages workflow](.github/workflows/publish-downloads.yml). No Node.js, Rust, Git, GitHub account, or source build is required to install PaperCanvas.
 
-## Why PaperCanvas
-
-- **A visual canvas, not a permanent split view.** Write in one Tiptap/ProseMirror document and switch to an editable CodeMirror Markdown source mode only when you need it.
-- **Mathematics that remains LaTeX.** Inline and display formulas render with KaTeX. Click any formula to edit its source beside a live preview.
-- **Files you control.** Create, open, rename, auto-save, export, and reopen local `.md` and `.markdown` documents. Installed builds register both file types with Finder or Explorer.
-- **Portable images.** Paste or drag images, resize them on the canvas, and save them beside the document under `<document>.assets/` with relative Markdown references.
-- **Content-preserving by design.** Unsupported Markdown or sanitized HTML stays visible and round-trips as source instead of disappearing silently.
-- **Find without leaving the keyboard.** Press `⌘F` on macOS or `Ctrl+F` elsewhere to highlight every match, move forward or backward, and search the visual canvas or Markdown source.
-- **Built for long technical documents.** Outline navigation, tables, task lists, highlighted code blocks, word counts, themes, font controls, adjustable spacing, and English, 简体中文, and 繁體中文 UI are included.
-
 ## Why Markdown
 
-Markdown is convenient because one readable UTF-8 file can carry the substance of a document—text, hierarchy, lists, links, code, and mathematical notation—without hiding it behind a proprietary application. It is easy to learn, pleasant to write as plain text, friendly to search and version control, and attractive once rendered. You can open the same `.md` file in PaperCanvas, a code editor, a terminal, or many other writing tools, so the document remains useful even when a particular app is unavailable.
-
-Other formats remain valuable, but each introduces a trade-off for this kind of writing:
-
-- A `.txt` file is universal, but it has no standard syntax for headings, links, images, tables, or mathematical structure.
-- A `.tex` file is exceptionally powerful for professional typesetting, but its syntax and toolchain take longer to learn and the source is less approachable for quick everyday notes.
-- A `.docx` file is familiar and feature-rich, but it depends on compatible office software and its packaged binary structure is harder to inspect, diff, merge, and manage with Git.
-
-That balance is why PaperCanvas uses Markdown: it keeps a document self-sufficient and portable while still supporting LaTeX-style mathematics, approachable syntax, and polished rendering. Images may live in a neighboring asset folder, but the text and structure remain open, readable, and yours.
+Markdown keeps text, structure, links, code, and mathematical notation in a readable UTF-8 file. A single `.md` document can preserve its core content without depending on a particular app; its syntax is approachable, its content is easy to search and manage with Git, it opens across tools, and it renders cleanly. By comparison, `.txt` has no standard syntax for headings, links, images, tables, or mathematics; `.tex` offers powerful typesetting but has a steeper syntax and toolchain; `.docx` is capable but depends on compatible office software and is harder to inspect, diff, or merge. PaperCanvas therefore uses Markdown to combine portable, open documents with LaTeX mathematics and polished rendering; images can live in a neighboring asset folder.
 
 <table>
   <tr>
