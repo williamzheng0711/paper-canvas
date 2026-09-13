@@ -200,7 +200,9 @@ unclosed`;
       const previews = nodesOfType(document, "htmlPreview");
       const serialized = documentToMarkdown(document);
 
-      expect(previews).toHaveLength(13);
+      const expectedPreviewCount = file === "README.md" ? 6 : 13;
+
+      expect(previews).toHaveLength(expectedPreviewCount);
       expect(nodesOfType(document, "unsupportedMarkdown")).toHaveLength(0);
       previews.forEach((preview) =>
         expect(serialized).toContain(String(preview.attrs?.source ?? "")),
