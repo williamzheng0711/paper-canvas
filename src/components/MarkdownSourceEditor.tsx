@@ -4,7 +4,7 @@ import { HighlightStyle, bracketMatching, syntaxHighlighting } from '@codemirror
 import { Compartment, EditorState, StateEffect, StateField } from '@codemirror/state';
 import { Decoration, EditorView, highlightActiveLine, keymap, lineNumbers } from '@codemirror/view';
 import { tags } from '@lezer/highlight';
-import { forwardRef, useEffect, useImperativeHandle, useLayoutEffect, useRef } from 'react';
+import { forwardRef, memo, useEffect, useImperativeHandle, useLayoutEffect, useRef } from 'react';
 import { offsetAtProgress } from '../editor/modeTransition';
 import { findTextMatches, resolveActiveMatch, type SwitchableEditorHandle } from '../editor/search';
 import { getMessages, type Language } from '../i18n';
@@ -12,6 +12,7 @@ import { getMessages, type Language } from '../i18n';
 type Props = {
   language: Language;
   value: string;
+  valueRevision: number;
   onChange: (value: string) => void;
   onReady?: () => void;
 };
@@ -72,8 +73,19 @@ const searchDecorations = StateField.define({
   provide: (field) => EditorView.decorations.from(field),
 });
 
+function sameSourceProps(previous: Props, next: Props): boolean {
+  // CodeMirror owns the live source while typing. valueRevision changes only
+  // when React supplies an external replacement that must be dispatched.
+  return (
+    previous.language === next.language &&
+    previous.valueRevision === next.valueRevision &&
+    previous.onReady === next.onReady
+  );
+}
+
 /** A controlled CodeMirror surface for editable, syntax-coloured Markdown. */
-export const MarkdownSourceEditor = forwardRef<SwitchableEditorHandle, Props>(function MarkdownSourceEditor(
+export const MarkdownSourceEditor = memo(
+  forwardRef<SwitchableEditorHandle, Props>(function MarkdownSourceEditor(
   { language, value, onChange, onReady },
   ref,
 ) {
@@ -260,5 +272,7 @@ export const MarkdownSourceEditor = forwardRef<SwitchableEditorHandle, Props>(fu
     [],
   );
 
-  return <div ref={host} className="markdown-source-editor" />;
-});
+    return <div ref={host} className="markdown-source-editor" />;
+  }),
+  sameSourceProps,
+);

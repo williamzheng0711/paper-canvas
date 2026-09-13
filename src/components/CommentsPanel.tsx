@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import type { CommentPlacement, MarkdownComment } from '../editor/comments';
 import { getMessages, type Language } from '../i18n';
 
@@ -27,7 +27,7 @@ function targetPreview(comment: MarkdownComment): string {
   return comment.excerpt || '…';
 }
 
-export function CommentsPanel({
+export const CommentsPanel = memo(function CommentsPanel({
   language,
   comments,
   newTarget,
@@ -196,4 +196,4 @@ export function CommentsPanel({
       )}
     </aside>
   );
-}
+});

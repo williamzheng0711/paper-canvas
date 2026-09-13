@@ -138,9 +138,12 @@ export function createCommentDecorationsExtension(
               }
               if (!transaction.docChanged) return current;
               const positions = current.positions.map((position) => mapPosition(position, transaction));
+              const statusChanged = positions.some((position, index) => position.status !== current.positions[index]?.status);
               return {
                 positions,
-                decorations: buildDecorations(transaction.doc, positions, markerClickRef),
+                decorations: statusChanged
+                  ? buildDecorations(transaction.doc, positions, markerClickRef)
+                  : current.decorations.map(transaction.mapping, transaction.doc),
               };
             },
           },

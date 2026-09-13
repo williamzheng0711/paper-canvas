@@ -7,7 +7,7 @@ import TaskList from '@tiptap/extension-task-list';
 import { EditorContent, useEditor } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
 import { common, createLowlight } from 'lowlight';
-import { forwardRef, useEffect, useImperativeHandle, useLayoutEffect, useRef } from 'react';
+import { forwardRef, memo, useEffect, useImperativeHandle, useLayoutEffect, useRef } from 'react';
 import type { Editor, JSONContent } from '@tiptap/core';
 import { Selection, TextSelection } from '@tiptap/pm/state';
 import type { EditorView } from '@tiptap/pm/view';
@@ -56,6 +56,7 @@ type Props = {
   comments?: readonly MarkdownComment[];
   outlineTarget?: { index: number; request: number };
   onChange: (document: JSONContent, comments?: MarkdownComment[]) => void;
+  onEdit?: () => void;
   onCommentRequest?: (placement: CommentPlacement, coordinates: { x: number; y: number }) => void;
   onCommentClick?: (id: string) => void;
   canUndoComment?: boolean;
@@ -96,6 +97,48 @@ function markdownOffsetAtPosition(editor: Editor, position: number): number | un
   }
 }
 
+function markdownOffsetsAtPositions(
+  editor: Editor,
+  markdown: string,
+  positions: readonly number[],
+): Map<number, number | undefined> {
+  const bounded = [...new Set(positions.map((position) => Math.min(Math.max(0, Math.round(position)), editor.state.doc.content.size)))];
+  if (bounded.length === 0) return new Map();
+
+  const markerByPosition = new Map<number, string>();
+  bounded.forEach((position, index) => {
+    markerByPosition.set(position, `\uE100\uE101${index.toString(36)}\uE102`);
+  });
+
+  try {
+    const markedTransaction = [...bounded].sort((left, right) => right - left).reduce(
+      (transaction, position) => transaction.insertText(markerByPosition.get(position)!, position, position),
+      editor.state.tr,
+    );
+    const markedMarkdown = documentToMarkdown(markedTransaction.doc.toJSON());
+    const matches = [...markerByPosition.entries()].map(([position, marker]) => ({
+      position,
+      marker,
+      index: markedMarkdown.indexOf(marker),
+    }));
+    if (matches.some((match) => match.index < 0)) throw new Error('Comment marker was not serialized');
+    const cleanMarkdown = matches.reduce((value, match) => value.replaceAll(match.marker, ''), markedMarkdown);
+    if (cleanMarkdown !== markdown) throw new Error('Comment marker changed Markdown output');
+
+    const offsets = new Map<number, number | undefined>();
+    let removedLength = 0;
+    matches
+      .sort((left, right) => left.index - right.index)
+      .forEach((match) => {
+        offsets.set(match.position, match.index - removedLength);
+        removedLength += match.marker.length;
+      });
+    return offsets;
+  } catch {
+    return new Map(bounded.map((position) => [position, markdownOffsetAtPosition(editor, position)]));
+  }
+}
+
 function canvasPositionsForComments(
   editor: Editor,
   markdown: string,
@@ -111,12 +154,19 @@ function canvasPositionsForComments(
       return leftOffset - rightOffset || left.index - right.index;
     });
 
+  const positionCache = new Map<number, number | undefined>();
+  const resolvePosition = (offset: number): number | undefined => {
+    if (!positionCache.has(offset)) {
+      positionCache.set(offset, positionFromMarkdownOffset(editor.state.doc, markdown, offset)?.position);
+    }
+    return positionCache.get(offset);
+  };
+
   return orderedComments.map(({ comment }, index) => {
     const fromOffset = comment.target.kind === 'position' ? comment.target.offset : comment.target.from;
     const toOffset = comment.target.kind === 'position' ? fromOffset : comment.target.to;
-    const from =
-      positionFromMarkdownOffset(editor.state.doc, markdown, fromOffset)?.position ?? editor.state.selection.head;
-    const to = positionFromMarkdownOffset(editor.state.doc, markdown, toOffset)?.position ?? from;
+    const from = resolvePosition(fromOffset) ?? editor.state.selection.head;
+    const to = resolvePosition(toOffset) ?? from;
     return {
       id: comment.id,
       kind: comment.target.kind,
@@ -132,14 +182,31 @@ function sameCanvasPositions(left: CanvasCommentPosition[], right: CanvasComment
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
+function commentDecorationSignature(comments: readonly MarkdownComment[]): string {
+  return JSON.stringify(
+    comments.map((comment) => ({
+      id: comment.id,
+      target: comment.target,
+      status: comment.status,
+    })),
+  );
+}
+
 function mappedCommentsFromCanvas(editor: Editor, comments: readonly MarkdownComment[]): MarkdownComment[] {
   const markdown = documentToMarkdown(editor.getJSON());
+  const bodyFingerprint = markdownFingerprint(markdown);
   const positions = commentDecorationsPluginKey.getState(editor.state)?.positions ?? [];
+  const positionsById = new Map(positions.map((position) => [position.id, position]));
+  const offsetByPosition = markdownOffsetsAtPositions(
+    editor,
+    markdown,
+    positions.flatMap((position) => [position.from, position.to]),
+  );
   return comments.map((comment) => {
-    const position = positions.find((candidate) => candidate.id === comment.id);
+    const position = positionsById.get(comment.id);
     if (!position) return comment;
-    const from = markdownOffsetAtPosition(editor, position.from);
-    const to = markdownOffsetAtPosition(editor, position.to);
+    const from = offsetByPosition.get(position.from);
+    const to = offsetByPosition.get(position.to);
     if (from === undefined || to === undefined) return comment;
     const target: CommentTarget =
       comment.target.kind === 'position'
@@ -157,7 +224,7 @@ function mappedCommentsFromCanvas(editor: Editor, comments: readonly MarkdownCom
       contextBefore: context.before,
       contextAfter: context.after,
       anchorText: context.anchorText,
-      bodyFingerprint: markdownFingerprint(markdown),
+      bodyFingerprint,
       status: position.status,
     };
   });
@@ -184,7 +251,28 @@ function contextMenuPlacement(
   };
 }
 
-export const CanvasEditor = forwardRef<SwitchableEditorHandle, Props>(function CanvasEditor(
+function sameCanvasProps(previous: Props, next: Props): boolean {
+  // The live Tiptap instance owns the document while the user types. The
+  // documentId prop is the explicit signal for an external document replacement;
+  // ignoring the per-keystroke snapshot avoids re-rendering the whole canvas.
+  return (
+    previous.language === next.language &&
+    previous.documentId === next.documentId &&
+    previous.comments === next.comments &&
+    previous.onEdit === next.onEdit &&
+    previous.outlineTarget === next.outlineTarget &&
+    previous.onCommentRequest === next.onCommentRequest &&
+    previous.onCommentClick === next.onCommentClick &&
+    previous.canUndoComment === next.canUndoComment &&
+    previous.canRedoComment === next.canRedoComment &&
+    previous.onUndoComment === next.onUndoComment &&
+    previous.onRedoComment === next.onRedoComment &&
+    previous.onReady === next.onReady
+  );
+}
+
+export const CanvasEditor = memo(
+  forwardRef<SwitchableEditorHandle, Props>(function CanvasEditor(
   {
     language,
     documentId,
@@ -192,6 +280,7 @@ export const CanvasEditor = forwardRef<SwitchableEditorHandle, Props>(function C
     comments = [],
     outlineTarget,
     onChange,
+    onEdit,
     onCommentRequest,
     onCommentClick,
     canUndoComment = false,
@@ -207,6 +296,7 @@ export const CanvasEditor = forwardRef<SwitchableEditorHandle, Props>(function C
   initialDocumentRef.current = initialDocument;
   const commentsRef = useRef<readonly MarkdownComment[]>(comments);
   const onChangeRef = useRef(onChange);
+  const onEditRef = useRef(onEdit);
   const onCommentRequestRef = useRef(onCommentRequest);
   const onCommentClickRef = useRef(onCommentClick);
   const canUndoCommentRef = useRef(canUndoComment);
@@ -215,6 +305,7 @@ export const CanvasEditor = forwardRef<SwitchableEditorHandle, Props>(function C
   const onRedoCommentRef = useRef(onRedoComment);
   commentsRef.current = comments;
   onChangeRef.current = onChange;
+  onEditRef.current = onEdit;
   onCommentRequestRef.current = onCommentRequest;
   onCommentClickRef.current = onCommentClick;
   canUndoCommentRef.current = canUndoComment;
@@ -225,6 +316,42 @@ export const CanvasEditor = forwardRef<SwitchableEditorHandle, Props>(function C
   markerClickRef.current = (id) => onCommentClickRef.current?.(id);
   const editorRef = useRef<Editor | null>(null);
   const contextSelectionRef = useRef<{ from: number; to: number } | undefined>(undefined);
+  const commentSyncTimerRef = useRef<number | undefined>(undefined);
+  const lastMappedCommentsRef = useRef<readonly MarkdownComment[] | undefined>(undefined);
+  const decorationSignatureRef = useRef<string | undefined>(undefined);
+  const decorationDocumentIdRef = useRef<number | undefined>(undefined);
+
+  const flushCommentMapping = () => {
+    if (commentSyncTimerRef.current !== undefined) {
+      window.clearTimeout(commentSyncTimerRef.current);
+      commentSyncTimerRef.current = undefined;
+    }
+    const currentEditor = editorRef.current;
+    const currentComments = commentsRef.current;
+    if (!currentEditor) return;
+    const document = currentEditor.getJSON();
+    if (currentComments.length === 0) {
+      onChangeRef.current(document);
+      return;
+    }
+    const mappedComments = mappedCommentsFromCanvas(currentEditor, currentComments);
+    const commentsChanged = JSON.stringify(mappedComments) !== JSON.stringify(currentComments);
+    if (commentsChanged) lastMappedCommentsRef.current = mappedComments;
+    onChangeRef.current(
+      document,
+      commentsChanged ? mappedComments : undefined,
+    );
+  };
+
+  const scheduleCommentMapping = (currentEditor: Editor) => {
+    if (commentSyncTimerRef.current !== undefined) window.clearTimeout(commentSyncTimerRef.current);
+    commentSyncTimerRef.current = window.setTimeout(() => {
+      commentSyncTimerRef.current = undefined;
+      if (editorRef.current !== currentEditor) return;
+      flushCommentMapping();
+    }, 400);
+  };
+
   const editor = useEditor(
     {
       extensions: [
@@ -351,11 +478,8 @@ export const CanvasEditor = forwardRef<SwitchableEditorHandle, Props>(function C
         },
       },
       onUpdate: ({ editor: currentEditor }) => {
-        const currentComments = commentsRef.current;
-        onChangeRef.current(
-          currentEditor.getJSON(),
-          currentComments.length > 0 ? mappedCommentsFromCanvas(currentEditor, currentComments) : undefined,
-        );
+        onEditRef.current?.();
+        scheduleCommentMapping(currentEditor);
       },
     },
     [language],
@@ -367,13 +491,34 @@ export const CanvasEditor = forwardRef<SwitchableEditorHandle, Props>(function C
     replaceDocumentPreservingSelection(editor, initialDocumentRef.current);
   }, [documentId, editor]);
 
+  useEffect(
+    () => () => {
+      if (commentSyncTimerRef.current !== undefined) window.clearTimeout(commentSyncTimerRef.current);
+    },
+    [],
+  );
+
   useEffect(() => {
     if (!editor) return;
+    const signature = commentDecorationSignature(comments);
+    if (lastMappedCommentsRef.current === comments) {
+      lastMappedCommentsRef.current = undefined;
+      decorationSignatureRef.current = signature;
+      decorationDocumentIdRef.current = documentId;
+      return;
+    }
+    if (decorationSignatureRef.current === signature && decorationDocumentIdRef.current === documentId) return;
     const markdown = documentToMarkdown(editor.getJSON());
     const positions = canvasPositionsForComments(editor, markdown, commentsRef.current);
     const current = commentDecorationsPluginKey.getState(editor.state)?.positions ?? [];
-    if (sameCanvasPositions(current, positions)) return;
+    if (sameCanvasPositions(current, positions)) {
+      decorationSignatureRef.current = signature;
+      decorationDocumentIdRef.current = documentId;
+      return;
+    }
     editor.view.dispatch(editor.state.tr.setMeta(commentDecorationsPluginKey, positions));
+    decorationSignatureRef.current = signature;
+    decorationDocumentIdRef.current = documentId;
   }, [comments, documentId, editor]);
 
   useEffect(() => {
@@ -466,11 +611,14 @@ export const CanvasEditor = forwardRef<SwitchableEditorHandle, Props>(function C
         document.execCommand(action);
         contextSelectionRef.current = undefined;
       },
+      flushCommentMapping,
       isFocused: () => editor?.view.hasFocus() ?? false,
       requestMeasure: () => undefined,
     }),
     [editor],
   );
 
-  return <EditorContent editor={editor} />;
-});
+    return <EditorContent editor={editor} />;
+  }),
+  sameCanvasProps,
+);

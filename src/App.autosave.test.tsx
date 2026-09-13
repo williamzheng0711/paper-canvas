@@ -3,17 +3,25 @@ import { act, useEffect } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import App from './App';
+import { createMarkdownComment, serializeMarkdownWithComments, type MarkdownComment } from './editor/comments';
 import type { SwitchableEditorHandle } from './editor/search';
 
 type CanvasProps = {
   documentId: number;
   initialDocument: JSONContent;
+  comments: readonly MarkdownComment[];
   outlineTarget?: { index: number; request: number };
   onChange: (document: JSONContent) => void;
 };
 
+type SourceProps = {
+  value: string;
+  onChange: (value: string) => void;
+};
+
 const harness = vi.hoisted(() => ({
   canvasProps: null as CanvasProps | null,
+  sourceProps: null as SourceProps | null,
   canvasMounts: 0,
   canvasUnmounts: 0,
   searchHandle: {
@@ -93,8 +101,11 @@ vi.mock('./components/CanvasEditor', () => ({
   },
 }));
 vi.mock('./components/MarkdownSourceEditor', () => ({
-  MarkdownSourceEditor: (props: { ref?: React.Ref<SwitchableEditorHandle>; onReady?: () => void }) => {
+  MarkdownSourceEditor: (
+    props: SourceProps & { ref?: React.Ref<SwitchableEditorHandle>; onReady?: () => void },
+  ) => {
     const { onReady } = props;
+    harness.sourceProps = props;
     if (typeof props.ref === 'function') props.ref(harness.searchHandle);
     if (props.ref && typeof props.ref === 'object') props.ref.current = harness.searchHandle;
     useEffect(() => {
@@ -153,6 +164,7 @@ describe('App autosave cursor stability', () => {
     vi.useFakeTimers();
     vi.clearAllMocks();
     harness.canvasProps = null;
+    harness.sourceProps = null;
     harness.canvasMounts = 0;
     harness.canvasUnmounts = 0;
     let activeSearchResult = 0;
@@ -244,6 +256,38 @@ describe('App autosave cursor stability', () => {
     expect(host.querySelector('.editor-mode-pane--canvas')?.hasAttribute('hidden')).toBe(false);
     expect(harness.canvasMounts).toBe(1);
     expect(harness.canvasUnmounts).toBe(0);
+  });
+
+  it('defers source comment relocation until typing pauses', async () => {
+    const showSource = Array.from(host.querySelectorAll<HTMLButtonElement>('button')).find(
+      (button) => button.textContent === '顯示原始 Markdown',
+    );
+
+    await act(async () => {
+      showSource?.click();
+      await flushEffects();
+      await vi.advanceTimersByTimeAsync(50);
+    });
+
+    const comment = createMarkdownComment('原始內容\n', { kind: 'range', from: 0, to: 4 }, '延遲同步測試', '原始內容');
+    const markdown = serializeMarkdownWithComments('原始內容\n', [comment]);
+    await act(async () => {
+      harness.sourceProps?.onChange(markdown);
+      await flushEffects();
+    });
+
+    expect(harness.canvasProps?.comments).toHaveLength(0);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(399);
+      await flushEffects();
+    });
+    expect(harness.canvasProps?.comments).toHaveLength(0);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+      await flushEffects();
+    });
+    expect(harness.canvasProps?.comments).toHaveLength(1);
   });
 
   it('uses document progress when an unfocused source-mode toggle has no visible caret', async () => {

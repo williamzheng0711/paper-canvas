@@ -26,7 +26,13 @@ describe('MarkdownSourceEditor search', () => {
     const search = createRef<SwitchableEditorHandle>();
     await act(async () => {
       root.render(
-        <MarkdownSourceEditor ref={search} language="en" value={'# Alpha\n\nalpha and ALPHA'} onChange={vi.fn()} />,
+        <MarkdownSourceEditor
+          ref={search}
+          language="en"
+          value={'# Alpha\n\nalpha and ALPHA'}
+          valueRevision={0}
+          onChange={vi.fn()}
+        />,
       );
     });
 

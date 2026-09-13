@@ -41,6 +41,8 @@ export type SwitchableEditorHandle = SearchableEditorHandle & {
   setDocumentSelection?: (anchor: DocumentSelectionAnchor) => boolean;
   /** Execute a basic editor action from the custom canvas context menu. */
   runContextAction?: (action: ContextMenuAction) => void;
+  /** Flush any deferred canvas-to-Markdown comment position synchronization. */
+  flushCommentMapping?: () => void;
   isFocused: () => boolean;
   requestMeasure: () => void;
 };

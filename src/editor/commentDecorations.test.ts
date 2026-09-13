@@ -16,7 +16,7 @@ describe('canvas comment decorations', () => {
     document.body.replaceChildren();
   });
 
-  function createEditor() {
+  function createEditor(text = 'alpha beta') {
     const host = document.createElement('div');
     document.body.append(host);
     const onCommentClick = vi.fn();
@@ -29,7 +29,7 @@ describe('canvas comment decorations', () => {
         content: [
           {
             type: 'paragraph',
-            content: [{ type: 'text', text: 'alpha beta' }],
+            content: [{ type: 'text', text }],
           },
         ],
       },
@@ -94,5 +94,31 @@ describe('canvas comment decorations', () => {
     const afterDelete = commentDecorationsPluginKey.getState(editor.state)?.positions[0];
     expect(afterDelete?.status).toBe('needs-review');
     expect(afterDelete?.from).toBe(afterDelete?.to);
+  });
+
+  it('keeps repeated edits bounded with a large comment decoration set', () => {
+    const { editor, host } = createEditor('x'.repeat(20_000));
+    const count = 750;
+    setPositions(
+      editor,
+      Array.from({ length: count }, (_, index) => ({
+        id: `comment-${index}`,
+        kind: 'position' as const,
+        from: 1 + index * 20,
+        to: 1 + index * 20,
+        status: 'active' as const,
+        number: index + 1,
+      })),
+    );
+
+    const started = performance.now();
+    for (let index = 0; index < 120; index += 1) {
+      editor.view.dispatch(editor.state.tr.insertText('x', 1, 1));
+    }
+    const elapsed = performance.now() - started;
+    console.info(`750 comment decorations × 120 edits: ${elapsed.toFixed(1)} ms`);
+
+    expect(host.querySelectorAll('[data-comment-marker]').length).toBe(count);
+    expect(elapsed).toBeLessThan(1_500);
   });
 });

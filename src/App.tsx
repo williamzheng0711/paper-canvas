@@ -62,6 +62,8 @@ type PendingModeTransition = {
   restoreFocus: boolean;
 };
 
+const emptyComments: readonly MarkdownComment[] = [];
+
 function documentMetrics(document: JSONContent): {
   characters: number;
   words: number;
@@ -113,7 +115,7 @@ export default function App() {
   }>();
   const [sourceMode, setSourceMode] = useState(false);
   const [modeTransitioning, setModeTransitioning] = useState(false);
-  const [rawMarkdown, setRawMarkdown] = useState('');
+  const [rawMarkdownRevision, setRawMarkdownRevision] = useState(0);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResult, setSearchResult] = useState<SearchResult>({
@@ -143,7 +145,7 @@ export default function App() {
   const editRevisionRef = useRef(editRevision);
   const documentSessionRef = useRef(0);
   const sourceModeRef = useRef(sourceMode);
-  const rawMarkdownRef = useRef(rawMarkdown);
+  const rawMarkdownRef = useRef('');
   const openedByOperatingSystem = useRef(false);
   const recentExternalOpen = useRef(new Map<string, number>());
   const exportMenu = useRef<HTMLDetailsElement>(null);
@@ -153,6 +155,8 @@ export default function App() {
   const canvasArea = useRef<HTMLElement>(null);
   const pendingModeTransition = useRef<PendingModeTransition | undefined>(undefined);
   const modeTransitionFrame = useRef<number | undefined>(undefined);
+  const sourceCommentSyncTimerRef = useRef<number | undefined>(undefined);
+  const revisionSyncTimerRef = useRef<number | undefined>(undefined);
   const outlineRequest = useRef(0);
   const pdfExportingRef = useRef(false);
   const commentHistory = useRef<{
@@ -162,12 +166,20 @@ export default function App() {
   fileRef.current = file;
   dirtyRef.current = dirty;
   sourceModeRef.current = sourceMode;
-  rawMarkdownRef.current = rawMarkdown;
+
+  const setExternalRawMarkdown = useCallback((value: string) => {
+    rawMarkdownRef.current = value;
+    setRawMarkdownRevision((revision) => revision + 1);
+  }, []);
 
   const advanceRevision = useCallback(() => {
     const nextRevision = editRevisionRef.current + 1;
     editRevisionRef.current = nextRevision;
-    setEditRevision(nextRevision);
+    if (revisionSyncTimerRef.current !== undefined) return;
+    revisionSyncTimerRef.current = window.setTimeout(() => {
+      revisionSyncTimerRef.current = undefined;
+      setEditRevision(editRevisionRef.current);
+    }, 100);
   }, []);
 
   const markEdited = useCallback(() => {
@@ -177,10 +189,41 @@ export default function App() {
     setSaveStatus('unsaved');
   }, [advanceRevision]);
 
-  const comments = file.comments ?? [];
+  const clearSourceCommentSync = useCallback(() => {
+    if (sourceCommentSyncTimerRef.current !== undefined) {
+      window.clearTimeout(sourceCommentSyncTimerRef.current);
+      sourceCommentSyncTimerRef.current = undefined;
+    }
+  }, []);
+
+  const syncSourceComments = useCallback(() => {
+    clearSourceCommentSync();
+    const markdown = rawMarkdownRef.current;
+    const parsed = parseMarkdownComments(markdown);
+    if (parsed.status !== 'valid' && parsed.status !== 'none') return;
+    const nextComments =
+      parsed.status === 'valid' ? documentStateFromMarkdown(markdown, fileRef.current.path).comments : [];
+    if (JSON.stringify(fileRef.current.comments ?? []) === JSON.stringify(nextComments)) return;
+    const nextFile = {
+      ...fileRef.current,
+      comments: nextComments,
+      commentWarning: undefined,
+    };
+    fileRef.current = nextFile;
+    setFile(nextFile);
+  }, [clearSourceCommentSync]);
+
+  const scheduleSourceCommentSync = useCallback(() => {
+    clearSourceCommentSync();
+    sourceCommentSyncTimerRef.current = window.setTimeout(syncSourceComments, 400);
+  }, [clearSourceCommentSync, syncSourceComments]);
+
+  const comments = file.comments ?? emptyComments;
   const setComments = useCallback(
     (nextComments: readonly MarkdownComment[], options: { recordHistory?: boolean; markEdited?: boolean } = {}) => {
-      const currentComments = fileRef.current.comments ?? [];
+      const currentRawComments = sourceModeRef.current ? parseMarkdownComments(rawMarkdownRef.current) : undefined;
+      const currentComments =
+        currentRawComments?.status === 'valid' ? currentRawComments.comments : fileRef.current.comments ?? [];
       const next = cloneComments(nextComments);
       if (JSON.stringify(currentComments) === JSON.stringify(next)) return;
       if (options.recordHistory !== false) {
@@ -191,15 +234,23 @@ export default function App() {
       fileRef.current = nextFile;
       setFile(nextFile);
       if (sourceModeRef.current) {
-        const parsed = parseMarkdownComments(rawMarkdownRef.current);
+        clearSourceCommentSync();
+        const parsed = currentRawComments ?? parseMarkdownComments(rawMarkdownRef.current);
         const body = parsed.status === 'valid' ? parsed.body : rawMarkdownRef.current;
         const nextMarkdown = serializeMarkdownWithComments(body, next);
-        rawMarkdownRef.current = nextMarkdown;
-        setRawMarkdown(nextMarkdown);
+        setExternalRawMarkdown(nextMarkdown);
       }
       if (options.markEdited !== false) markEdited();
     },
-    [markEdited],
+    [clearSourceCommentSync, markEdited, setExternalRawMarkdown],
+  );
+
+  useEffect(
+    () => () => {
+      clearSourceCommentSync();
+      if (revisionSyncTimerRef.current !== undefined) window.clearTimeout(revisionSyncTimerRef.current);
+    },
+    [clearSourceCommentSync],
   );
 
   const undoComment = useCallback(() => {
@@ -223,6 +274,7 @@ export default function App() {
   const createComment = useCallback(
     (content: string, placement: CommentPlacement) => {
       if (!content.trim()) return;
+      if (!sourceModeRef.current) canvasSearch.current?.flushCommentMapping?.();
       const body = documentToPortableMarkdown(fileRef.current.document);
       const comment = createMarkdownComment(body, placement.target, content, placement.excerpt);
       setComments([...(fileRef.current.comments ?? []), comment]);
@@ -359,6 +411,7 @@ export default function App() {
 
   const loadFile = useCallback(
     (nextFile: EditorFile) => {
+      clearSourceCommentSync();
       if (nextFile.path) void clearDraft();
       const normalizedFile = { ...nextFile, comments: nextFile.comments ?? [] };
       fileRef.current = normalizedFile;
@@ -377,7 +430,7 @@ export default function App() {
       setCommentsPanelOpen(normalizedFile.comments.length > 0);
       setMessage(normalizedFile.commentWarning ?? getMessages().openedFile(normalizedFile.name));
     },
-    [advanceRevision, resetCommentHistory],
+    [advanceRevision, clearSourceCommentSync, resetCommentHistory],
   );
 
   const replaceWithOpenedFile = useCallback(
@@ -420,6 +473,8 @@ export default function App() {
 
   const saveCurrent = useCallback(async (forceSaveAs = false) => {
     if (saving.current) return;
+    if (sourceModeRef.current) clearSourceCommentSync();
+    else canvasSearch.current?.flushCommentMapping?.();
     saving.current = true;
     setSaveStatus('saving');
     const saveSession = documentSessionRef.current;
@@ -464,8 +519,7 @@ export default function App() {
         }
         if (sourceModeRef.current) {
           const normalizedMarkdown = documentToPortableMarkdown(saved.document, saved.comments ?? []);
-          rawMarkdownRef.current = normalizedMarkdown;
-          setRawMarkdown(normalizedMarkdown);
+          setExternalRawMarkdown(normalizedMarkdown);
         }
         dirtyRef.current = false;
         setDirty(false);
@@ -483,17 +537,19 @@ export default function App() {
     } finally {
       saving.current = false;
     }
-  }, []);
+  }, [clearSourceCommentSync, setExternalRawMarkdown]);
 
   useEffect(() => {
     if (!dirty) return;
-    const revision = editRevisionRef.current;
     const session = documentSessionRef.current;
     const timer = window.setTimeout(() => {
       if (fileRef.current.path) {
         void saveCurrent();
         return;
       }
+      if (sourceModeRef.current) clearSourceCommentSync();
+      else canvasSearch.current?.flushCommentMapping?.();
+      const revision = editRevisionRef.current;
       const draft = sourceModeRef.current
         ? {
             ...fileRef.current,
@@ -512,7 +568,7 @@ export default function App() {
         });
     }, 850);
     return () => window.clearTimeout(timer);
-  }, [dirty, editRevision, saveCurrent]);
+  }, [clearSourceCommentSync, dirty, editRevision, saveCurrent]);
 
   const openFile = useCallback(async () => {
     try {
@@ -747,17 +803,18 @@ export default function App() {
 
   const toggleSourceMode = () => {
     if (!sourceMode) {
+      canvasSearch.current?.flushCommentMapping?.();
       const mappedSelection = canvasSearch.current?.getMarkdownSelection?.();
       const body = mappedSelection?.markdown ?? documentToPortableMarkdown(fileRef.current.document);
       const markdown = serializeMarkdownWithComments(body, fileRef.current.comments ?? []);
       beginModeTransition('source', mappedSelection ? { kind: 'markdown', offset: mappedSelection.offset } : undefined);
-      rawMarkdownRef.current = markdown;
-      setRawMarkdown(markdown);
+      setExternalRawMarkdown(markdown);
       sourceModeRef.current = true;
       setSourceMode(true);
       return;
     }
     try {
+      clearSourceCommentSync();
       const parsedSelection = markdownToDocumentWithSelection(
         rawMarkdownRef.current,
         markdownSearch.current?.getMarkdownOffset?.(),
@@ -827,7 +884,12 @@ export default function App() {
   }, [closeSearch, newFile, openFile, openSearch, saveCurrent, searchOpen]);
 
   const outline = useMemo(() => collectOutline(file.document), [file.document]);
-  const metrics = useMemo(() => documentMetrics(file.document), [file.document]);
+  const [metrics, setMetrics] = useState(() => documentMetrics(file.document));
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setMetrics(documentMetrics(file.document)), 250);
+    return () => window.clearTimeout(timer);
+  }, [file.document]);
 
   const commitFontSize = () => {
     const fontSize = normalizeFontSize(fontSizeInput, preferences.fontSize);
@@ -872,6 +934,7 @@ export default function App() {
   const exportMarkdown = useCallback(async () => {
     closeExportMenu();
     try {
+      if (!sourceModeRef.current) canvasSearch.current?.flushCommentMapping?.();
       const markdown = sourceModeRef.current
         ? rawMarkdownRef.current
         : documentToPortableMarkdown(fileRef.current.document, fileRef.current.comments ?? []);
@@ -947,6 +1010,13 @@ export default function App() {
     canvasSearch.current?.runContextAction?.(action);
     setCanvasContextMenu(null);
   };
+
+  const closeCommentsPanel = useCallback(() => {
+    setCommentsPanelOpen(false);
+    setNewCommentTarget(null);
+  }, []);
+
+  const cancelNewComment = useCallback(() => setNewCommentTarget(null), []);
 
   return (
     <main className={`app-shell theme-${preferences.theme} font-${preferences.font}`} lang={preferences.language}>
@@ -1257,6 +1327,7 @@ export default function App() {
               comments={comments}
               outlineTarget={outlineTarget}
               onReady={canvasReady}
+              onEdit={markEdited}
               onCommentRequest={handleCanvasContextMenu}
               onCommentClick={handleCommentMarkerClick}
               canUndoComment={commentHistory.current.undo.length > 0}
@@ -1265,15 +1336,13 @@ export default function App() {
               onRedoComment={redoComment}
               onChange={(document, mappedComments) => {
                 if (mappedComments) resetCommentHistory();
-                setFile((current) => {
-                  const nextFile = {
-                    ...current,
-                    document,
-                    ...(mappedComments ? { comments: mappedComments } : {}),
-                  };
-                  fileRef.current = nextFile;
-                  return nextFile;
-                });
+                const nextFile = {
+                  ...fileRef.current,
+                  document,
+                  ...(mappedComments ? { comments: mappedComments } : {}),
+                };
+                fileRef.current = nextFile;
+                setFile(nextFile);
                 markEdited();
               }}
             />
@@ -1283,23 +1352,13 @@ export default function App() {
               <MarkdownSourceEditor
                 ref={markdownSearch}
                 language={preferences.language}
-                value={rawMarkdown}
+                value={rawMarkdownRef.current}
+                valueRevision={rawMarkdownRevision}
                 onReady={sourceReady}
                 onChange={(value) => {
                   rawMarkdownRef.current = value;
-                  setRawMarkdown(value);
                   markEdited();
-                  const parsed = parseMarkdownComments(value);
-                  if (parsed.status !== 'valid' && parsed.status !== 'none') return;
-                  const nextComments =
-                    parsed.status === 'valid' ? documentStateFromMarkdown(value, fileRef.current.path).comments : [];
-                  const nextFile = {
-                    ...fileRef.current,
-                    comments: nextComments,
-                    commentWarning: undefined,
-                  };
-                  fileRef.current = nextFile;
-                  setFile(nextFile);
+                  scheduleSourceCommentSync();
                 }}
               />
             </div>
@@ -1311,12 +1370,9 @@ export default function App() {
             comments={comments}
             newTarget={newCommentTarget}
             activeCommentId={activeCommentId}
-            onClose={() => {
-              setCommentsPanelOpen(false);
-              setNewCommentTarget(null);
-            }}
+            onClose={closeCommentsPanel}
             onCreate={createComment}
-            onCancelNew={() => setNewCommentTarget(null)}
+            onCancelNew={cancelNewComment}
             onUpdate={updateComment}
             onDelete={deleteComment}
             onLocate={locateComment}
