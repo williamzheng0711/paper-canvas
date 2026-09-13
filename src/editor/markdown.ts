@@ -5,6 +5,7 @@ import remarkMath from "remark-math";
 import remarkParse from "remark-parse";
 import remarkStringify from "remark-stringify";
 import { getMessages } from "../i18n";
+import { parseMarkdownComments } from "./comments";
 import { isDisplayLatexEnvironment } from "./formulaInput";
 import { isHtmlPreviewCandidate } from "./htmlSafety";
 
@@ -423,9 +424,10 @@ function fromMdast(
 }
 
 export function markdownToDocument(markdown: string): JSONContent {
+  const source = parseMarkdownComments(markdown).body;
   // remark-math deliberately interprets same-line `$$x$$` as inline math.  PaperCanvas
   // treats a complete line using double delimiters as a display formula, matching its UI.
-  const normalized = normalizeLatexDelimiters(markdown).replace(
+  const normalized = normalizeLatexDelimiters(source).replace(
     /^\$\$([^\n]+)\$\$\s*$/gm,
     (_line, latex: string) => `$$\n${latex}\n$$`,
   );

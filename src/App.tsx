@@ -3,9 +3,19 @@ import { listen } from '@tauri-apps/api/event';
 import type { JSONContent } from '@tiptap/core';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { CanvasEditor } from './components/CanvasEditor';
+import { CommentsPanel } from './components/CommentsPanel';
 import { MarkdownSourceEditor } from './components/MarkdownSourceEditor';
+import {
+  cloneComments,
+  createMarkdownComment,
+  parseMarkdownComments,
+  relocateMarkdownComments,
+  serializeMarkdownWithComments,
+  type CommentPlacement,
+  type MarkdownComment,
+} from './editor/comments';
 import { documentsEqual } from './editor/documentSync';
-import { collectOutline, documentToMarkdown, markdownToDocument } from './editor/markdown';
+import { collectOutline, markdownToDocument } from './editor/markdown';
 import { captureViewport, restoreViewport, type ViewportSnapshot } from './editor/modeTransition';
 import type { SearchDirection, SearchResult, SwitchableEditorHandle } from './editor/search';
 import { markdownToDocumentWithSelection, type DocumentSelectionAnchor } from './editor/selectionMapping';
@@ -39,6 +49,7 @@ import {
 
 type SaveStatus = 'saved' | 'saving' | 'draft' | 'error' | 'unsaved';
 type RecentContextMenu = { item: RecentFile; x: number; y: number };
+type CanvasContextMenu = { placement: CommentPlacement; x: number; y: number };
 type EditorMode = 'canvas' | 'source';
 type SemanticModeSelection =
   { kind: 'markdown'; offset: number } | { kind: 'document'; anchor: DocumentSelectionAnchor };
@@ -66,6 +77,26 @@ function documentMetrics(document: JSONContent): {
   return { characters: [...text].length, words: cjk + nonCjkWords };
 }
 
+function documentStateFromMarkdown(
+  markdown: string,
+  path?: string,
+): {
+  document: JSONContent;
+  comments: MarkdownComment[];
+  warning?: string;
+} {
+  const parsed = parseMarkdownComments(markdown);
+  const document = hydrateDocumentAssets(markdownToDocument(parsed.body), path);
+  const canonicalMarkdown = documentToPortableMarkdown(document);
+  return {
+    document,
+    comments: relocateMarkdownComments(parsed.comments, parsed.body, canonicalMarkdown),
+    ...(parsed.status === 'invalid' || parsed.status === 'unknown-version'
+      ? { warning: getMessages().commentDataWarning }
+      : {}),
+  };
+}
+
 export default function App() {
   const [file, setFile] = useState<EditorFile>(newEditorFile);
   const [documentId, setDocumentId] = useState(0);
@@ -75,6 +106,7 @@ export default function App() {
   const [message, setMessage] = useState(() => getMessages().localOnly);
   const [recent, setRecent] = useState<RecentFile[]>([]);
   const [recentContextMenu, setRecentContextMenu] = useState<RecentContextMenu | null>(null);
+  const [canvasContextMenu, setCanvasContextMenu] = useState<CanvasContextMenu | null>(null);
   const [outlineTarget, setOutlineTarget] = useState<{
     index: number;
     request: number;
@@ -88,6 +120,9 @@ export default function App() {
     current: 0,
     total: 0,
   });
+  const [commentsPanelOpen, setCommentsPanelOpen] = useState(false);
+  const [newCommentTarget, setNewCommentTarget] = useState<CommentPlacement | null>(null);
+  const [activeCommentId, setActiveCommentId] = useState<string | undefined>();
   const [pdfExporting, setPdfExporting] = useState(false);
   const [preferences, setPreferences] = useState<AppPreferences>({
     theme: 'light',
@@ -120,6 +155,10 @@ export default function App() {
   const modeTransitionFrame = useRef<number | undefined>(undefined);
   const outlineRequest = useRef(0);
   const pdfExportingRef = useRef(false);
+  const commentHistory = useRef<{
+    undo: MarkdownComment[][];
+    redo: MarkdownComment[][];
+  }>({ undo: [], redo: [] });
   fileRef.current = file;
   dirtyRef.current = dirty;
   sourceModeRef.current = sourceMode;
@@ -138,6 +177,100 @@ export default function App() {
     setSaveStatus('unsaved');
   }, [advanceRevision]);
 
+  const comments = file.comments ?? [];
+  const setComments = useCallback(
+    (nextComments: readonly MarkdownComment[], options: { recordHistory?: boolean; markEdited?: boolean } = {}) => {
+      const currentComments = fileRef.current.comments ?? [];
+      const next = cloneComments(nextComments);
+      if (JSON.stringify(currentComments) === JSON.stringify(next)) return;
+      if (options.recordHistory !== false) {
+        commentHistory.current.undo.push(cloneComments(currentComments));
+        commentHistory.current.redo = [];
+      }
+      const nextFile = { ...fileRef.current, comments: next };
+      fileRef.current = nextFile;
+      setFile(nextFile);
+      if (sourceModeRef.current) {
+        const parsed = parseMarkdownComments(rawMarkdownRef.current);
+        const body = parsed.status === 'valid' ? parsed.body : rawMarkdownRef.current;
+        const nextMarkdown = serializeMarkdownWithComments(body, next);
+        rawMarkdownRef.current = nextMarkdown;
+        setRawMarkdown(nextMarkdown);
+      }
+      if (options.markEdited !== false) markEdited();
+    },
+    [markEdited],
+  );
+
+  const undoComment = useCallback(() => {
+    const previous = commentHistory.current.undo.pop();
+    if (!previous) return;
+    commentHistory.current.redo.push(cloneComments(fileRef.current.comments ?? []));
+    setComments(previous, { recordHistory: false });
+  }, [setComments]);
+
+  const redoComment = useCallback(() => {
+    const next = commentHistory.current.redo.pop();
+    if (!next) return;
+    commentHistory.current.undo.push(cloneComments(fileRef.current.comments ?? []));
+    setComments(next, { recordHistory: false });
+  }, [setComments]);
+
+  const resetCommentHistory = useCallback(() => {
+    commentHistory.current = { undo: [], redo: [] };
+  }, []);
+
+  const createComment = useCallback(
+    (content: string, placement: CommentPlacement) => {
+      if (!content.trim()) return;
+      const body = documentToPortableMarkdown(fileRef.current.document);
+      const comment = createMarkdownComment(body, placement.target, content, placement.excerpt);
+      setComments([...(fileRef.current.comments ?? []), comment]);
+      setNewCommentTarget(null);
+      setActiveCommentId(comment.id);
+      setCommentsPanelOpen(true);
+    },
+    [setComments],
+  );
+
+  const updateComment = useCallback(
+    (id: string, content: string) => {
+      if (!content.trim()) return;
+      setComments(
+        (fileRef.current.comments ?? []).map((comment) => (comment.id === id ? { ...comment, content } : comment)),
+      );
+    },
+    [setComments],
+  );
+
+  const deleteComment = useCallback(
+    (id: string) => {
+      setComments((fileRef.current.comments ?? []).filter((comment) => comment.id !== id));
+      if (activeCommentId === id) setActiveCommentId(undefined);
+    },
+    [activeCommentId, setComments],
+  );
+
+  const locateComment = useCallback((comment: MarkdownComment) => {
+    setActiveCommentId(comment.id);
+    const range =
+      comment.target.kind === 'position'
+        ? { from: comment.target.offset, to: comment.target.offset }
+        : { from: comment.target.from, to: comment.target.to };
+    const editor = sourceModeRef.current ? markdownSearch.current : canvasSearch.current;
+    editor?.setMarkdownSelection?.(range);
+  }, []);
+
+  const handleCommentMarkerClick = useCallback((id: string) => {
+    setActiveCommentId(id);
+    setCommentsPanelOpen(true);
+    requestAnimationFrame(() => {
+      Array.from(document.querySelectorAll<HTMLElement>('[data-comment-card]'))
+        .find((element) => element.dataset.commentCard === id)
+        ?.scrollIntoView({ block: 'nearest' });
+    });
+  }, []);
+
   useEffect(() => {
     void Promise.all([loadRecent(), loadPreferences(), loadDraft()])
       .then(([loadedRecent, loadedPreferences, draft]) => {
@@ -150,11 +283,13 @@ export default function App() {
         setFontSizeInput(String(loadedPreferences.fontSize));
         setLineSpacingInput(String(loadedPreferences.lineSpacing));
         if (draft && !openedByOperatingSystem.current) {
-          fileRef.current = draft;
-          setFile(draft);
+          const normalizedDraft = { ...draft, comments: draft.comments ?? [] };
+          fileRef.current = normalizedDraft;
+          setFile(normalizedDraft);
           setDocumentId((id) => id + 1);
           documentSessionRef.current += 1;
           advanceRevision();
+          setCommentsPanelOpen(normalizedDraft.comments.length > 0);
           dirtyRef.current = true;
           setDirty(true);
           setSaveStatus('draft');
@@ -195,6 +330,24 @@ export default function App() {
   }, [recentContextMenu]);
 
   useEffect(() => {
+    if (!canvasContextMenu) return;
+    const close = () => setCanvasContextMenu(null);
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') close();
+    };
+    window.addEventListener('blur', close);
+    window.addEventListener('resize', close);
+    document.addEventListener('pointerdown', close);
+    document.addEventListener('keydown', closeOnEscape);
+    return () => {
+      window.removeEventListener('blur', close);
+      window.removeEventListener('resize', close);
+      document.removeEventListener('pointerdown', close);
+      document.removeEventListener('keydown', closeOnEscape);
+    };
+  }, [canvasContextMenu]);
+
+  useEffect(() => {
     const title = `${dirty ? '● ' : ''}${file.name} — PaperCanvas`;
     document.title = title;
     if (isTauri()) {
@@ -207,19 +360,24 @@ export default function App() {
   const loadFile = useCallback(
     (nextFile: EditorFile) => {
       if (nextFile.path) void clearDraft();
-      fileRef.current = nextFile;
-      setFile(nextFile);
+      const normalizedFile = { ...nextFile, comments: nextFile.comments ?? [] };
+      fileRef.current = normalizedFile;
+      setFile(normalizedFile);
       setDocumentId((id) => id + 1);
       documentSessionRef.current += 1;
       advanceRevision();
+      resetCommentHistory();
       dirtyRef.current = false;
       setDirty(false);
       setSaveStatus('saved');
       sourceModeRef.current = false;
       setSourceMode(false);
-      setMessage(getMessages().openedFile(nextFile.name));
+      setNewCommentTarget(null);
+      setActiveCommentId(undefined);
+      setCommentsPanelOpen(normalizedFile.comments.length > 0);
+      setMessage(normalizedFile.commentWarning ?? getMessages().openedFile(normalizedFile.name));
     },
-    [advanceRevision],
+    [advanceRevision, resetCommentHistory],
   );
 
   const replaceWithOpenedFile = useCallback(
@@ -270,10 +428,14 @@ export default function App() {
       while (documentSessionRef.current === saveSession) {
         const revision = editRevisionRef.current;
         const editingSource = sourceModeRef.current;
+        const sourceState = editingSource
+          ? documentStateFromMarkdown(rawMarkdownRef.current, fileRef.current.path)
+          : undefined;
         const candidate = editingSource
           ? {
               ...fileRef.current,
-              document: markdownToDocument(rawMarkdownRef.current),
+              document: sourceState!.document,
+              comments: sourceState!.comments,
             }
           : fileRef.current;
         const saved = await saveEditorFile(candidate, shouldSaveAs);
@@ -301,7 +463,7 @@ export default function App() {
           setDocumentId((id) => id + 1);
         }
         if (sourceModeRef.current) {
-          const normalizedMarkdown = documentToMarkdown(saved.document);
+          const normalizedMarkdown = documentToPortableMarkdown(saved.document, saved.comments ?? []);
           rawMarkdownRef.current = normalizedMarkdown;
           setRawMarkdown(normalizedMarkdown);
         }
@@ -335,7 +497,7 @@ export default function App() {
       const draft = sourceModeRef.current
         ? {
             ...fileRef.current,
-            document: markdownToDocument(rawMarkdownRef.current),
+            ...documentStateFromMarkdown(rawMarkdownRef.current, fileRef.current.path),
           }
         : fileRef.current;
       void saveDraft(draft)
@@ -586,7 +748,8 @@ export default function App() {
   const toggleSourceMode = () => {
     if (!sourceMode) {
       const mappedSelection = canvasSearch.current?.getMarkdownSelection?.();
-      const markdown = mappedSelection?.markdown ?? documentToMarkdown(fileRef.current.document);
+      const body = mappedSelection?.markdown ?? documentToPortableMarkdown(fileRef.current.document);
+      const markdown = serializeMarkdownWithComments(body, fileRef.current.comments ?? []);
       beginModeTransition('source', mappedSelection ? { kind: 'markdown', offset: mappedSelection.offset } : undefined);
       rawMarkdownRef.current = markdown;
       setRawMarkdown(markdown);
@@ -600,17 +763,26 @@ export default function App() {
         markdownSearch.current?.getMarkdownOffset?.(),
       );
       const currentFile = fileRef.current;
-      const nextDocument = hydrateDocumentAssets(parsedSelection.document, currentFile.path);
+      const sourceState = documentStateFromMarkdown(rawMarkdownRef.current, currentFile.path);
+      const nextDocument = sourceState.document;
+      const nextComments = sourceState.comments;
       beginModeTransition(
         'canvas',
         parsedSelection.anchor ? { kind: 'document', anchor: parsedSelection.anchor } : undefined,
       );
-      if (!documentsEqual(currentFile.document, nextDocument)) {
-        const nextFile = { ...currentFile, document: nextDocument };
+      const commentsChanged = JSON.stringify(currentFile.comments ?? []) !== JSON.stringify(nextComments);
+      if (!documentsEqual(currentFile.document, nextDocument) || commentsChanged) {
+        const nextFile = {
+          ...currentFile,
+          document: nextDocument,
+          comments: nextComments,
+          ...(sourceState.warning ? { commentWarning: sourceState.warning } : { commentWarning: undefined }),
+        };
         fileRef.current = nextFile;
         setFile(nextFile);
-        setDocumentId((id) => id + 1);
+        if (!documentsEqual(currentFile.document, nextDocument)) setDocumentId((id) => id + 1);
       }
+      resetCommentHistory();
       sourceModeRef.current = false;
       setSourceMode(false);
     } catch (error) {
@@ -674,11 +846,17 @@ export default function App() {
   const jumpToOutline = (index: number) => {
     if (sourceMode) {
       try {
-        const nextDocument = hydrateDocumentAssets(markdownToDocument(rawMarkdownRef.current), fileRef.current.path);
-        const nextFile = { ...fileRef.current, document: nextDocument };
+        const sourceState = documentStateFromMarkdown(rawMarkdownRef.current, fileRef.current.path);
+        const nextFile = {
+          ...fileRef.current,
+          document: sourceState.document,
+          comments: sourceState.comments,
+          ...(sourceState.warning ? { commentWarning: sourceState.warning } : { commentWarning: undefined }),
+        };
         fileRef.current = nextFile;
         setFile(nextFile);
         setDocumentId((id) => id + 1);
+        resetCommentHistory();
         markEdited();
         sourceModeRef.current = false;
         setSourceMode(false);
@@ -696,7 +874,7 @@ export default function App() {
     try {
       const markdown = sourceModeRef.current
         ? rawMarkdownRef.current
-        : documentToPortableMarkdown(fileRef.current.document);
+        : documentToPortableMarkdown(fileRef.current.document, fileRef.current.comments ?? []);
       const exportedName = await exportMarkdownFile(markdown, fileRef.current.name);
       if (exportedName) setMessage(getMessages().exportedFile(exportedName));
     } catch (error) {
@@ -714,11 +892,17 @@ export default function App() {
       // PDF should always contain the rendered document, even if the author is
       // currently editing its Markdown source.
       if (sourceModeRef.current) {
-        const nextDocument = hydrateDocumentAssets(markdownToDocument(rawMarkdownRef.current), fileRef.current.path);
-        const nextFile = { ...fileRef.current, document: nextDocument };
+        const sourceState = documentStateFromMarkdown(rawMarkdownRef.current, fileRef.current.path);
+        const nextFile = {
+          ...fileRef.current,
+          document: sourceState.document,
+          comments: sourceState.comments,
+          ...(sourceState.warning ? { commentWarning: sourceState.warning } : { commentWarning: undefined }),
+        };
         fileRef.current = nextFile;
         setFile(nextFile);
         setDocumentId((id) => id + 1);
+        resetCommentHistory();
         sourceModeRef.current = false;
         setSourceMode(false);
         await new Promise<void>((resolve) =>
@@ -738,7 +922,31 @@ export default function App() {
       pdfExportingRef.current = false;
       setPdfExporting(false);
     }
+  }, [resetCommentHistory]);
+
+  const handleCanvasContextMenu = useCallback((placement: CommentPlacement, coordinates: { x: number; y: number }) => {
+    const menuWidth = 190;
+    const menuHeight = 176;
+    setCanvasContextMenu({
+      placement,
+      x: Math.max(8, Math.min(coordinates.x, window.innerWidth - menuWidth - 8)),
+      y: Math.max(8, Math.min(coordinates.y, window.innerHeight - menuHeight - 8)),
+    });
   }, []);
+
+  const openCommentComposer = (placement?: CommentPlacement) => {
+    const nextTarget = placement ?? canvasContextMenu?.placement;
+    if (!nextTarget) return;
+    setCanvasContextMenu(null);
+    setNewCommentTarget(nextTarget);
+    setActiveCommentId(undefined);
+    setCommentsPanelOpen(true);
+  };
+
+  const runCanvasContextAction = (action: 'cut' | 'copy' | 'paste' | 'selectAll') => {
+    canvasSearch.current?.runContextAction?.(action);
+    setCanvasContextMenu(null);
+  };
 
   return (
     <main className={`app-shell theme-${preferences.theme} font-${preferences.font}`} lang={preferences.language}>
@@ -790,6 +998,16 @@ export default function App() {
           onClick={openSearch}
         >
           ⌕
+        </button>
+        <button
+          className={commentsPanelOpen ? 'icon-button comments-toggle is-active' : 'icon-button comments-toggle'}
+          type="button"
+          aria-pressed={commentsPanelOpen}
+          aria-label={commentsPanelOpen ? text.closeComments : text.openComments}
+          title={text.commentsCount(comments.length)}
+          onClick={() => setCommentsPanelOpen((open) => !open)}
+        >
+          ◧{comments.length > 0 && <span className="comments-toggle__count">{comments.length}</span>}
         </button>
         <div className="topbar-spacer" />
         <label className="compact-control">
@@ -1036,11 +1254,23 @@ export default function App() {
               language={preferences.language}
               documentId={documentId}
               initialDocument={file.document}
+              comments={comments}
               outlineTarget={outlineTarget}
               onReady={canvasReady}
-              onChange={(document) => {
+              onCommentRequest={handleCanvasContextMenu}
+              onCommentClick={handleCommentMarkerClick}
+              canUndoComment={commentHistory.current.undo.length > 0}
+              canRedoComment={commentHistory.current.redo.length > 0}
+              onUndoComment={undoComment}
+              onRedoComment={redoComment}
+              onChange={(document, mappedComments) => {
+                if (mappedComments) resetCommentHistory();
                 setFile((current) => {
-                  const nextFile = { ...current, document };
+                  const nextFile = {
+                    ...current,
+                    document,
+                    ...(mappedComments ? { comments: mappedComments } : {}),
+                  };
                   fileRef.current = nextFile;
                   return nextFile;
                 });
@@ -1059,11 +1289,39 @@ export default function App() {
                   rawMarkdownRef.current = value;
                   setRawMarkdown(value);
                   markEdited();
+                  const parsed = parseMarkdownComments(value);
+                  if (parsed.status !== 'valid' && parsed.status !== 'none') return;
+                  const nextComments =
+                    parsed.status === 'valid' ? documentStateFromMarkdown(value, fileRef.current.path).comments : [];
+                  const nextFile = {
+                    ...fileRef.current,
+                    comments: nextComments,
+                    commentWarning: undefined,
+                  };
+                  fileRef.current = nextFile;
+                  setFile(nextFile);
                 }}
               />
             </div>
           )}
         </section>
+        {commentsPanelOpen && (
+          <CommentsPanel
+            language={preferences.language}
+            comments={comments}
+            newTarget={newCommentTarget}
+            activeCommentId={activeCommentId}
+            onClose={() => {
+              setCommentsPanelOpen(false);
+              setNewCommentTarget(null);
+            }}
+            onCreate={createComment}
+            onCancelNew={() => setNewCommentTarget(null)}
+            onUpdate={updateComment}
+            onDelete={deleteComment}
+            onLocate={locateComment}
+          />
+        )}
       </section>
       {recentContextMenu && (
         <div
@@ -1082,6 +1340,33 @@ export default function App() {
           </button>
           <button role="menuitem" onClick={() => void hideRecent(recentContextMenu.item)}>
             {text.hideFromRecent}
+          </button>
+        </div>
+      )}
+      {canvasContextMenu && (
+        <div
+          className="canvas-context-menu"
+          role="menu"
+          aria-label={text.commentNew}
+          style={{ left: canvasContextMenu.x, top: canvasContextMenu.y }}
+          onPointerDown={(event) => event.stopPropagation()}
+          onContextMenu={(event) => event.preventDefault()}
+        >
+          <button role="menuitem" className="canvas-context-menu__primary" onClick={() => openCommentComposer()}>
+            {text.commentNew}
+          </button>
+          <div className="canvas-context-menu__separator" />
+          <button role="menuitem" onClick={() => runCanvasContextAction('cut')}>
+            {text.commentCut}
+          </button>
+          <button role="menuitem" onClick={() => runCanvasContextAction('copy')}>
+            {text.commentCopy}
+          </button>
+          <button role="menuitem" onClick={() => runCanvasContextAction('paste')}>
+            {text.commentPaste}
+          </button>
+          <button role="menuitem" onClick={() => runCanvasContextAction('selectAll')}>
+            {text.commentSelectAll}
           </button>
         </div>
       )}

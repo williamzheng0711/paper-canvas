@@ -1,6 +1,7 @@
 import type { JSONContent } from '@tiptap/core';
 import type { Node as ProseMirrorNode } from '@tiptap/pm/model';
 import { documentsEqual } from './documentSync';
+import { parseMarkdownComments } from './comments';
 import { documentToMarkdown, markdownToDocument } from './markdown';
 
 export type DocumentSelectionAnchor =
@@ -23,6 +24,11 @@ export type DocumentSelectionAnchor =
 export type MarkdownSelection = {
   markdown: string;
   offset: number;
+};
+
+export type MarkdownRange = {
+  from: number;
+  to: number;
 };
 
 export type ParsedMarkdownSelection = {
@@ -215,11 +221,12 @@ function nearbyOffsets(markdown: string, requestedOffset: number): number[] {
  * preserves the exact parsed document.
  */
 export function markdownToDocumentWithSelection(markdown: string, requestedOffset?: number): ParsedMarkdownSelection {
-  const document = markdownToDocument(markdown);
-  if (requestedOffset === undefined || markdown.includes(selectionMarker)) return { document };
+  const source = parseMarkdownComments(markdown).body;
+  const document = markdownToDocument(source);
+  if (requestedOffset === undefined || source.includes(selectionMarker)) return { document };
 
-  for (const offset of nearbyOffsets(markdown, requestedOffset)) {
-    const markedMarkdown = `${markdown.slice(0, offset)}${selectionMarker}${markdown.slice(offset)}`;
+  for (const offset of nearbyOffsets(source, requestedOffset)) {
+    const markedMarkdown = `${source.slice(0, offset)}${selectionMarker}${source.slice(offset)}`;
     const markedDocument = markdownToDocument(markedMarkdown);
     const anchor = locateSelectionMarker(markedDocument);
     const strippedDocument = stripSelectionMarker(markedDocument);
@@ -228,6 +235,17 @@ export function markdownToDocumentWithSelection(markdown: string, requestedOffse
     }
   }
   return { document };
+}
+
+/** Resolve a UTF-16 Markdown offset to a live ProseMirror position. */
+export function positionFromMarkdownOffset(
+  document: ProseMirrorNode,
+  markdown: string,
+  offset: number,
+): { position: number; affinity: -1 | 1 } | undefined {
+  const mapped = markdownToDocumentWithSelection(markdown, offset);
+  if (!mapped.anchor) return undefined;
+  return positionFromDocumentAnchor(document, mapped.anchor);
 }
 
 /** Convert a non-dispatched ProseMirror marker transaction into a source caret. */

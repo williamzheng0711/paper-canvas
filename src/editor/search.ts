@@ -23,6 +23,8 @@ export type SearchableEditorHandle = {
   getSelectedText: () => string;
 };
 
+export type ContextMenuAction = 'cut' | 'copy' | 'paste' | 'selectAll';
+
 export type SwitchableEditorHandle = SearchableEditorHandle & {
   getSelectionProgress: () => number;
   getSelectionViewportOffset: () => number | undefined;
@@ -33,8 +35,12 @@ export type SwitchableEditorHandle = SearchableEditorHandle & {
   getMarkdownOffset?: () => number | undefined;
   /** Markdown-only: restore an exact UTF-16 source offset. */
   setMarkdownOffset?: (offset: number) => boolean;
+  /** Restore a UTF-16 Markdown range, or a caret when `from === to`. */
+  setMarkdownSelection?: (range: { from: number; to: number }) => boolean;
   /** Canvas-only: restore a parsed structural/text anchor. */
   setDocumentSelection?: (anchor: DocumentSelectionAnchor) => boolean;
+  /** Execute a basic editor action from the custom canvas context menu. */
+  runContextAction?: (action: ContextMenuAction) => void;
   isFocused: () => boolean;
   requestMeasure: () => void;
 };

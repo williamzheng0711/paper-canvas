@@ -3,6 +3,12 @@ import { convertFileSrc, invoke, isTauri } from '@tauri-apps/api/core';
 import { open, save } from '@tauri-apps/plugin-dialog';
 import { exists, mkdir, readTextFile, rename, writeFile, writeTextFile } from '@tauri-apps/plugin-fs';
 import { Store } from '@tauri-apps/plugin-store';
+import {
+  parseMarkdownComments,
+  relocateMarkdownComments,
+  serializeMarkdownWithComments,
+  type MarkdownComment,
+} from '../editor/comments';
 import { documentToMarkdown, markdownToDocument } from '../editor/markdown';
 import { detectLanguage, getMessages, isLanguage, type Language } from '../i18n';
 import { normalizeLineSpacing } from './lineSpacing';
@@ -12,6 +18,8 @@ export type EditorFile = {
   path?: string;
   name: string;
   document: JSONContent;
+  comments?: MarkdownComment[];
+  commentWarning?: string;
 };
 
 export type AppPreferences = {
@@ -135,8 +143,11 @@ function restoreRelativeImagePaths(document: JSONContent): JSONContent {
 }
 
 /** Serializes the editor document without leaking Tauri asset-protocol URLs. */
-export function documentToPortableMarkdown(document: JSONContent): string {
-  return documentToMarkdown(restoreRelativeImagePaths(document));
+export function documentToPortableMarkdown(
+  document: JSONContent,
+  comments: readonly MarkdownComment[] = [],
+): string {
+  return serializeMarkdownWithComments(documentToMarkdown(restoreRelativeImagePaths(document)), comments);
 }
 
 export function renameDocumentAssetReferences(document: JSONContent, oldPath: string, newPath: string): JSONContent {
@@ -173,10 +184,17 @@ export async function openMarkdownFile(path: string): Promise<EditorFile> {
   if (!isTauri()) throw new Error(text.externalFilesDesktopOnly);
   if (!isMarkdownFilePath(path)) throw new Error(text.markdownFilesOnly);
   const markdown = await readTextFile(path);
+  const parsed = parseMarkdownComments(markdown);
+  const document = hydrateDocumentAssets(markdownToDocument(parsed.body), path);
+  const canonicalMarkdown = documentToPortableMarkdown(document);
   const file = {
     path,
     name: fileName(path),
-    document: hydrateDocumentAssets(markdownToDocument(markdown), path),
+    document,
+    comments: relocateMarkdownComments(parsed.comments, parsed.body, canonicalMarkdown),
+    ...(parsed.status === 'invalid' || parsed.status === 'unknown-version'
+      ? { commentWarning: text.commentDataWarning }
+      : {}),
   };
   await rememberRecent({ path: file.path, name: file.name });
   return file;
@@ -262,13 +280,17 @@ export async function saveEditorFile(file: EditorFile, forceSaveAs = false): Pro
   }
   if (!path) throw new Error(getMessages().saveCancelled);
   const portable = restoreRelativeImagePaths(file.document);
+  const markdownBeforeAssets = documentToMarkdown(portable);
   const withAssets = await persistEmbeddedImages(portable, path);
-  await writeTextFile(path, documentToMarkdown(withAssets));
+  const markdown = documentToMarkdown(withAssets);
+  const comments = relocateMarkdownComments(file.comments ?? [], markdownBeforeAssets, markdown);
+  await writeTextFile(path, serializeMarkdownWithComments(markdown, comments));
   await rememberRecent({ path, name: fileName(path) });
   return {
     path,
     name: fileName(path),
     document: hydrateDocumentAssets(withAssets, path),
+    comments,
   };
 }
 
@@ -445,10 +467,17 @@ export async function openRecent(recent: RecentFile): Promise<EditorFile | null>
     if (!(await exists(recent.path))) return null;
     throw error;
   }
+  const parsed = parseMarkdownComments(markdown);
+  const document = hydrateDocumentAssets(markdownToDocument(parsed.body), recent.path);
+  const canonicalMarkdown = documentToPortableMarkdown(document);
   return {
     path: recent.path,
     name: recent.name,
-    document: hydrateDocumentAssets(markdownToDocument(markdown), recent.path),
+    document,
+    comments: relocateMarkdownComments(parsed.comments, parsed.body, canonicalMarkdown),
+    ...(parsed.status === 'invalid' || parsed.status === 'unknown-version'
+      ? { commentWarning: getMessages().commentDataWarning }
+      : {}),
   };
 }
 
@@ -487,5 +516,6 @@ export function newEditorFile(): EditorFile {
   return {
     name: getMessages().untitledFilename,
     document: { type: 'doc', content: [{ type: 'paragraph' }] },
+    comments: [],
   };
 }

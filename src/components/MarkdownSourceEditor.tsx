@@ -236,6 +236,24 @@ export const MarkdownSourceEditor = forwardRef<SwitchableEditorHandle, Props>(fu
         editor.dispatch({ selection: { anchor: position } });
         return true;
       },
+      setMarkdownSelection: (range) => {
+        const editor = view.current;
+        if (!editor) return false;
+        const from = Math.min(
+          editor.state.doc.length,
+          Math.max(0, Math.round(Number.isFinite(range.from) ? range.from : 0)),
+        );
+        const to = Math.min(
+          editor.state.doc.length,
+          Math.max(0, Math.round(Number.isFinite(range.to) ? range.to : from)),
+        );
+        editor.dispatch({
+          selection: { anchor: from, head: to },
+          effects: EditorView.scrollIntoView(from, { y: 'center' }),
+        });
+        editor.focus();
+        return true;
+      },
       isFocused: () => view.current?.hasFocus ?? false,
       requestMeasure: () => view.current?.requestMeasure(),
     }),
