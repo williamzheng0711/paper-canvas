@@ -189,6 +189,13 @@ export default function App() {
     setSaveStatus('unsaved');
   }, [advanceRevision]);
 
+  const flushCanvasChanges = useCallback(() => {
+    // CanvasEditor uses this callback to publish deferred document/comment
+    // updates. A clean canvas has nothing pending, and flushing it would emit
+    // an unchanged document through onChange and falsely mark the file dirty.
+    if (dirtyRef.current) canvasSearch.current?.flushCommentMapping?.();
+  }, []);
+
   const clearSourceCommentSync = useCallback(() => {
     if (sourceCommentSyncTimerRef.current !== undefined) {
       window.clearTimeout(sourceCommentSyncTimerRef.current);
@@ -274,7 +281,7 @@ export default function App() {
   const createComment = useCallback(
     (content: string, placement: CommentPlacement) => {
       if (!content.trim()) return;
-      if (!sourceModeRef.current) canvasSearch.current?.flushCommentMapping?.();
+      if (!sourceModeRef.current) flushCanvasChanges();
       const body = documentToPortableMarkdown(fileRef.current.document);
       const comment = createMarkdownComment(body, placement.target, content, placement.excerpt);
       setComments([...(fileRef.current.comments ?? []), comment]);
@@ -282,7 +289,7 @@ export default function App() {
       setActiveCommentId(comment.id);
       setCommentsPanelOpen(true);
     },
-    [setComments],
+    [flushCanvasChanges, setComments],
   );
 
   const updateComment = useCallback(
@@ -474,7 +481,7 @@ export default function App() {
   const saveCurrent = useCallback(async (forceSaveAs = false) => {
     if (saving.current) return;
     if (sourceModeRef.current) clearSourceCommentSync();
-    else canvasSearch.current?.flushCommentMapping?.();
+    else flushCanvasChanges();
     saving.current = true;
     setSaveStatus('saving');
     const saveSession = documentSessionRef.current;
@@ -511,10 +518,14 @@ export default function App() {
           continue;
         }
 
-        const savedDocumentChanged = !documentsEqual(candidate.document, saved.document);
+        // In Markdown mode the visible source can be newer than the hidden
+        // canvas. Compare against the document currently held by the canvas,
+        // not only against the parsed save candidate, so it is refreshed before
+        // the next mode switch.
+        const canvasDocumentChanged = !documentsEqual(fileRef.current.document, saved.document);
         fileRef.current = saved;
         setFile(saved);
-        if (savedDocumentChanged && !sourceModeRef.current) {
+        if (canvasDocumentChanged) {
           setDocumentId((id) => id + 1);
         }
         if (sourceModeRef.current) {
@@ -537,7 +548,7 @@ export default function App() {
     } finally {
       saving.current = false;
     }
-  }, [clearSourceCommentSync, setExternalRawMarkdown]);
+  }, [clearSourceCommentSync, flushCanvasChanges, setExternalRawMarkdown]);
 
   useEffect(() => {
     if (!dirty) return;
@@ -548,7 +559,7 @@ export default function App() {
         return;
       }
       if (sourceModeRef.current) clearSourceCommentSync();
-      else canvasSearch.current?.flushCommentMapping?.();
+      else flushCanvasChanges();
       const revision = editRevisionRef.current;
       const draft = sourceModeRef.current
         ? {
@@ -568,7 +579,7 @@ export default function App() {
         });
     }, 850);
     return () => window.clearTimeout(timer);
-  }, [clearSourceCommentSync, dirty, editRevision, saveCurrent]);
+  }, [clearSourceCommentSync, dirty, editRevision, flushCanvasChanges, saveCurrent]);
 
   const openFile = useCallback(async () => {
     try {
@@ -803,7 +814,7 @@ export default function App() {
 
   const toggleSourceMode = () => {
     if (!sourceMode) {
-      canvasSearch.current?.flushCommentMapping?.();
+      flushCanvasChanges();
       const mappedSelection = canvasSearch.current?.getMarkdownSelection?.();
       const body = mappedSelection?.markdown ?? documentToPortableMarkdown(fileRef.current.document);
       const markdown = serializeMarkdownWithComments(body, fileRef.current.comments ?? []);
@@ -934,7 +945,7 @@ export default function App() {
   const exportMarkdown = useCallback(async () => {
     closeExportMenu();
     try {
-      if (!sourceModeRef.current) canvasSearch.current?.flushCommentMapping?.();
+      if (!sourceModeRef.current) flushCanvasChanges();
       const markdown = sourceModeRef.current
         ? rawMarkdownRef.current
         : documentToPortableMarkdown(fileRef.current.document, fileRef.current.comments ?? []);
@@ -943,7 +954,7 @@ export default function App() {
     } catch (error) {
       setMessage(error instanceof Error ? error.message : getMessages().markdownExportFailed);
     }
-  }, []);
+  }, [flushCanvasChanges]);
 
   const exportPdf = useCallback(async () => {
     if (pdfExportingRef.current) return;

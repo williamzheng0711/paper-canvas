@@ -4,6 +4,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import App from './App';
 import { createMarkdownComment, serializeMarkdownWithComments, type MarkdownComment } from './editor/comments';
+import { markdownToDocument } from './editor/markdown';
 import type { SwitchableEditorHandle } from './editor/search';
 
 type CanvasProps = {
@@ -40,6 +41,7 @@ const harness = vi.hoisted(() => ({
     setDocumentSelection: vi.fn(() => true),
     isFocused: vi.fn(() => false),
     requestMeasure: vi.fn(),
+    flushCommentMapping: vi.fn(),
   },
 }));
 
@@ -227,6 +229,36 @@ describe('App autosave cursor stability', () => {
     expect(harness.canvasProps?.initialDocument).toEqual(editedDocument);
   });
 
+  it('does not mark an unchanged canvas dirty when switching to Markdown mode', async () => {
+    const save = Array.from(host.querySelectorAll<HTMLButtonElement>('button')).find(
+      (button) => button.textContent === '儲存',
+    );
+    await act(async () => {
+      save?.click();
+      await flushEffects();
+    });
+    expect(files.saveEditorFile).toHaveBeenCalledOnce();
+    files.saveEditorFile.mockClear();
+    harness.searchHandle.flushCommentMapping.mockClear();
+    harness.searchHandle.flushCommentMapping.mockImplementation(() => {
+      const props = harness.canvasProps;
+      if (props) props.onChange(props.initialDocument);
+    });
+    const showSource = Array.from(host.querySelectorAll<HTMLButtonElement>('button')).find(
+      (button) => button.textContent === '顯示原始 Markdown',
+    );
+
+    await act(async () => {
+      showSource?.click();
+      await flushEffects();
+      await vi.advanceTimersByTimeAsync(850);
+      await flushEffects();
+    });
+
+    expect(harness.searchHandle.flushCommentMapping).not.toHaveBeenCalled();
+    expect(files.saveEditorFile).not.toHaveBeenCalled();
+  });
+
   it('keeps the canvas mounted and does not reload an unchanged Markdown round trip', async () => {
     const initialDocumentId = harness.canvasProps?.documentId;
     const showSource = Array.from(host.querySelectorAll<HTMLButtonElement>('button')).find(
@@ -256,6 +288,31 @@ describe('App autosave cursor stability', () => {
     expect(host.querySelector('.editor-mode-pane--canvas')?.hasAttribute('hidden')).toBe(false);
     expect(harness.canvasMounts).toBe(1);
     expect(harness.canvasUnmounts).toBe(0);
+  });
+
+  it('synchronizes source edits into the hidden canvas when saving in Markdown mode', async () => {
+    const initialDocumentId = harness.canvasProps?.documentId;
+    const showSource = Array.from(host.querySelectorAll<HTMLButtonElement>('button')).find(
+      (button) => button.textContent === '顯示原始 Markdown',
+    );
+
+    await act(async () => {
+      showSource?.click();
+      await flushEffects();
+      await vi.advanceTimersByTimeAsync(50);
+    });
+
+    const markdown = '# 新標題\n\n新增正文';
+    await act(async () => {
+      harness.sourceProps?.onChange(markdown);
+      await flushEffects();
+      await vi.advanceTimersByTimeAsync(850);
+      await flushEffects();
+    });
+
+    expect(files.saveEditorFile).toHaveBeenCalledOnce();
+    expect(harness.canvasProps?.initialDocument).toEqual(markdownToDocument(markdown));
+    expect(harness.canvasProps?.documentId).toBe((initialDocumentId ?? 0) + 1);
   });
 
   it('defers source comment relocation until typing pauses', async () => {
