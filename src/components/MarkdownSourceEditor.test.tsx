@@ -52,6 +52,11 @@ describe('MarkdownSourceEditor search', () => {
       total: 3,
     });
 
+    search.current?.setMarkdownOffset?.(10);
+    expect(search.current?.search('alpha', 'refresh')).toEqual({ current: 2, total: 3 });
+    expect(search.current?.getMarkdownOffset?.()).toBe(10);
+    expect(search.current?.getSelectedText()).toBe('');
+
     search.current?.clearSearch();
     expect(host.querySelectorAll('.cm-document-search-match')).toHaveLength(0);
     expect(search.current?.setMarkdownOffset?.(17)).toBe(true);

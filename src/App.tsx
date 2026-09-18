@@ -500,7 +500,9 @@ export default function App() {
               comments: sourceState!.comments,
             }
           : fileRef.current;
-        const saved = await saveEditorFile(candidate, shouldSaveAs);
+        const saved = editingSource
+          ? await saveEditorFile(candidate, shouldSaveAs, rawMarkdownRef.current)
+          : await saveEditorFile(candidate, shouldSaveAs);
         shouldSaveAs = false;
 
         if (documentSessionRef.current !== saveSession) return;
@@ -528,10 +530,8 @@ export default function App() {
         if (canvasDocumentChanged) {
           setDocumentId((id) => id + 1);
         }
-        if (sourceModeRef.current) {
-          const normalizedMarkdown = documentToPortableMarkdown(saved.document, saved.comments ?? []);
-          setExternalRawMarkdown(normalizedMarkdown);
-        }
+        // Saving must not replace the live source: normalization inserts escapes,
+        // adds artificial undo steps and moves the caret while the user is still typing.
         dirtyRef.current = false;
         setDirty(false);
         setSaveStatus('saved');
@@ -548,7 +548,7 @@ export default function App() {
     } finally {
       saving.current = false;
     }
-  }, [clearSourceCommentSync, flushCanvasChanges, setExternalRawMarkdown]);
+  }, [clearSourceCommentSync, flushCanvasChanges]);
 
   useEffect(() => {
     if (!dirty) return;
@@ -728,8 +728,14 @@ export default function App() {
 
   useEffect(() => {
     if (!searchOpen) return;
-    runSearch(searchQuery, 'reset');
+    // Background updates refresh highlights/counts without stealing the caret.
+    runSearch(searchQuery, 'refresh');
   }, [documentId, editRevision, preferences.language, runSearch, searchOpen, searchQuery, sourceMode]);
+
+  useEffect(() => {
+    if (!searchOpen) return;
+    runSearch(searchQuery, 'reset');
+  }, [runSearch, searchOpen, searchQuery]);
 
   const restoreModeTransition = useCallback((target: EditorMode) => {
     const pending = pendingModeTransition.current;

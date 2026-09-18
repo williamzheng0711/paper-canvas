@@ -102,6 +102,9 @@ class FormulaNodeView {
   private sourceInput: (() => void) | null = null;
   private sourceKeyDown: ((event: KeyboardEvent) => void) | null = null;
   private sourceBlur: ((event: FocusEvent) => void) | null = null;
+  private sourceCompositionStart: (() => void) | null = null;
+  private sourceCompositionEnd: (() => void) | null = null;
+  private sourceIsComposing = false;
   private destroyed = false;
 
   constructor(props: NodeViewRendererProps, kind: FormulaKind) {
@@ -265,6 +268,13 @@ class FormulaNodeView {
     this.source = source;
     this.sourceInput = () => this.handleSourceInput(source, preview);
     this.sourceKeyDown = (event) => this.handleSourceKeyDown(event, source);
+    this.sourceCompositionStart = () => {
+      this.sourceIsComposing = true;
+    };
+    this.sourceCompositionEnd = () => {
+      this.sourceIsComposing = false;
+      this.handleSourceInput(source, preview);
+    };
     this.sourceBlur = (event) => {
       if (
         event.relatedTarget instanceof globalThis.Node &&
@@ -277,6 +287,8 @@ class FormulaNodeView {
     source.addEventListener("input", this.sourceInput);
     source.addEventListener("keydown", this.sourceKeyDown);
     source.addEventListener("blur", this.sourceBlur);
+    source.addEventListener("compositionstart", this.sourceCompositionStart);
+    source.addEventListener("compositionend", this.sourceCompositionEnd);
     sourceBox.append(opening, source, closing);
     panel.append(header, sourceBox, preview);
     this.dom.appendChild(panel);
@@ -308,6 +320,14 @@ class FormulaNodeView {
 
   private finishEditing(): void {
     if (!this.editing) return;
+    if (this.sourceIsComposing && this.source) {
+      const preview = this.dom.querySelector<HTMLElement>(
+        ".formula-live-preview",
+      );
+      this.sourceIsComposing = false;
+      this.updateLatex(this.source.value);
+      if (preview) this.renderPreview(preview, this.source.value);
+    }
     this.editing = false;
     this.dom.classList.remove("is-editing");
     this.cleanupSource();
@@ -322,10 +342,23 @@ class FormulaNodeView {
       this.source.removeEventListener("keydown", this.sourceKeyDown);
     if (this.sourceBlur)
       this.source.removeEventListener("blur", this.sourceBlur);
+    if (this.sourceCompositionStart)
+      this.source.removeEventListener(
+        "compositionstart",
+        this.sourceCompositionStart,
+      );
+    if (this.sourceCompositionEnd)
+      this.source.removeEventListener(
+        "compositionend",
+        this.sourceCompositionEnd,
+      );
     this.source = null;
     this.sourceInput = null;
     this.sourceKeyDown = null;
     this.sourceBlur = null;
+    this.sourceCompositionStart = null;
+    this.sourceCompositionEnd = null;
+    this.sourceIsComposing = false;
   }
 
   private updateLatex(latex: string): void {
@@ -371,6 +404,7 @@ class FormulaNodeView {
     source: HTMLTextAreaElement,
     preview: HTMLElement,
   ): void {
+    if (this.sourceIsComposing) return;
     const completed = completeFormulaSourceInput(
       source.value,
       source.selectionStart,
@@ -388,6 +422,7 @@ class FormulaNodeView {
     event: KeyboardEvent,
     source: HTMLTextAreaElement,
   ): void {
+    if (this.sourceIsComposing || event.isComposing) return;
     if (
       event.key === "Escape" ||
       (event.key === "Enter" && (event.metaKey || event.ctrlKey))

@@ -98,6 +98,52 @@ fn take_opened_files(app: AppHandle) -> Vec<String> {
     std::mem::take(&mut *paths)
 }
 
+fn document_asset_directory(path: &Path) -> Result<PathBuf, String> {
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|part| matches!(part, std::path::Component::ParentDir))
+    {
+        return Err("The document path must be absolute without parent traversal.".into());
+    }
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "Invalid document filename.".to_string())?;
+    // Match the existing frontend naming, including legacy .markdown.assets folders.
+    let stem = if name.to_ascii_lowercase().ends_with(".md") {
+        &name[..name.len() - 3]
+    } else {
+        name
+    };
+    let directory = path.with_file_name(format!("{stem}.assets"));
+    // Do not turn a companion-directory symlink into access to an unrelated folder.
+    match std::fs::symlink_metadata(&directory) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            return Err("The image asset path must be a regular directory.".into());
+        }
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error.to_string()),
+        _ => {}
+    }
+    Ok(directory)
+}
+
+#[tauri::command]
+fn allow_document_assets(app: AppHandle, path: String) -> Result<(), String> {
+    let path = PathBuf::from(path);
+    if !app.fs_scope().is_allowed(&path) {
+        return Err("The document path is outside the granted file scope.".into());
+    }
+    let directory = document_asset_directory(&path)?;
+    app.fs_scope()
+        .allow_directory(&directory, false)
+        .map_err(|error| error.to_string())?;
+    app.state::<tauri::scope::Scopes>()
+        .allow_directory(&directory, false)
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
 #[tauri::command]
 fn show_in_folder(path: String) -> Result<(), String> {
     let target = supported_markdown_path(PathBuf::from(path))
@@ -325,6 +371,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             take_opened_files,
+            allow_document_assets,
             show_in_folder,
             export_pdf
         ])
@@ -343,6 +390,36 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn companion_assets_use_only_the_documents_sibling_directory() {
+        let root = std::env::temp_dir();
+        for (name, assets) in [
+            ("research.md", "research.assets"),
+            ("研究.MD", "研究.assets"),
+            ("research.markdown", "research.markdown.assets"),
+        ] {
+            assert_eq!(
+                document_asset_directory(&root.join(name)).unwrap(),
+                root.join(assets)
+            );
+        }
+        assert!(document_asset_directory(Path::new("relative.md")).is_err());
+        assert!(document_asset_directory(&root.join("../outside.md")).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn companion_assets_reject_symlinked_directories() {
+        let root = std::env::temp_dir().join(format!("papercanvas-assets-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let directory = root.join("research.assets");
+        std::os::unix::fs::symlink(std::env::temp_dir(), &directory).unwrap();
+        let result = document_asset_directory(&root.join("research.md"));
+        std::fs::remove_file(directory).unwrap();
+        std::fs::remove_dir(root).unwrap();
+        assert!(result.is_err());
+    }
 
     #[test]
     fn command_line_opening_accepts_only_existing_markdown_files() {

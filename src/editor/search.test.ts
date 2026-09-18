@@ -77,6 +77,22 @@ describe('document search', () => {
     });
   });
 
+  it('refreshes matches after editing without selecting or scrolling', () => {
+    const scrollIntoView = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', { configurable: true, value: scrollIntoView });
+    const editor = new Editor({ extensions: [StarterKit, DocumentSearch], content: '<p>one two one</p>' });
+    editors.push(editor);
+    searchDocument(editor, 'one', 'reset');
+    editor.commands.setTextSelection(5);
+    editor.commands.insertContent('typing ');
+    const selection = editor.state.selection.toJSON();
+    scrollIntoView.mockClear();
+    expect(searchDocument(editor, 'one', 'refresh')).toEqual({ current: 2, total: 2 });
+    expect(editor.state.selection.toJSON()).toEqual(selection);
+    expect(scrollIntoView).not.toHaveBeenCalled();
+    expect(documentSearchPluginKey.getState(editor.state)?.matches).toHaveLength(2);
+  });
+
   it('moves forward and backward with wraparound and clears its decorations', () => {
     const scrollIntoView = vi.fn();
     Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {

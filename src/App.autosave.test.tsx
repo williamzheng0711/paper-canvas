@@ -17,6 +17,7 @@ type CanvasProps = {
 
 type SourceProps = {
   value: string;
+  valueRevision: number;
   onChange: (value: string) => void;
 };
 
@@ -26,7 +27,7 @@ const harness = vi.hoisted(() => ({
   canvasMounts: 0,
   canvasUnmounts: 0,
   searchHandle: {
-    search: vi.fn<(query: string, direction: 'reset' | 'next' | 'previous') => { current: number; total: number }>(
+    search: vi.fn<(query: string, direction: 'reset' | 'next' | 'previous' | 'refresh') => { current: number; total: number }>(
       () => ({ current: 0, total: 0 }),
     ),
     clearSearch: vi.fn(),
@@ -313,6 +314,35 @@ describe('App autosave cursor stability', () => {
     expect(files.saveEditorFile).toHaveBeenCalledOnce();
     expect(harness.canvasProps?.initialDocument).toEqual(markdownToDocument(markdown));
     expect(harness.canvasProps?.documentId).toBe((initialDocumentId ?? 0) + 1);
+  });
+
+  it('preserves literal source and its revision during autosave', async () => {
+    const showSource = Array.from(host.querySelectorAll<HTMLButtonElement>('button')).find(
+      (button) => button.textContent === '顯示原始 Markdown',
+    );
+    await act(async () => { showSource?.click(); await flushEffects(); await vi.advanceTimersByTimeAsync(50); });
+    const revision = harness.sourceProps?.valueRevision;
+    const markdown = 'plain_text with * unfinished syntax\n\n';
+    await act(async () => {
+      harness.sourceProps?.onChange(markdown);
+      await vi.advanceTimersByTimeAsync(850);
+      await flushEffects();
+    });
+    expect(harness.sourceProps?.valueRevision).toBe(revision);
+    expect(harness.sourceProps?.value).toBe(markdown);
+    expect(files.saveEditorFile).toHaveBeenCalledWith(expect.anything(), false, markdown);
+  });
+
+  it('refreshes an open search without navigating while editing', async () => {
+    harness.searchHandle.getSelectedText.mockReturnValue('研究');
+    await act(async () => { window.dispatchEvent(new KeyboardEvent('keydown', { key: 'f', metaKey: true, bubbles: true })); });
+    harness.searchHandle.search.mockClear();
+    await act(async () => {
+      harness.canvasProps?.onChange(savedDocument);
+      await vi.advanceTimersByTimeAsync(150);
+    });
+    expect(harness.searchHandle.search).toHaveBeenCalledWith('研究', 'refresh');
+    expect(harness.searchHandle.search).not.toHaveBeenCalledWith('研究', 'reset');
   });
 
   it('defers source comment relocation until typing pauses', async () => {

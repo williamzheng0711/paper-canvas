@@ -4,7 +4,7 @@ import { Plugin, PluginKey, TextSelection } from '@tiptap/pm/state';
 import { Decoration, DecorationSet } from '@tiptap/pm/view';
 import type { DocumentSelectionAnchor, MarkdownSelection } from './selectionMapping';
 
-export type SearchDirection = 'reset' | 'next' | 'previous';
+export type SearchDirection = 'reset' | 'next' | 'previous' | 'refresh';
 
 export type SearchMatch = {
   from: number;
@@ -197,7 +197,7 @@ export function searchDocument(editor: Editor, query: string, direction: SearchD
     active,
   } satisfies SearchMeta);
 
-  if (active >= 0) {
+  if (active >= 0 && direction !== 'refresh') {
     const match = matches[active];
     transaction = transaction
       .setSelection(TextSelection.create(transaction.doc, match.from, match.to))
@@ -205,7 +205,7 @@ export function searchDocument(editor: Editor, query: string, direction: SearchD
   }
   editor.view.dispatch(transaction);
 
-  if (active >= 0) {
+  if (active >= 0 && direction !== 'refresh') {
     editor.view.dom
       .querySelector<HTMLElement>('.document-search-match--active')
       ?.scrollIntoView?.({ block: 'center', inline: 'nearest' });

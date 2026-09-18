@@ -401,4 +401,91 @@ describe("inline formula input rule", () => {
       editor.view.dom.querySelector(".formula-render .mfrac"),
     ).not.toBeNull();
   });
+
+  it("does not insert an environment close command during IME composition", () => {
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      callback(0);
+      return 1;
+    });
+    const editor = new Editor({
+      extensions: [StarterKit, BlockFormula],
+      content: {
+        type: "doc",
+        content: [{ type: "blockFormula", attrs: { latex: "" } }],
+      },
+    });
+    editors.push(editor);
+    editor.view.dom.querySelector<HTMLElement>(".formula-render")?.click();
+    const source = editor.view.dom.querySelector<HTMLTextAreaElement>(
+      ".formula-editor__textarea",
+    )!;
+
+    source.dispatchEvent(
+      new CompositionEvent("compositionstart", { bubbles: true }),
+    );
+    source.value = "\\begin{equation}";
+    source.setSelectionRange(source.value.length, source.value.length);
+    source.dispatchEvent(
+      new InputEvent("input", { bubbles: true, isComposing: true }),
+    );
+
+    const escapeDuringComposition = new KeyboardEvent("keydown", {
+      key: "Escape",
+      bubbles: true,
+      isComposing: true,
+      cancelable: true,
+    });
+    source.dispatchEvent(escapeDuringComposition);
+    expect(escapeDuringComposition.defaultPrevented).toBe(false);
+    expect(editor.view.dom.querySelector(".formula-editor__textarea")).toBe(
+      source,
+    );
+
+    expect(source.value).toBe("\\begin{equation}");
+    expect(editor.getJSON().content?.[0].attrs?.latex).toBe("");
+
+    source.dispatchEvent(
+      new CompositionEvent("compositionend", { bubbles: true }),
+    );
+    expect(source.value).toBe("\\begin{equation}\\end{equation}");
+    expect(editor.getJSON().content?.[0].attrs?.latex).toBe(
+      "\\begin{equation}\\end{equation}",
+    );
+  });
+
+  it("commits unfinished IME text on blur without adding an environment close", () => {
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      callback(0);
+      return 1;
+    });
+    const editor = new Editor({
+      extensions: [StarterKit, BlockFormula],
+      content: {
+        type: "doc",
+        content: [{ type: "blockFormula", attrs: { latex: "" } }],
+      },
+    });
+    editors.push(editor);
+    editor.view.dom.querySelector<HTMLElement>(".formula-render")?.click();
+    const source = editor.view.dom.querySelector<HTMLTextAreaElement>(
+      ".formula-editor__textarea",
+    )!;
+
+    source.dispatchEvent(
+      new CompositionEvent("compositionstart", { bubbles: true }),
+    );
+    source.value = "\\begin{equation}";
+    source.setSelectionRange(source.value.length, source.value.length);
+    source.dispatchEvent(
+      new InputEvent("input", { bubbles: true, isComposing: true }),
+    );
+    source.dispatchEvent(new FocusEvent("blur"));
+
+    expect(editor.getJSON().content?.[0].attrs?.latex).toBe(
+      "\\begin{equation}",
+    );
+    expect(
+      editor.view.dom.querySelector(".formula-editor__textarea"),
+    ).toBeNull();
+  });
 });

@@ -24,6 +24,7 @@ import {
   type CanvasCommentPosition,
 } from '../editor/commentDecorations';
 import { BlockFormula, InlineFormula } from '../editor/Formula';
+import { TaskListInput } from '../editor/taskListInput';
 import { HtmlPreview, InlineHtmlPreview } from '../editor/HtmlPreview';
 import { replaceDocumentPreservingSelection } from '../editor/documentSync';
 import { documentToMarkdown } from '../editor/markdown';
@@ -380,6 +381,7 @@ export const CanvasEditor = memo(
         TableCell,
         TaskList,
         TaskItem.configure({ nested: true }),
+        TaskListInput,
         Placeholder.configure({ placeholder: text.canvasPlaceholder }),
         InlineFormula,
         BlockFormula,

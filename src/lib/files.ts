@@ -97,6 +97,7 @@ async function persistEmbeddedImages(document: JSONContent, path: string): Promi
     }
   });
   if (assets.length === 0) return prepared;
+  await invoke('allow_document_assets', { path });
   await mkdir(targetDirectory, { recursive: true });
   await Promise.all(
     assets.map(async ({ node, src }, index) => {
@@ -272,14 +273,29 @@ export async function exportPdfFile(defaultName: string): Promise<PdfExportResul
   return { type: 'saved', name: fileName(path) };
 }
 
-export async function saveEditorFile(file: EditorFile, forceSaveAs = false): Promise<EditorFile> {
+export async function saveEditorFile(
+  file: EditorFile,
+  forceSaveAs = false,
+  rawMarkdown?: string,
+): Promise<EditorFile> {
   let path = file.path;
   if (!path || forceSaveAs) {
     const selected = await chooseSavePath(file.name);
-    if (selected) path = selected;
+    if (!selected) throw new Error(getMessages().saveCancelled);
+    path = selected;
   }
   if (!path) throw new Error(getMessages().saveCancelled);
   const portable = restoreRelativeImagePaths(file.document);
+  if (rawMarkdown !== undefined) {
+    await writeTextFile(path, rawMarkdown);
+    await rememberRecent({ path, name: fileName(path) });
+    return {
+      path,
+      name: fileName(path),
+      document: hydrateDocumentAssets(portable, path),
+      comments: file.comments ?? [],
+    };
+  }
   const markdownBeforeAssets = documentToMarkdown(portable);
   const withAssets = await persistEmbeddedImages(portable, path);
   const markdown = documentToMarkdown(withAssets);

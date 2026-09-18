@@ -188,7 +188,7 @@ export const MarkdownSourceEditor = memo(
         );
         currentSearch.current = { query, active };
         const effects: StateEffect<unknown>[] = [setSearchDecorations.of({ matches, active })];
-        if (active >= 0) {
+        if (active >= 0 && direction !== 'refresh') {
           effects.push(EditorView.scrollIntoView(matches[active].from, { y: 'center' }));
           editor.dispatch({
             selection: {
