@@ -4,6 +4,8 @@ import TaskItem from "@tiptap/extension-task-item";
 import TaskList from "@tiptap/extension-task-list";
 import { afterEach, describe, expect, it } from "vitest";
 import { TaskListInput } from "./taskListInput";
+import { IndentedListInput } from "./indentedListInput";
+import { documentToMarkdown, markdownToDocument } from "./markdown";
 
 const editors: Editor[] = [];
 
@@ -13,6 +15,10 @@ afterEach(() => {
 
 function typeSequentially(editor: Editor, text: string): void {
   for (const character of text) {
+    if (character === "\n") {
+      editor.commands.keyboardShortcut("Enter");
+      continue;
+    }
     const { from, to } = editor.state.selection;
     const handled = editor.view.someProp("handleTextInput", (handler) =>
       handler(editor.view, from, to, character, () =>
@@ -32,6 +38,7 @@ function createEditor(
       TaskList,
       TaskItem.configure({ nested: true }),
       TaskListInput,
+      IndentedListInput,
     ],
     content,
   });
@@ -223,4 +230,84 @@ describe("task list input", () => {
       content: [{ type: "taskItem", attrs: { checked: false } }],
     });
   });
+});
+
+it.each([
+  "- [ ] First\n- [x] Second\n- [ ] Third",
+  "- [ ] First\n\n- [x] Second",
+  "- Parent\n  - [ ] Child\n  - [x] Sibling",
+  "- [ ] Parent\n  - [x] Child\n  - [ ] Sibling",
+  "- [ ] Parent\n  - [x] Child\n    - [ ] Grandchild\n  - [ ] Sibling\n- [x] Next",
+  "1. Parent\n   - [ ] Child\n   - [x] Sibling\n2. Next",
+])("accepts consecutive task prefixes: %s", (source) => {
+  const editor = createEditor();
+  typeSequentially(editor, source);
+  expect(markdownToDocument(documentToMarkdown(editor.getJSON()))).toEqual(
+    markdownToDocument(source),
+  );
+});
+
+it("updates the checkbox of an item created by Enter from a standalone marker", () => {
+  const editor = createEditor();
+  typeSequentially(editor, "- [ ] First\n[x] Second");
+  expect(editor.state.doc.firstChild?.child(1).attrs.checked).toBe(true);
+  expect(editor.state.doc.firstChild?.child(1).textContent).toBe("Second");
+});
+
+it("keeps task markers literal inside inline code", () => {
+  const editor = createEditor();
+  typeSequentially(editor, "- [ ] First\n");
+  editor.commands.setCode();
+  typeSequentially(editor, "[x] ");
+  expect(editor.state.selection.$from.parent.textContent).toBe("[x] ");
+  expect(editor.state.doc.firstChild?.child(1).attrs.checked).toBe(false);
+});
+
+it("restores the checkbox and caret through undo and redo after repeated prefixes", () => {
+  const editor = createEditor();
+  typeSequentially(editor, "- [ ] First\n- [x] Second");
+  const complete = editor.getJSON();
+  const position = editor.state.selection.head;
+  editor.commands.undo();
+  editor.commands.redo();
+  expect(editor.getJSON()).toEqual(complete);
+  expect(editor.state.selection.head).toBe(position);
+  expect(editor.state.selection.$from.parent.type.name).toBe("paragraph");
+});
+
+it("can reverse a standalone checked marker on Backspace without losing previous tasks", () => {
+  const editor = createEditor();
+  typeSequentially(editor, "- [ ] First\n[x] ");
+  editor.view.someProp("handleKeyDown", (handler) =>
+    handler(
+      editor.view,
+      new KeyboardEvent("keydown", { key: "Backspace", bubbles: true }),
+    ),
+  );
+  expect(editor.state.doc.firstChild?.firstChild?.textContent).toBe("First");
+  expect(editor.state.doc.firstChild?.child(1).attrs.checked).toBe(false);
+  expect(editor.state.selection.$from.parent.textContent).toBe("[x] ");
+});
+
+it("accepts a full marker in an empty task item inserted by the toolbar", () => {
+  const editor = createEditor({
+    type: "doc",
+    content: [
+      {
+        type: "taskList",
+        content: [
+          {
+            type: "taskItem",
+            attrs: { checked: false },
+            content: [{ type: "paragraph" }],
+          },
+        ],
+      },
+    ],
+  });
+  editor.commands.setTextSelection(3);
+  typeSequentially(editor, "- [x] Written");
+  expect(editor.state.doc.firstChild?.childCount).toBe(1);
+  expect(editor.state.doc.firstChild?.firstChild?.attrs.checked).toBe(true);
+  expect(editor.state.doc.firstChild?.firstChild?.textContent).toBe("Written");
 });

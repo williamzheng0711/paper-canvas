@@ -83,3 +83,115 @@ it("preserves escaped closing bold markers when the opening pair is typed last",
   expect(editor.getText()).toBe("**text\\**");
   expect(editor.getJSON().content?.[0].content?.[0].marks).toBeUndefined();
 });
+
+it.each([
+  ["*", "italic"],
+  ["_", "italic"],
+  ["`", "code"],
+])("supports closing-first %s delimiters", (delimiter, mark) => {
+  const editor = make(`内容${delimiter}`);
+  editor.commands.setTextSelection(1);
+  type(editor, delimiter);
+  expect(editor.getJSON().content?.[0].content).toEqual([
+    { type: "text", text: "内容", marks: [{ type: mark }] },
+  ]);
+  expect(editor.state.selection.from).toBe(1);
+});
+
+it.each([
+  ["*", "italic"],
+  ["_", "italic"],
+  ["`", "code"],
+])("supports writing inside prewritten %s delimiters", (delimiter, mark) => {
+  const editor = make(delimiter.repeat(2));
+  editor.commands.setTextSelection(2);
+  type(editor, "内容");
+  expect(editor.getJSON().content?.[0].content).toEqual([
+    { type: "text", text: "内容", marks: [{ type: mark }] },
+  ]);
+  editor.commands.undo();
+  expect(editor.getText()).toBe(delimiter.repeat(2));
+  editor.commands.redo();
+  expect(editor.getText()).toBe("内容");
+});
+
+it("does not turn intra-word underscores into emphasis", () => {
+  const editor = make("prefix__value__suffix");
+  editor.commands.setTextSelection(10);
+  type(editor, "x");
+  expect(editor.getJSON().content?.[0].content?.[0].marks).toBeUndefined();
+  expect(editor.getText()).toBe("prefix__vxalue__suffix");
+});
+
+it.each(["**", "__", "*", "_"])(
+  "preserves escaped opening %s delimiters typed sequentially",
+  (delimiter) => {
+    const editor = make("");
+    type(editor, `\\${delimiter}内容${delimiter}`);
+    expect(editor.getText()).toBe(`\\${delimiter}内容${delimiter}`);
+    expect(editor.getJSON().content?.[0].content?.[0].marks).toBeUndefined();
+  },
+);
+
+it.each([
+  ["**", "bold"],
+  ["__", "bold"],
+  ["*", "italic"],
+  ["_", "italic"],
+  ["`", "code"],
+])("wraps existing text opening-first with %s", (delimiter, mark) => {
+  const editor = make("内容");
+  editor.commands.setTextSelection(1);
+  type(editor, delimiter);
+  editor.commands.setTextSelection(editor.state.doc.content.size - 1);
+  type(editor, delimiter);
+  expect(editor.getJSON().content?.[0].content).toEqual([
+    { type: "text", text: "内容", marks: [{ type: mark }] },
+  ]);
+  type(editor, "后续");
+  expect(editor.getJSON().content?.[0].content?.at(-1)).toEqual({
+    type: "text",
+    text: "后续",
+  });
+});
+
+it.each([
+  ["**", "bold"],
+  ["*", "italic"],
+  ["`", "code"],
+])("accepts %s formatting next to Chinese punctuation", (delimiter, mark) => {
+  const editor = make("说明：");
+  editor.commands.setTextSelection(4);
+  type(editor, `${delimiter}内容${delimiter}。`);
+  expect(editor.getJSON().content?.[0].content).toEqual([
+    { type: "text", text: "说明：" },
+    { type: "text", text: "内容", marks: [{ type: mark }] },
+    { type: "text", text: "。" },
+  ]);
+});
+
+it("keeps markdown characters literal inside code typed closing-first", () => {
+  const editor = make("**literal**`");
+  editor.commands.setTextSelection(1);
+  type(editor, "`");
+  expect(editor.getJSON().content?.[0].content).toEqual([
+    { type: "text", text: "**literal**", marks: [{ type: "code" }] },
+  ]);
+});
+
+it("preserves escaped backticks typed sequentially", () => {
+  const editor = make("");
+  type(editor, "\\`literal`");
+  expect(editor.getText()).toBe("\\`literal`");
+  expect(editor.getJSON().content?.[0].content?.[0].marks).toBeUndefined();
+});
+
+it.each(["**", "__", "*", "_"])(
+  "preserves escaped closing %s delimiters typed sequentially",
+  (delimiter) => {
+    const editor = make("");
+    type(editor, `${delimiter}内容\\${delimiter}`);
+    expect(editor.getText()).toBe(`${delimiter}内容\\${delimiter}`);
+    expect(editor.getJSON().content?.[0].content?.[0].marks).toBeUndefined();
+  },
+);

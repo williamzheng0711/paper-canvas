@@ -68,15 +68,21 @@ function documentMetrics(document: JSONContent): {
   characters: number;
   words: number;
 } {
-  const walk = (node: JSONContent): string => `${node.text ?? ''}${(node.content ?? []).map(walk).join('')}`;
-  const text = walk(document).trim();
+  const walk = (node: JSONContent, separateBlocks = false): string => {
+    const content = `${node.text ?? ''}${(node.content ?? []).map((child) => walk(child, separateBlocks)).join('')}`;
+    return separateBlocks && ['paragraph', 'heading', 'codeBlock', 'hardBreak'].includes(node.type ?? '')
+      ? `${content}\n`
+      : content;
+  };
+  const characters = [...walk(document).trim()].length;
+  const text = walk(document, true).trim();
   const cjk = (text.match(/[\u3400-\u9fff\uf900-\ufaff]/g) ?? []).length;
   const nonCjkWords = text
     .replace(/[\u3400-\u9fff\uf900-\ufaff]/g, ' ')
     .trim()
     .split(/\s+/)
     .filter(Boolean).length;
-  return { characters: [...text].length, words: cjk + nonCjkWords };
+  return { characters, words: cjk + nonCjkWords };
 }
 
 function documentStateFromMarkdown(
@@ -147,6 +153,12 @@ export default function App() {
   const sourceModeRef = useRef(sourceMode);
   const rawMarkdownRef = useRef('');
   const openedByOperatingSystem = useRef(false);
+  const startupRef = useRef<{
+    request: Promise<[RecentFile[], AppPreferences, EditorFile | null]>;
+    session: number;
+    revision: number;
+    applied: boolean;
+  } | undefined>(undefined);
   const recentExternalOpen = useRef(new Map<string, number>());
   const exportMenu = useRef<HTMLDetailsElement>(null);
   const searchInput = useRef<HTMLInputElement>(null);
@@ -331,8 +343,23 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    void Promise.all([loadRecent(), loadPreferences(), loadDraft()])
+    if (!startupRef.current) {
+      startupRef.current = {
+        request: Promise.all([loadRecent(), loadPreferences(), loadDraft()]),
+        session: documentSessionRef.current,
+        revision: editRevisionRef.current,
+        applied: false,
+      };
+    }
+    const startup = startupRef.current;
+    if (startup.applied) return;
+    let active = true;
+    void startup.request
       .then(([loadedRecent, loadedPreferences, draft]) => {
+        if (!active || startup.applied) return;
+        startup.applied = true;
+        const documentUntouched =
+          documentSessionRef.current === startup.session && editRevisionRef.current === startup.revision;
         setCurrentLanguage(loadedPreferences.language);
         document.documentElement.lang = loadedPreferences.language;
         const loadedText = getMessages(loadedPreferences.language);
@@ -341,7 +368,7 @@ export default function App() {
         setPreferences(loadedPreferences);
         setFontSizeInput(String(loadedPreferences.fontSize));
         setLineSpacingInput(String(loadedPreferences.lineSpacing));
-        if (draft && !openedByOperatingSystem.current) {
+        if (draft && documentUntouched && !openedByOperatingSystem.current) {
           const normalizedDraft = { ...draft, comments: draft.comments ?? [] };
           fileRef.current = normalizedDraft;
           setFile(normalizedDraft);
@@ -353,11 +380,16 @@ export default function App() {
           setDirty(true);
           setSaveStatus('draft');
           setMessage(loadedText.restoredDraft);
-        } else {
+        } else if (documentUntouched && !openedByOperatingSystem.current) {
           setMessage(loadedText.localOnly);
         }
       })
-      .catch((error: unknown) => setMessage(error instanceof Error ? error.message : getMessages().loadSettingsFailed));
+      .catch((error: unknown) => {
+        if (!active || startup.applied) return;
+        startup.applied = true;
+        setMessage(error instanceof Error ? error.message : getMessages().loadSettingsFailed);
+      });
+    return () => { active = false; };
   }, [advanceRevision]);
 
   useEffect(() => {
@@ -903,10 +935,36 @@ export default function App() {
   const outline = useMemo(() => collectOutline(file.document), [file.document]);
   const [metrics, setMetrics] = useState(() => documentMetrics(file.document));
 
+  const metricsTimerRef = useRef<number | undefined>(undefined);
+
+  useLayoutEffect(() => {
+    if (metricsTimerRef.current !== undefined) window.clearTimeout(metricsTimerRef.current);
+    metricsTimerRef.current = undefined;
+    setMetrics(documentMetrics(fileRef.current.document));
+  }, [documentId]);
+
   useEffect(() => {
-    const timer = window.setTimeout(() => setMetrics(documentMetrics(file.document)), 250);
-    return () => window.clearTimeout(timer);
-  }, [file.document]);
+    // Sample the current editor on a bounded interval even when document/comment
+    // publication is still waiting for a pause in continuous typing.
+    if (metricsTimerRef.current !== undefined) return;
+    metricsTimerRef.current = window.setTimeout(() => {
+      metricsTimerRef.current = undefined;
+      const currentDocument = sourceModeRef.current
+        ? markdownToDocument(parseMarkdownComments(rawMarkdownRef.current).body)
+        : canvasSearch.current?.getDocument?.() ?? fileRef.current.document;
+      const next = documentMetrics(currentDocument);
+      setMetrics((current) =>
+        current.characters === next.characters && current.words === next.words ? current : next,
+      );
+    }, 250);
+  }, [editRevision, file.document, sourceMode, rawMarkdownRevision]);
+
+  useEffect(
+    () => () => {
+      if (metricsTimerRef.current !== undefined) window.clearTimeout(metricsTimerRef.current);
+    },
+    [],
+  );
 
   const commitFontSize = () => {
     const fontSize = normalizeFontSize(fontSizeInput, preferences.fontSize);

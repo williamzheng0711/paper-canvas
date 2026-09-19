@@ -19,12 +19,14 @@ function appendNestedItem(
 }
 
 function isList(node: ProseMirrorNode | null): boolean {
-  return !!node && ["bulletList", "orderedList"].includes(node.type.name);
+  return (
+    !!node && ["bulletList", "orderedList", "taskList"].includes(node.type.name)
+  );
 }
 
 function emptyItem(node: ProseMirrorNode): boolean {
   return (
-    node.type.name === "listItem" &&
+    ["listItem", "taskItem"].includes(node.type.name) &&
     node.childCount === 1 &&
     node.firstChild?.type.name === "paragraph" &&
     node.firstChild.content.size === 0
@@ -87,14 +89,14 @@ function appendAtIndent(
   return list.copy(list.content.replaceChild(list.childCount - 1, next));
 }
 
-/** Honor an indented Markdown list prefix even when Enter already exited its parent list. */
+/** Honor explicit Markdown prefixes alongside the list items already created by Enter. */
 export const IndentedListInput = Extension.create({
   name: "indentedListInput",
   priority: 1100,
   addInputRules() {
     return [
       new InputRule({
-        find: /^( {2,}|\t)([-+*]|\d+\.) $/,
+        find: /^((?: {2,}|\t)?)([-+*]|\d+\.) $/,
         handler: ({ state, range, match }) => {
           const $cursor = state.doc.resolve(range.to);
           if (
@@ -129,10 +131,21 @@ export const IndentedListInput = Extension.create({
               break;
             }
           }
+          if (
+            !match[1] &&
+            outerDepth === $cursor.depth - 2 &&
+            ($cursor.node(outerDepth).type === listType ||
+              ($cursor.node(outerDepth).type.name === "taskList" &&
+                listName === "bulletList")) &&
+            $cursor.index(-1) === 0
+          ) {
+            state.tr.delete(range.from, range.to);
+            return;
+          }
           if (outerDepth) {
             // Reuse only the trailing item created by Enter, never move existing prose.
             if (
-              $cursor.node(-1).type !== itemType ||
+              !["listItem", "taskItem"].includes($cursor.node(-1).type.name) ||
               $cursor.node(-1).childCount !== 1
             )
               return null;
@@ -146,18 +159,32 @@ export const IndentedListInput = Extension.create({
           } else {
             previous = state.doc.resolve($cursor.before()).nodeBefore;
             if (!isList(previous)) return null;
+            // A blank line exits the rich-text list, but subsequent Markdown
+            // numbers still continue that list regardless of their literal value.
+            if (
+              !match[1] &&
+              (listName !== "orderedList" || previous!.type !== listType)
+            )
+              return null;
             from = $cursor.before() - previous!.nodeSize;
             to = $cursor.after();
           }
           const cleaned = pruneTail(previous!, $cursor.parent);
           if (!cleaned) return null;
           const indent = match[1].replace(/\t/g, "    ").length;
-          const list = appendAtIndent(cleaned, nested, indent);
-          state.tr.replaceWith(from, to, list);
-          list.descendants((node, position) => {
+          const list = indent
+            ? appendAtIndent(cleaned, nested, indent)
+            : cleaned.type === nested.type
+              ? cleaned.copy(cleaned.content.append(nested.content))
+              : null;
+          const replacement = list
+            ? Fragment.from(list)
+            : Fragment.fromArray([cleaned, nested]);
+          state.tr.replaceWith(from, to, replacement);
+          replacement.descendants((node, position) => {
             if (node === paragraph)
               state.tr.setSelection(
-                TextSelection.create(state.tr.doc, from + position + 2),
+                TextSelection.create(state.tr.doc, from + position + 1),
               );
           });
         },

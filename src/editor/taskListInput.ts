@@ -1,6 +1,7 @@
 import { Extension, InputRule } from "@tiptap/core";
 import { Fragment } from "@tiptap/pm/model";
 import { TextSelection } from "@tiptap/pm/state";
+import { canJoin } from "@tiptap/pm/transform";
 
 const taskMarker = /^\[([ xX])\]\s$/;
 
@@ -16,6 +17,23 @@ export const TaskListInput = Extension.create({
         handler: ({ state, range, match }) => {
           const $marker = state.doc.resolve(range.from);
           if ($marker.parent.type.name !== "paragraph") return;
+          if (
+            $marker.depth >= 2 &&
+            $marker.node(-1).type.name === "taskItem" &&
+            $marker.parentOffset === 0 &&
+            $marker.index(-1) === 0
+          ) {
+            state.tr.delete(range.from, range.to);
+            state.tr.setNodeMarkup(
+              $marker.before($marker.depth - 1),
+              undefined,
+              {
+                ...$marker.node(-1).attrs,
+                checked: match[1].toLowerCase() === "x",
+              },
+            );
+            return;
+          }
 
           let listDepth = $marker.depth;
           while (
@@ -87,6 +105,15 @@ export const TaskListInput = Extension.create({
           const taskListPosition =
             listPosition + (before.length ? replacements[0].nodeSize : 0);
           tr.setSelection(TextSelection.create(tr.doc, taskListPosition + 3));
+          // A blank line or an explicit bullet prefix can temporarily split a
+          // task list. Rejoin matching neighbors after its checkbox is complete.
+          const $task = tr.doc.resolve(taskListPosition);
+          if (
+            $task.nodeBefore?.type.name === "taskList" &&
+            canJoin(tr.doc, taskListPosition)
+          ) {
+            tr.join(taskListPosition);
+          }
         },
       }),
     ];

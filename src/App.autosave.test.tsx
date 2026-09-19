@@ -1,5 +1,5 @@
 import type { JSONContent } from '@tiptap/core';
-import { act, useEffect } from 'react';
+import { act, StrictMode, useEffect } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import App from './App';
@@ -13,6 +13,7 @@ type CanvasProps = {
   comments: readonly MarkdownComment[];
   outlineTarget?: { index: number; request: number };
   onChange: (document: JSONContent) => void;
+  onEdit?: () => void;
 };
 
 type SourceProps = {
@@ -43,10 +44,12 @@ const harness = vi.hoisted(() => ({
     isFocused: vi.fn(() => false),
     requestMeasure: vi.fn(),
     flushCommentMapping: vi.fn(),
+    getDocument: vi.fn<() => JSONContent | undefined>(() => undefined),
   },
 }));
 
 const files = vi.hoisted(() => ({
+  chooseMarkdownFile: vi.fn(async () => null as { name: string; document: JSONContent; path?: string } | null),
   clearDraft: vi.fn(async () => undefined),
   exportMarkdownFile: vi.fn(async () => 'research.md'),
   exportPdfFile: vi.fn(async () => ({
@@ -118,7 +121,7 @@ vi.mock('./components/MarkdownSourceEditor', () => ({
   },
 }));
 vi.mock('./lib/files', () => ({
-  chooseMarkdownFile: vi.fn(async () => null),
+  chooseMarkdownFile: files.chooseMarkdownFile,
   clearDraft: files.clearDraft,
   documentToPortableMarkdown: (document: JSONContent) => {
     const text = document.content?.[0]?.content?.[0]?.text ?? '';
@@ -179,6 +182,7 @@ describe('App autosave cursor stability', () => {
       return { current: activeSearchResult, total: 3 };
     });
     harness.searchHandle.getSelectedText.mockReturnValue('');
+    harness.searchHandle.getDocument.mockReturnValue(undefined);
     harness.searchHandle.getSelectionProgress.mockReturnValue(0.5);
     harness.searchHandle.getSelectionViewportOffset.mockReturnValue(undefined);
     harness.searchHandle.getMarkdownSelection.mockReturnValue(undefined);
@@ -205,6 +209,87 @@ describe('App autosave cursor stability', () => {
     await act(async () => root.unmount());
     host.remove();
     vi.useRealTimers();
+  });
+
+  it('loads startup data once through StrictMode effect replay', async () => {
+    await act(async () => root.unmount());
+    files.loadDraft.mockClear();
+    files.loadPreferences.mockClear();
+    files.loadRecent.mockClear();
+    root = createRoot(host);
+    await act(async () => {
+      root.render(<StrictMode><App /></StrictMode>);
+      await flushEffects();
+    });
+    expect(files.loadDraft).toHaveBeenCalledOnce();
+    expect(files.loadPreferences).toHaveBeenCalledOnce();
+    expect(files.loadRecent).toHaveBeenCalledOnce();
+    expect(harness.canvasProps?.initialDocument).toEqual(savedDocument);
+  });
+
+  it.each(['input', 'pending input', 'new', 'open'] as const)('does not restore a late startup draft after %s', async (action) => {
+    await act(async () => root.unmount());
+    let resolveDraft!: (value: object) => void;
+    files.loadDraft.mockImplementationOnce(() => new Promise(resolve => { resolveDraft = resolve; }));
+    root = createRoot(host);
+    await act(async () => { root.render(<App />); await flushEffects(); });
+    const editedDocument = markdownToDocument('Fresh typing');
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    await act(async () => {
+      if (action === 'input') {
+        harness.canvasProps?.onEdit?.();
+        harness.canvasProps?.onChange(editedDocument);
+      } else if (action === 'pending input') {
+        harness.canvasProps?.onEdit?.();
+      } else if (action === 'new') {
+        Array.from(host.querySelectorAll<HTMLButtonElement>('button')).find(button => button.textContent === '新增')?.click();
+      } else {
+        files.chooseMarkdownFile.mockResolvedValueOnce({path: '/tmp/chosen.md', name: 'chosen.md', document: editedDocument});
+        Array.from(host.querySelectorAll<HTMLButtonElement>('button')).find(button => button.textContent === '開啟')?.click();
+      }
+      await flushEffects();
+    });
+    const currentDocumentId = harness.canvasProps?.documentId;
+    await act(async () => {
+      resolveDraft({ path: '/tmp/old.md', name: 'old.md', document: savedDocument });
+      await flushEffects();
+    });
+    expect(harness.canvasProps?.documentId).toBe(currentDocumentId);
+    expect(harness.canvasProps?.initialDocument).toEqual(action === 'input' || action === 'open' ? editedDocument : markdownToDocument(''));
+    expect(host.querySelector('.document-name')?.textContent).toContain(action === 'open' ? 'chosen.md' : 'Untitled.md');
+    expect(host.textContent).toContain('recent.md');
+    confirm.mockRestore();
+  });
+
+  it('resets counters immediately when creating a new document', async () => {
+    await act(async () => { await vi.advanceTimersByTimeAsync(300); });
+    expect(host.querySelector('.statusbar')?.textContent).toContain('4 詞 · 4 字元');
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const create = Array.from(host.querySelectorAll<HTMLButtonElement>('button')).find(button => button.textContent === '新增');
+    expect(create).toBeDefined();
+    await act(async () => { create?.click(); await flushEffects(); });
+    expect(host.querySelector('.statusbar')?.textContent).toContain('0 詞 · 0 字元');
+    confirm.mockRestore();
+  });
+
+  it('updates counters during continuous canvas typing before deferred onChange', async () => {
+    for (let index = 0; index < 8; index++) {
+      await act(async () => {
+        harness.searchHandle.getDocument.mockReturnValue(markdownToDocument('字'.repeat(index + 1)));
+        harness.canvasProps?.onEdit?.();
+        await vi.advanceTimersByTimeAsync(100);
+      });
+    }
+    expect(host.querySelector('.statusbar')?.textContent).toMatch(/[5-8] 詞 · [5-8] 字元/);
+    expect(harness.canvasProps?.initialDocument).toEqual(savedDocument);
+  });
+
+  it('counts current Markdown source prose and separate list items', async () => {
+    const showSource = Array.from(host.querySelectorAll<HTMLButtonElement>('button')).find(button => button.textContent === '顯示原始 Markdown');
+    await act(async () => { showSource?.click(); });
+    await act(async () => { harness.sourceProps?.onChange('- First\n- Second'); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(400); });
+    expect(host.querySelector('.statusbar')?.textContent).toContain('2 詞 · 11 字元');
   });
 
   it('does not reload an unchanged editor document after autosave', async () => {

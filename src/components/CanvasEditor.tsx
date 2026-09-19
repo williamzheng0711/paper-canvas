@@ -25,6 +25,7 @@ import {
 } from '../editor/commentDecorations';
 import { BlockFormula, InlineFormula, focusedFormulaSelection, focusFormulaSource } from '../editor/Formula';
 import { MarkdownTyping } from '../editor/markdownTyping';
+import { QuoteTyping } from '../editor/quoteTyping';
 import { IndentedListInput } from '../editor/indentedListInput';
 import { TaskListInput } from '../editor/taskListInput';
 import { HtmlPreview, InlineHtmlPreview } from '../editor/HtmlPreview';
@@ -295,8 +296,16 @@ export const CanvasEditor = memo(
   ref,
 ) {
   const text = getMessages(language);
-  const initialDocumentRef = useRef(initialDocument);
-  initialDocumentRef.current = initialDocument;
+  // Keep the live immutable document across editor recreation. Parent snapshots
+  // may lag behind typing while the debounced change notification is pending.
+  const documentSnapshot = useRef<{ id: number; initial: JSONContent; live?: Editor['state']['doc'] }>({
+    id: documentId,
+    initial: initialDocument,
+  });
+  if (documentSnapshot.current.id !== documentId) {
+    documentSnapshot.current = { id: documentId, initial: initialDocument };
+  }
+  const appliedDocument = useRef<{ id: number; editor: Editor } | undefined>(undefined);
   const commentsRef = useRef<readonly MarkdownComment[]>(comments);
   const onChangeRef = useRef(onChange);
   const onEditRef = useRef(onEdit);
@@ -388,6 +397,7 @@ export const CanvasEditor = memo(
         InlineFormula,
         BlockFormula,
         MarkdownTyping,
+        QuoteTyping,
         IndentedListInput,
         HtmlPreview,
         InlineHtmlPreview,
@@ -484,6 +494,7 @@ export const CanvasEditor = memo(
         },
       },
       onUpdate: ({ editor: currentEditor }) => {
+        documentSnapshot.current.live = currentEditor.state.doc;
         onEditRef.current?.();
         scheduleCommentMapping(currentEditor);
       },
@@ -493,8 +504,11 @@ export const CanvasEditor = memo(
   editorRef.current = editor;
 
   useLayoutEffect(() => {
-    if (!editor) return;
-    replaceDocumentPreservingSelection(editor, initialDocumentRef.current);
+    if (!editor || (appliedDocument.current?.id === documentId && appliedDocument.current.editor === editor)) return;
+    const snapshot = documentSnapshot.current;
+    replaceDocumentPreservingSelection(editor, snapshot.live?.toJSON() ?? snapshot.initial);
+    snapshot.live = editor.state.doc;
+    appliedDocument.current = { id: documentId, editor };
   }, [documentId, editor]);
 
   useEffect(
@@ -547,6 +561,7 @@ export const CanvasEditor = memo(
         if (editor && !focusedFormulaSelection(editor.view)) editor.view.focus();
       },
       getSelectedText: () => (editor ? getSelectedDocumentText(editor) : ''),
+      getDocument: () => editor?.getJSON() ?? documentSnapshot.current.initial,
       getSelectionProgress: () => {
         if (!editor) return 0;
         const documentSize = Math.max(1, editor.state.doc.content.size);

@@ -1,4 +1,4 @@
-import { Extension, type Editor } from '@tiptap/core';
+import { Extension, type Editor, type JSONContent } from '@tiptap/core';
 import type { Node as ProseMirrorNode } from '@tiptap/pm/model';
 import { Plugin, PluginKey, TextSelection } from '@tiptap/pm/state';
 import { Decoration, DecorationSet } from '@tiptap/pm/view';
@@ -26,6 +26,8 @@ export type SearchableEditorHandle = {
 export type ContextMenuAction = 'cut' | 'copy' | 'paste' | 'selectAll';
 
 export type SwitchableEditorHandle = SearchableEditorHandle & {
+  /** Canvas-only: read the current document without publishing a change. */
+  getDocument?: () => JSONContent | undefined;
   getSelectionProgress: () => number;
   getSelectionViewportOffset: () => number | undefined;
   setSelectionProgress: (progress: number) => void;
