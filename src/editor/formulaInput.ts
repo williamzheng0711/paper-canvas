@@ -65,7 +65,7 @@ export function shouldCreateBlockFormula(input: {
   );
 }
 
-function isEscaped(text: string, index: number): boolean {
+export function isEscaped(text: string, index: number): boolean {
   let backslashes = 0;
   for (
     let cursor = index - 1;

@@ -7,6 +7,7 @@ import {
 } from "@tiptap/core";
 import { NodeSelection, TextSelection } from "@tiptap/pm/state";
 import { Plugin } from "@tiptap/pm/state";
+import { isHistoryTransaction } from "@tiptap/pm/history";
 import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
 import katex from "katex";
 import {
@@ -14,6 +15,7 @@ import {
   displayFormulaFromDelimitedLine,
   displayFormulaAfterTextInsertion,
   inlineFormulaAroundCaret,
+  isEscaped,
   isDisplayLatexEnvironment,
   latexEnvironmentClosure,
   shouldCompleteRawLatexEnvironment,
@@ -91,6 +93,31 @@ export function completeFormulaSourceInput(
   };
 }
 
+const formulaViews = new WeakMap<HTMLElement, FormulaNodeView>();
+
+export function focusedFormulaSelection(
+  view: NodeViewRendererProps["view"],
+): { position: number; offset: number; top: number } | undefined {
+  const active = view.dom.ownerDocument.activeElement;
+  if (!(active instanceof HTMLTextAreaElement) || !view.dom.contains(active))
+    return undefined;
+  const dom = active.closest<HTMLElement>(".formula-node");
+  return dom ? formulaViews.get(dom)?.sourceSelection() : undefined;
+}
+
+export function focusFormulaSource(
+  view: NodeViewRendererProps["view"],
+  position: number,
+  offset: number,
+): boolean {
+  const dom = view.nodeDOM(position);
+  const nodeView =
+    dom instanceof HTMLElement ? formulaViews.get(dom) : undefined;
+  if (!nodeView) return false;
+  nodeView.enterEditing(offset);
+  return true;
+}
+
 class FormulaNodeView {
   dom: HTMLElement;
   private readonly kind: FormulaKind;
@@ -116,10 +143,21 @@ class FormulaNodeView {
     this.dom.className = `formula-node formula-node--${kind}`;
     this.dom.contentEditable = "false";
     this.dom.dataset.formulaKind = kind;
+    formulaViews.set(this.dom, this);
     this.render();
     if (this.node.attrs.autoEdit) {
       requestAnimationFrame(() => {
         if (this.destroyed || !this.node.attrs.autoEdit) return;
+        const position = this.position();
+        if (position === null) return;
+        if (
+          this.view.state.selection.from < position ||
+          this.view.state.selection.to >
+            position + this.node.nodeSize + (this.kind === "block" ? 1 : 0)
+        ) {
+          this.clearAutomaticEditingRequest();
+          return;
+        }
         const caret = Number(this.node.attrs.sourceCaret);
         this.enterEditing(Number.isFinite(caret) ? caret : this.latex.length);
         this.clearAutomaticEditingRequest();
@@ -131,10 +169,21 @@ class FormulaNodeView {
     if (node.type !== this.node.type) return false;
     this.node = node;
     if (this.editing && this.source) {
-      // Attribute updates occur on every source input. Never reset an active
-      // textarea, because doing so loses its caret and breaks IME composition.
-      if (document.activeElement !== this.source)
+      // Normal typing already updated the textarea. Only synchronize external
+      // changes (including undo), preserving the caret and IME composition.
+      if (!this.sourceIsComposing && this.source.value !== this.latex) {
+        const { selectionStart, selectionEnd } = this.source;
         this.source.value = this.latex;
+        this.source.setSelectionRange(
+          Math.min(selectionStart, this.latex.length),
+          Math.min(selectionEnd, this.latex.length),
+        );
+        this.resizeSource(this.source);
+        const preview = this.dom.querySelector<HTMLElement>(
+          ".formula-live-preview",
+        );
+        if (preview) this.renderPreview(preview, this.latex);
+      }
       return true;
     }
     this.render();
@@ -209,8 +258,23 @@ class FormulaNodeView {
     this.dom.append(formula, copy);
   }
 
-  private enterEditing(initialCaret = this.latex.length): void {
-    if (this.editing) return;
+  sourceSelection():
+    { position: number; offset: number; top: number } | undefined {
+    const position = this.position();
+    if (position === null || !this.source) return undefined;
+    return {
+      position,
+      offset: this.source.selectionStart,
+      top: this.source.getBoundingClientRect().top,
+    };
+  }
+
+  enterEditing(initialCaret = this.latex.length): void {
+    if (this.editing && this.source) {
+      this.source.focus({ preventScroll: true });
+      this.source.setSelectionRange(initialCaret, initialCaret);
+      return;
+    }
     const text = getMessages();
     this.editing = true;
     this.dom.classList.add("is-editing");
@@ -238,7 +302,7 @@ class FormulaNodeView {
     done.setAttribute("aria-label", text.finishFormula);
     done.title = text.finishFormulaShortcut;
     done.textContent = "✓";
-    done.addEventListener("click", () => this.finishEditing());
+    done.addEventListener("click", () => this.moveToText("after"));
     header.append(label, done);
 
     const sourceBox = document.createElement("span");
@@ -310,11 +374,13 @@ class FormulaNodeView {
     const position = this.position();
     if (position === null || !this.node.attrs.autoEdit) return;
     this.view.dispatch(
-      this.view.state.tr.setNodeMarkup(position, undefined, {
-        ...this.node.attrs,
-        autoEdit: false,
-        sourceCaret: null,
-      }),
+      this.view.state.tr
+        .setNodeMarkup(position, undefined, {
+          ...this.node.attrs,
+          autoEdit: false,
+          sourceCaret: null,
+        })
+        .setMeta("addToHistory", false),
     );
   }
 
@@ -405,6 +471,16 @@ class FormulaNodeView {
     preview: HTMLElement,
   ): void {
     if (this.sourceIsComposing) return;
+    // Closing a separately typed $$ line completes multiline Markdown entry.
+    if (
+      this.kind === "block" &&
+      source.selectionStart === source.value.length &&
+      /\n\$\$$/.test(source.value)
+    ) {
+      this.updateLatex(source.value.slice(0, -3).trim());
+      this.moveToText("after");
+      return;
+    }
     const completed = completeFormulaSourceInput(
       source.value,
       source.selectionStart,
@@ -422,13 +498,14 @@ class FormulaNodeView {
     event: KeyboardEvent,
     source: HTMLTextAreaElement,
   ): void {
-    if (this.sourceIsComposing || event.isComposing) return;
+    if (this.sourceIsComposing || event.isComposing || event.keyCode === 229)
+      return;
     if (
       event.key === "Escape" ||
       (event.key === "Enter" && (event.metaKey || event.ctrlKey))
     ) {
       event.preventDefault();
-      this.finishEditing();
+      this.moveToText("after");
       return;
     }
     const boundary = formulaSourceBoundaryAction({
@@ -449,15 +526,26 @@ class FormulaNodeView {
   private moveToText(side: "before" | "after"): void {
     const position = this.position();
     if (position === null) return;
-    const target = side === "before" ? position : position + this.node.nodeSize;
+    let target = side === "before" ? position : position + this.node.nodeSize;
     this.finishEditing();
-    requestAnimationFrame(() => {
-      const transaction = this.view.state.tr.setSelection(
-        TextSelection.create(this.view.state.doc, target),
-      );
-      this.view.dispatch(transaction);
-      this.view.focus();
-    });
+    const transaction = this.view.state.tr;
+    if (this.kind === "block") {
+      const $target = transaction.doc.resolve(target);
+      const neighbor =
+        side === "before" ? $target.nodeBefore : $target.nodeAfter;
+      if (neighbor?.isTextblock) target += side === "before" ? -1 : 1;
+      else {
+        transaction.insert(
+          target,
+          this.view.state.schema.nodes.paragraph.create(),
+        );
+        target += 1;
+      }
+    }
+    this.view.dispatch(
+      transaction.setSelection(TextSelection.create(transaction.doc, target)),
+    );
+    this.view.focus();
   }
 
   private removeEmptyFormula(): void {
@@ -486,7 +574,10 @@ function pendingFormulaInputPlugin(nodeName: string): Plugin {
           if (
             pending.length > 0 ||
             node.type.name !== nodeName ||
-            !node.attrs.autoEdit
+            !node.attrs.autoEdit ||
+            view.state.selection.from < position ||
+            view.state.selection.to >
+              position + node.nodeSize + (node.isBlock ? 1 : 0)
           )
             return;
           pending.push({ position, node });
@@ -698,7 +789,13 @@ function createFormulaNode(
             state.tr.replaceWith(
               range.from,
               range.to,
-              this.type.create({ latex }),
+              this.type.create(
+                { latex },
+                null,
+                kind === "inline"
+                  ? state.doc.resolve(range.from).marks()
+                  : undefined,
+              ),
             );
           },
         }),
@@ -708,6 +805,17 @@ function createFormulaNode(
             const latex = match[1]?.trim();
             if (!latex) return null;
             const $start = state.doc.resolve(range.from);
+            const parentText = $start.parent.textBetween(
+              0,
+              $start.parent.content.size,
+              "\n",
+              "\ufffc",
+            );
+            if (
+              isEscaped(parentText, $start.parentOffset) ||
+              isEscaped(match[0], match[0].length - 1)
+            )
+              return null;
             const codeMark = state.schema.marks.code;
             if (
               codeMark &&
@@ -736,7 +844,13 @@ function createFormulaNode(
             state.tr.replaceWith(
               range.from,
               range.to,
-              this.type.create({ latex }),
+              this.type.create(
+                { latex },
+                null,
+                kind === "inline"
+                  ? state.doc.resolve(range.from).marks()
+                  : undefined,
+              ),
             );
           },
         }),
@@ -750,15 +864,22 @@ function createFormulaNode(
           pendingInput,
           new Plugin({
             appendTransaction: (transactions, _oldState, newState) => {
+              if (transactions.some(isHistoryTransaction)) return null;
               if (!transactions.some((transaction) => transaction.docChanged))
                 return null;
               const selection = newState.selection;
               if (!(selection instanceof TextSelection) || !selection.empty)
                 return null;
               const $cursor = selection.$from;
-              if ($cursor.parent.type.name !== "paragraph") return null;
+              if (!$cursor.parent.isTextblock || $cursor.parent.type.spec.code)
+                return null;
               const parsed = inlineFormulaAroundCaret(
-                $cursor.parent.textContent,
+                $cursor.parent.textBetween(
+                  0,
+                  $cursor.parent.content.size,
+                  "\n",
+                  "\ufffc",
+                ),
                 $cursor.parentOffset,
               );
               if (!parsed) return null;
@@ -773,11 +894,15 @@ function createFormulaNode(
               return newState.tr.replaceWith(
                 parentStart + parsed.from,
                 parentStart + parsed.to,
-                this.type.create({
-                  latex: parsed.latex,
-                  autoEdit: true,
-                  sourceCaret: parsed.caret,
-                }),
+                this.type.create(
+                  {
+                    latex: parsed.latex,
+                    autoEdit: true,
+                    sourceCaret: parsed.caret,
+                  },
+                  null,
+                  $cursor.marks(),
+                ),
               );
             },
           }),
@@ -787,6 +912,7 @@ function createFormulaNode(
         pendingInput,
         new Plugin({
           appendTransaction: (transactions, _oldState, newState) => {
+            if (transactions.some(isHistoryTransaction)) return null;
             if (!transactions.some((transaction) => transaction.docChanged))
               return null;
             const selection = newState.selection;
@@ -806,7 +932,12 @@ function createFormulaNode(
               return null;
             }
             const parsed = displayFormulaAfterTextInsertion({
-              parentText: $cursor.parent.textContent,
+              parentText: $cursor.parent.textBetween(
+                0,
+                $cursor.parent.content.size,
+                "\n",
+                "\ufffc",
+              ),
               from: $cursor.parentOffset,
               to: $cursor.parentOffset,
               insertedText: "",
@@ -817,10 +948,18 @@ function createFormulaNode(
             // the caret must remain editable so the next keystroke continues in
             // the formula instead of replacing the new atom.
             const wrappedSource =
-              ($cursor.parent.textContent.startsWith("$$") &&
-                $cursor.parent.textContent.endsWith("$$")) ||
-              ($cursor.parent.textContent.startsWith("\\[") &&
-                $cursor.parent.textContent.endsWith("\\]"));
+              ($cursor.parent
+                .textBetween(0, $cursor.parent.content.size, "\n", "\ufffc")
+                .startsWith("$$") &&
+                $cursor.parent
+                  .textBetween(0, $cursor.parent.content.size, "\n", "\ufffc")
+                  .endsWith("$$")) ||
+              ($cursor.parent
+                .textBetween(0, $cursor.parent.content.size, "\n", "\ufffc")
+                .startsWith("\\[") &&
+                $cursor.parent
+                  .textBetween(0, $cursor.parent.content.size, "\n", "\ufffc")
+                  .endsWith("\\]"));
             const insideDelimitedSource =
               wrappedSource &&
               $cursor.parentOffset >= 2 &&
@@ -841,6 +980,28 @@ function createFormulaNode(
 
     addKeyboardShortcuts() {
       return {
+        Enter: () => {
+          if (kind !== "block") return false;
+          const { state, view } = this.editor;
+          const { $from, empty } = state.selection;
+          const code = state.schema.marks.code;
+          if (
+            !empty ||
+            $from.parent.type.name !== "paragraph" ||
+            $from.parent.textContent !== "$$" ||
+            $from.parentOffset !== 2 ||
+            (code && $from.parent.rangeHasMark(0, 2, code))
+          )
+            return false;
+          view.dispatch(
+            state.tr.replaceWith(
+              $from.before(),
+              $from.after(),
+              this.type.create({ latex: "", autoEdit: true, sourceCaret: 0 }),
+            ),
+          );
+          return true;
+        },
         "Mod-Alt-m": () =>
           this.editor.commands.insertContent({
             type: name,

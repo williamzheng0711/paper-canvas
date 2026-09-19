@@ -5,6 +5,7 @@ import { parseMarkdownComments } from './comments';
 import { documentToMarkdown, markdownToDocument } from './markdown';
 
 export type DocumentSelectionAnchor =
+  | { kind: 'formula'; path: number[]; offset: number }
   | {
       kind: 'text';
       /** Child indexes from the document root to the containing text block. */
@@ -101,6 +102,10 @@ function locateSelectionMarker(
     }
   }
 
+  if (['inlineFormula', 'blockFormula'].includes(node.type ?? '') && typeof node.attrs?.latex === 'string') {
+    const offset = node.attrs.latex.indexOf(selectionMarker);
+    if (offset >= 0) return { kind: 'formula', path, offset };
+  }
   const attributeRatio = markerRatio(node.attrs);
   if (attributeRatio !== undefined) {
     if (textBlockTypes.has(node.type ?? '')) {
@@ -255,7 +260,8 @@ export function markdownSelectionFromMarkedDocument(
 ): MarkdownSelection | undefined {
   const markdown = documentToMarkdown(document);
   if (markdown.includes(selectionMarker)) return undefined;
-  const markedMarkdown = documentToMarkdown(markedDocument);
+  // A temporary marker must not widen table columns and shift their padding.
+  const markedMarkdown = documentToMarkdown(markedDocument, (value) => value.replace(selectionMarker, '').length);
   const offset = markedMarkdown.indexOf(selectionMarker);
   if (offset < 0) return undefined;
   if (markedMarkdown.replace(selectionMarker, '') !== markdown) return undefined;
@@ -284,6 +290,11 @@ export function positionFromDocumentAnchor(
     if (start === undefined) return undefined;
     node = node.child(index);
     contentStart = start + 1;
+  }
+
+  if (anchor.kind === 'formula') {
+    if (!['inlineFormula', 'blockFormula'].includes(node.type.name)) return undefined;
+    return { position: contentStart - 1, affinity: 1 };
   }
 
   if (anchor.kind === 'text') {

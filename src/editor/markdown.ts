@@ -543,7 +543,10 @@ function flattenText(node: JSONContent): string {
     .join("");
 }
 
-export function documentToMarkdown(document: JSONContent): string {
+export function documentToMarkdown(
+  document: JSONContent,
+  stringLength?: (value: string) => number,
+): string {
   const root: MdRoot = {
     type: "root",
     children: (document.content ?? []).flatMap((node) => {
@@ -551,7 +554,10 @@ export function documentToMarkdown(document: JSONContent): string {
       return converted ? [converted] : [];
     }),
   };
-  return processor
+  const serializer = stringLength
+    ? processor().use(remarkGfm, { stringLength })
+    : processor;
+  return serializer
     .stringify(root as unknown as never)
     .replace(/\n{3,}/g, "\n\n");
 }

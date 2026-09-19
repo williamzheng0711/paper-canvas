@@ -1,0 +1,208 @@
+import { Extension, InputRule } from "@tiptap/core";
+import { Fragment, type Node as ProseMirrorNode } from "@tiptap/pm/model";
+import { TextSelection } from "@tiptap/pm/state";
+
+function appendNestedItem(
+  item: ProseMirrorNode,
+  list: ProseMirrorNode,
+): ProseMirrorNode {
+  const last = item.lastChild;
+  if (last?.type === list.type) {
+    return item.copy(
+      item.content.replaceChild(
+        item.childCount - 1,
+        last.copy(last.content.append(list.content)),
+      ),
+    );
+  }
+  return item.copy(item.content.append(Fragment.from(list)));
+}
+
+function isList(node: ProseMirrorNode | null): boolean {
+  return !!node && ["bulletList", "orderedList"].includes(node.type.name);
+}
+
+function emptyItem(node: ProseMirrorNode): boolean {
+  return (
+    node.type.name === "listItem" &&
+    node.childCount === 1 &&
+    node.firstChild?.type.name === "paragraph" &&
+    node.firstChild.content.size === 0
+  );
+}
+
+// Enter may leave empty items at several levels while moving out of a list.
+function pruneTail(
+  list: ProseMirrorNode,
+  prefix: ProseMirrorNode,
+): ProseMirrorNode | null {
+  const items: ProseMirrorNode[] = [];
+  list.forEach((item) => items.push(item));
+  while (items.length) {
+    let last = items[items.length - 1];
+    if (
+      emptyItem(last) ||
+      (last.childCount === 1 && last.firstChild === prefix)
+    ) {
+      items.pop();
+      continue;
+    }
+    if (isList(last.lastChild)) {
+      const child = pruneTail(last.lastChild!, prefix);
+      const content = child
+        ? last.content.replaceChild(last.childCount - 1, child)
+        : last.content.cut(0, last.content.size - last.lastChild!.nodeSize);
+      last = last.copy(content);
+      items[items.length - 1] = last;
+    }
+    break;
+  }
+  return items.length ? list.copy(Fragment.fromArray(items)) : null;
+}
+
+function markerWidth(list: ProseMirrorNode): number {
+  return list.type.name === "orderedList"
+    ? String(list.attrs.start + list.childCount - 1).length + 2
+    : 2;
+}
+
+function appendAtIndent(
+  list: ProseMirrorNode,
+  nested: ProseMirrorNode,
+  indent: number,
+  base = 0,
+): ProseMirrorNode {
+  const last = list.lastChild!;
+  const child = last.lastChild;
+  const contentIndent = base + markerWidth(list);
+  const next =
+    isList(child) && indent >= contentIndent + markerWidth(child!)
+      ? last.copy(
+          last.content.replaceChild(
+            last.childCount - 1,
+            appendAtIndent(child!, nested, indent, contentIndent),
+          ),
+        )
+      : appendNestedItem(last, nested);
+  return list.copy(list.content.replaceChild(list.childCount - 1, next));
+}
+
+/** Honor an indented Markdown list prefix even when Enter already exited its parent list. */
+export const IndentedListInput = Extension.create({
+  name: "indentedListInput",
+  priority: 1100,
+  addInputRules() {
+    return [
+      new InputRule({
+        find: /^( {2,}|\t)([-+*]|\d+\.) $/,
+        handler: ({ state, range, match }) => {
+          const $cursor = state.doc.resolve(range.to);
+          if (
+            $cursor.parent.type.name !== "paragraph" ||
+            $cursor.parentOffset !== $cursor.parent.content.size
+          )
+            return null;
+          const code = state.schema.marks.code;
+          if (
+            code &&
+            $cursor.parent.rangeHasMark(0, $cursor.parent.content.size, code)
+          )
+            return null;
+          const listName = /^\d/.test(match[2]) ? "orderedList" : "bulletList";
+          const listType = state.schema.nodes[listName];
+          const itemType = state.schema.nodes.listItem;
+          if (!listType || !itemType) return null;
+          const paragraph = state.schema.nodes.paragraph.create();
+          const nested = listType.create(
+            listName === "orderedList"
+              ? { start: parseInt(match[2], 10) }
+              : null,
+            itemType.create(null, paragraph),
+          );
+          let from: number;
+          let to: number;
+          let previous: ProseMirrorNode | null = null;
+          let outerDepth = 0;
+          for (let depth = 1; depth < $cursor.depth; depth++) {
+            if (isList($cursor.node(depth))) {
+              outerDepth = depth;
+              break;
+            }
+          }
+          if (outerDepth) {
+            // Reuse only the trailing item created by Enter, never move existing prose.
+            if (
+              $cursor.node(-1).type !== itemType ||
+              $cursor.node(-1).childCount !== 1
+            )
+              return null;
+            for (let depth = outerDepth; depth < $cursor.depth; depth++) {
+              if ($cursor.index(depth) !== $cursor.node(depth).childCount - 1)
+                return null;
+            }
+            previous = $cursor.node(outerDepth);
+            from = $cursor.before(outerDepth);
+            to = $cursor.after(outerDepth);
+          } else {
+            previous = state.doc.resolve($cursor.before()).nodeBefore;
+            if (!isList(previous)) return null;
+            from = $cursor.before() - previous!.nodeSize;
+            to = $cursor.after();
+          }
+          const cleaned = pruneTail(previous!, $cursor.parent);
+          if (!cleaned) return null;
+          const indent = match[1].replace(/\t/g, "    ").length;
+          const list = appendAtIndent(cleaned, nested, indent);
+          state.tr.replaceWith(from, to, list);
+          list.descendants((node, position) => {
+            if (node === paragraph)
+              state.tr.setSelection(
+                TextSelection.create(state.tr.doc, from + position + 2),
+              );
+          });
+        },
+      }),
+      new InputRule({
+        find: /^(\d+)\. $/,
+        handler: ({ state, range, match }) => {
+          const $cursor = state.doc.resolve(range.to);
+          if (
+            $cursor.parent.type.name !== "paragraph" ||
+            $cursor.parentOffset !== $cursor.parent.content.size
+          )
+            return null;
+          const code = state.schema.marks.code;
+          if (
+            code &&
+            $cursor.parent.rangeHasMark(0, $cursor.parent.content.size, code)
+          )
+            return null;
+          // Enter can already have created the next numbered item. Consume a
+          // matching explicit prefix instead of keeping a second visible number.
+          if (
+            $cursor.depth >= 3 &&
+            $cursor.node(-1).type.name === "listItem" &&
+            $cursor.node(-2).type.name === "orderedList" &&
+            $cursor.index(-1) === 0 &&
+            Number(match[1]) ===
+              $cursor.node(-2).attrs.start + $cursor.index(-2)
+          ) {
+            state.tr.delete(range.from, range.to);
+            return;
+          }
+          const previous = state.doc.resolve($cursor.before()).nodeBefore;
+          if (
+            previous?.type.name !== "orderedList" ||
+            !previous.lastChild ||
+            !emptyItem(previous.lastChild) ||
+            Number(match[1]) !== previous.attrs.start + previous.childCount - 1
+          )
+            return null;
+          const end = $cursor.before();
+          state.tr.delete(end, $cursor.after());
+          state.tr.setSelection(TextSelection.create(state.tr.doc, end - 3));
+        },
+      }),
+    ];
+  },
+});

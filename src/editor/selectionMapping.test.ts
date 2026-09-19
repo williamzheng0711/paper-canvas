@@ -61,6 +61,32 @@ describe('canvas and Markdown selection mapping', () => {
     editor.destroy();
   });
 
+  it('keeps table column padding stable while mapping a cell caret', () => {
+    const document = markdownToDocument('| A | B |\n| - | - |\n| longest cell | target |');
+    const marked = structuredClone(document);
+    marked.content![0].content![1].content![0].content![0].content![0].text = `long${selectionMarker}est cell`;
+    const selection = markdownSelectionFromMarkedDocument(document, marked);
+    expect(selection).toBeDefined();
+    expect(selection!.offset).toBe(selection!.markdown.indexOf('longest cell') + 4);
+    expect(markdownToDocumentWithSelection(selection!.markdown, selection!.offset).anchor).toEqual({
+      kind: 'text',
+      path: [0, 1, 0, 0],
+      offset: 4,
+    });
+  });
+
+  it.each(['Before $x^2 + y$ after', '$$\nx^2 + y\n$$'])('preserves source offsets inside formulas: %s', (markdown) => {
+    const sourceOffset = markdown.indexOf('^2') + 1;
+    const mapped = markdownToDocumentWithSelection(markdown, sourceOffset);
+    expect(mapped.anchor).toMatchObject({ kind: 'formula', offset: 2 });
+    const marked = structuredClone(mapped.document);
+    let node = marked;
+    for (const index of mapped.anchor!.path) node = node.content![index];
+    node.attrs!.latex = `x^${selectionMarker}2 + y`;
+    const selection = markdownSelectionFromMarkedDocument(mapped.document, marked);
+    expect(selection?.offset).toBe(selection!.markdown.indexOf('^2') + 1);
+  });
+
   it('maps a Markdown caret to the same rich-text block and character offset', () => {
     const markdown = '# Heading\n\nBefore **bold target** and [link](https://example.com).';
     const sourceOffset = markdown.indexOf('target') + 3;

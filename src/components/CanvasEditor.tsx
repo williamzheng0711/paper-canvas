@@ -23,7 +23,9 @@ import {
   createCommentDecorationsExtension,
   type CanvasCommentPosition,
 } from '../editor/commentDecorations';
-import { BlockFormula, InlineFormula } from '../editor/Formula';
+import { BlockFormula, InlineFormula, focusedFormulaSelection, focusFormulaSource } from '../editor/Formula';
+import { MarkdownTyping } from '../editor/markdownTyping';
+import { IndentedListInput } from '../editor/indentedListInput';
 import { TaskListInput } from '../editor/taskListInput';
 import { HtmlPreview, InlineHtmlPreview } from '../editor/HtmlPreview';
 import { replaceDocumentPreservingSelection } from '../editor/documentSync';
@@ -385,6 +387,8 @@ export const CanvasEditor = memo(
         Placeholder.configure({ placeholder: text.canvasPlaceholder }),
         InlineFormula,
         BlockFormula,
+        MarkdownTyping,
+        IndentedListInput,
         HtmlPreview,
         InlineHtmlPreview,
         UnsupportedMarkdown,
@@ -539,7 +543,9 @@ export const CanvasEditor = memo(
       clearSearch: () => {
         if (editor) clearDocumentSearch(editor);
       },
-      focus: () => editor?.view.focus(),
+      focus: () => {
+        if (editor && !focusedFormulaSelection(editor.view)) editor.view.focus();
+      },
       getSelectedText: () => (editor ? getSelectedDocumentText(editor) : ''),
       getSelectionProgress: () => {
         if (!editor) return 0;
@@ -550,7 +556,7 @@ export const CanvasEditor = memo(
         if (!editor) return undefined;
         const viewport = editor.view.dom.closest<HTMLElement>('.canvas-area');
         if (!viewport) return undefined;
-        const coordinates = editor.view.coordsAtPos(editor.state.selection.head);
+        const coordinates = focusedFormulaSelection(editor.view) ?? editor.view.coordsAtPos(editor.state.selection.head);
         return coordinates.top - viewport.getBoundingClientRect().top;
       },
       setSelectionProgress: (progress) => {
@@ -563,8 +569,18 @@ export const CanvasEditor = memo(
       getMarkdownSelection: () => {
         if (!editor) return undefined;
         try {
-          const position = editor.state.selection.head;
-          const markedDocument = editor.state.tr.insertText(selectionMarker, position, position).doc.toJSON();
+          const formula = focusedFormulaSelection(editor.view);
+          const position = formula?.position ?? editor.state.selection.head;
+          const transaction = editor.state.tr;
+          if (formula) {
+            const node = editor.state.doc.nodeAt(position)!;
+            const latex = String(node.attrs.latex ?? '');
+            transaction.setNodeMarkup(position, undefined, {
+              ...node.attrs,
+              latex: latex.slice(0, formula.offset) + selectionMarker + latex.slice(formula.offset),
+            });
+          } else transaction.insertText(selectionMarker, position, position);
+          const markedDocument = transaction.doc.toJSON();
           return markdownSelectionFromMarkedDocument(editor.getJSON(), markedDocument);
         } catch {
           return undefined;
@@ -574,6 +590,7 @@ export const CanvasEditor = memo(
         if (!editor) return false;
         const resolved = positionFromDocumentAnchor(editor.state.doc, anchor);
         if (!resolved) return false;
+        if (anchor.kind === 'formula') return focusFormulaSource(editor.view, resolved.position, anchor.offset);
         const selection = Selection.near(editor.state.doc.resolve(resolved.position), resolved.affinity);
         editor.view.dispatch(editor.state.tr.setSelection(selection));
         return true;
@@ -614,7 +631,7 @@ export const CanvasEditor = memo(
         contextSelectionRef.current = undefined;
       },
       flushCommentMapping,
-      isFocused: () => editor?.view.hasFocus() ?? false,
+      isFocused: () => editor ? editor.view.hasFocus() || Boolean(focusedFormulaSelection(editor.view)) : false,
       requestMeasure: () => undefined,
     }),
     [editor],

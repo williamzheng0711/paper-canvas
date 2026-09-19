@@ -1,7 +1,12 @@
 import { Editor } from "@tiptap/core";
 import StarterKit from "@tiptap/starter-kit";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { BlockFormula, InlineFormula } from "./Formula";
+import {
+  BlockFormula,
+  InlineFormula,
+  focusFormulaSource,
+  focusedFormulaSelection,
+} from "./Formula";
 
 const editors: Editor[] = [];
 
@@ -488,4 +493,84 @@ describe("inline formula input rule", () => {
       editor.view.dom.querySelector(".formula-editor__textarea"),
     ).toBeNull();
   });
+});
+
+describe("formula editing history and selection", () => {
+  it("updates a focused source field and preview when document undo changes its formula", () => {
+    const flush = holdAnimationFrames();
+    const element = document.createElement("div");
+    document.body.append(element);
+    const editor = new Editor({
+      element,
+      extensions: [StarterKit, BlockFormula],
+      content: {
+        type: "doc",
+        content: [{ type: "blockFormula", attrs: { latex: "x" } }],
+      },
+    });
+    editors.push(editor);
+    editor.view.dom.querySelector<HTMLElement>(".formula-render")!.click();
+    flush();
+    const source =
+      editor.view.dom.querySelector<HTMLTextAreaElement>("textarea")!;
+    source.value = "y";
+    source.setSelectionRange(1, 1);
+    source.dispatchEvent(new Event("input", { bubbles: true }));
+    editor.commands.undo();
+    expect(source.value).toBe("x");
+    expect(
+      editor.view.dom.querySelector(".formula-live-preview")?.textContent,
+    ).toContain("x");
+  });
+  it("does not redirect typing into an old pending formula after the caret moved elsewhere", () => {
+    const flush = holdAnimationFrames();
+    const editor = new Editor({
+      extensions: [StarterKit, InlineFormula, BlockFormula],
+      content: "<p>$$$$</p><p>other</p>",
+    });
+    editors.push(editor);
+    editor.commands.setTextSelection(3);
+    typeThroughInputRules(editor, "x");
+    editor.commands.setTextSelection(editor.state.doc.content.size - 1);
+    typeThroughInputRules(editor, "!");
+    flush();
+    expect(editor.getJSON().content?.[0]).toMatchObject({
+      type: "blockFormula",
+      attrs: { latex: "x" },
+    });
+    expect(editor.getJSON().content?.[1]).toMatchObject({
+      type: "paragraph",
+      content: [{ type: "text", text: "other!" }],
+    });
+  });
+});
+
+it("restores an exact formula source caret without changing document content", () => {
+  const editor = new Editor({
+    extensions: [StarterKit, InlineFormula, BlockFormula],
+    content: {
+      type: "doc",
+      content: [
+        {
+          type: "paragraph",
+          content: [
+            { type: "text", text: "Before " },
+            { type: "inlineFormula", attrs: { latex: "x^2 + y" } },
+            { type: "text", text: " after" },
+          ],
+        },
+      ],
+    },
+  });
+  editors.push(editor);
+  document.body.append(editor.view.dom);
+  const before = editor.getJSON();
+  expect(focusFormulaSource(editor.view, 8, 2)).toBe(true);
+  expect(focusedFormulaSelection(editor.view)).toMatchObject({
+    position: 8,
+    offset: 2,
+  });
+  expect(editor.getJSON()).toEqual(before);
+  expect(focusFormulaSource(editor.view, 8, 4)).toBe(true);
+  expect(focusedFormulaSelection(editor.view)?.offset).toBe(4);
 });
