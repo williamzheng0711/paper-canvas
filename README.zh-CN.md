@@ -26,16 +26,16 @@
 </p>
 
 <p align="center">
-  <a href="https://williamzheng0711.github.io/paper-canvas/download/PaperCanvas-Windows-x64-Setup.exe?v=0.1.3">
+  <a href="https://williamzheng0711.github.io/paper-canvas/download/PaperCanvas-Windows-x64-Setup.exe?v=0.2.0">
     <img alt="下载 Windows 版 PaperCanvas" src="https://img.shields.io/badge/Download_for_Windows-0078D4?style=for-the-badge&logo=windows11&logoColor=white">
   </a>
-  <a href="https://williamzheng0711.github.io/paper-canvas/download/PaperCanvas-macOS-universal.dmg?v=0.1.3">
+  <a href="https://williamzheng0711.github.io/paper-canvas/download/PaperCanvas-macOS-universal.dmg?v=0.2.0">
     <img alt="下载 macOS 版 PaperCanvas" src="https://img.shields.io/badge/Download_for_macOS-111111?style=for-the-badge&logo=apple&logoColor=white">
   </a>
 </p>
 
 <p align="center">
-  <sub>当前安装包版本：v0.1.3 · Windows 10/11 x64 · macOS Intel 与 Apple Silicon · 每个按钮都会直接下载最新版本。</sub>
+  <sub>当前安装包版本：v0.2.0 · Windows 10/11 x64 · macOS Intel 与 Apple Silicon · 每个按钮都会直接下载最新版本。</sub>
 </p>
 
 <p align="center">

@@ -13,9 +13,9 @@
 </p>
 
 <p align="center">
-  <a href="https://williamzheng0711.github.io/paper-canvas/download/PaperCanvas-Windows-x64-Setup.exe?v=0.1.3">下載 Windows 版</a>
+  <a href="https://williamzheng0711.github.io/paper-canvas/download/PaperCanvas-Windows-x64-Setup.exe?v=0.2.0">下載 Windows 版</a>
   ・
-  <a href="https://williamzheng0711.github.io/paper-canvas/download/PaperCanvas-macOS-universal.dmg?v=0.1.3">下載 macOS 版</a>
+  <a href="https://williamzheng0711.github.io/paper-canvas/download/PaperCanvas-macOS-universal.dmg?v=0.2.0">下載 macOS 版</a>
 </p>
 
 <p align="center">
