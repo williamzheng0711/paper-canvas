@@ -324,7 +324,15 @@ export const MarkdownSourceEditor = memo(
     const host = useRef<HTMLDivElement>(null);
     const view = useRef<EditorView | null>(null);
     const contentAttributes = useRef(new Compartment()).current;
-    const initialValue = useRef(value);
+    const createSourceState =
+      useRef<
+        (
+          snapshot: SourceSnapshot,
+          selection?: { anchor: number; head: number },
+        ) => EditorState
+      >(undefined);
+    const languageRef = useRef(language);
+    languageRef.current = language;
     const rawSource = useRef<SourceSnapshot>(sourceSnapshot(value));
     const onChangeRef = useRef(onChange);
     const onReadyRef = useRef(onReady);
@@ -340,13 +348,14 @@ export const MarkdownSourceEditor = memo(
 
     useLayoutEffect(() => {
       if (!host.current) return;
-      const editor = new EditorView({
-        state: EditorState.create({
-          doc: initialValue.current,
+      createSourceState.current = (snapshot, selection) =>
+        EditorState.create({
+          doc: snapshot.normalized,
+          selection,
           extensions: [
             lineNumbers(),
             history(),
-            separatorMetadata.init(() => sourceSeparators(rawSource.current)),
+            separatorMetadata.init(() => sourceSeparators(snapshot)),
             separatorHistory,
             bracketMatching(),
             highlightActiveLine(),
@@ -357,7 +366,7 @@ export const MarkdownSourceEditor = memo(
             EditorView.lineWrapping,
             contentAttributes.of(
               EditorView.contentAttributes.of({
-                "aria-label": getMessages().markdownSource,
+                "aria-label": getMessages(languageRef.current).markdownSource,
                 spellcheck: "false",
               }),
             ),
@@ -375,7 +384,9 @@ export const MarkdownSourceEditor = memo(
               }
             }),
           ],
-        }),
+        });
+      const editor = new EditorView({
+        state: createSourceState.current(rawSource.current),
         parent: host.current,
       });
       view.current = editor;
@@ -450,30 +461,30 @@ export const MarkdownSourceEditor = memo(
         }
       }
       const metadata = sourceSeparators(nextSnapshot);
-      if (changes)
-        // A path rebase belongs to the same document, even when its original
-        // first separator was deleted and the remaining first style differs.
-        metadata.lineEnding = editor.state.field(separatorMetadata).lineEnding;
+      if (!changes) {
+        // A full external snapshot has no trustworthy mapping for old undo
+        // steps or separator-restoration effects. Start fresh in this view.
+        rawSource.current = nextSnapshot;
+        currentSearch.current = { query: "", active: -1 };
+        editor.setState(
+          createSourceState.current!(nextSnapshot, {
+            anchor: Math.min(anchor, nextSnapshot.normalized.length),
+            head: Math.min(head, nextSnapshot.normalized.length),
+          }),
+        );
+        return;
+      }
+      // A path rebase belongs to the same document, even when its original
+      // first separator was deleted and the remaining first style differs.
+      metadata.lineEnding = editor.state.field(separatorMetadata).lineEnding;
       applyingExternalValue.current = true;
       try {
         editor.dispatch({
           effects: replaceSeparators.of(metadata),
-          changes: changes ?? {
-            from: 0,
-            to: current.length,
-            insert: nextSnapshot.normalized,
-          },
-          // Loading another file or applying an external snapshot must never make
-          // Undo resurrect the old file in the new document.
+          changes,
+          // External path rewrites map existing undo steps without creating a
+          // new history event of their own.
           annotations: Transaction.addToHistory.of(false),
-          ...(changes
-            ? {}
-            : {
-                selection: {
-                  anchor: Math.min(anchor, nextSnapshot.normalized.length),
-                  head: Math.min(head, nextSnapshot.normalized.length),
-                },
-              }),
         });
       } finally {
         applyingExternalValue.current = false;

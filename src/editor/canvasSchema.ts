@@ -18,7 +18,27 @@ import { PaperTableCell, PaperTableHeader } from './PaperTable';
 import { PaperTrailingNode } from './PaperTrailingNode';
 import { UnsupportedMarkdown } from './UnsupportedMarkdown';
 
-const lowlight = createLowlight(common);
+const syntaxHighlighter = createLowlight(common);
+const plainCode = (value: string): ReturnType<typeof syntaxHighlighter.highlight> => ({
+  type: 'root',
+  children: [{ type: 'text', value }],
+});
+// Highlighting can expand a single code node into hundreds of thousands of
+// decorations. Keep large code fully editable without that synchronous work.
+const maximumHighlightedCodeLength = 20_000;
+const lowlight: typeof syntaxHighlighter = {
+  ...syntaxHighlighter,
+  highlight(language, value, options) {
+    return value.length > maximumHighlightedCodeLength
+      ? plainCode(value)
+      : syntaxHighlighter.highlight(language, value, options);
+  },
+  highlightAuto(value, options) {
+    return value.length > maximumHighlightedCodeLength
+      ? plainCode(value)
+      : syntaxHighlighter.highlightAuto(value, options);
+  },
+};
 const PaperHeading = Heading.extend({
   addAttributes() {
     const inherited = this.parent?.() as Record<string, Attribute> | undefined;

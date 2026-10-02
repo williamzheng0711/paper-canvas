@@ -97,3 +97,55 @@ Use a temporary copy for intentional edits.
 
 Run `npm test`, `npm run lint`, `npm run build`, and `cargo test --offline` from
 `src-tauri` alongside the native manual checks above.
+
+## Stress and recovery checks
+
+Use disposable documents and a separate native app identifier for deliberate
+failure injection. Keep original bytes for comparison.
+
+- Open UTF-8 with a BOM and mixed CRLF/LF/CR separators. Switch views, inspect
+  formulas, search, undo/redo, and save. An untouched save must preserve all
+  original bytes. Invalid UTF-8 and UTF-16 files must report an error without
+  replacing their bytes with decoding substitutions.
+- Type immediately before native Quit or window close. The latest writing must
+  be durable before the window disappears. Inject a failed save/settings flush;
+  the document must stay open with a visible error. Repeat while images are
+  still loading and while typing during an in-progress save.
+- Damage preferences and recent-file JSON while retaining an independent
+  recovery draft. Startup must recover the writing, report the settings error,
+  and preserve the damaged settings. A recovered draft with damaged comment
+  metadata must retain its original recovery record until the author edits it;
+  simply waiting, switching views, or quitting must not rewrite that record.
+- Keep source undo/redo through repeated view switches. After a real Canvas
+  replacement, source undo must never apply stale line-ending restoration or
+  resurrect writing from another file. Rename and Save As path rewrites must
+  retain applicable history.
+- Open a formula with CRLF/CR source, enter its textarea, and save without
+  typing. Browser textarea normalization must not dirty or change it. Cancel
+  composition, including after a save flush, then repeat rich HTML copy/paste;
+  the original formula source must survive. An empty formula deletion must not
+  later delete an unrelated node.
+- Capture a context-menu selection, then finish a delayed image insertion or
+  normalize nearby Markdown. Copy/Cut must still target the selected text;
+  deleting the selection or replacing the file must leave a valid selection.
+- Probe malformed comments, long fence delimiters, overlapping marks, negative
+  or overflowing ordered-list numbers, merged tables, and extreme code blocks.
+  Unsupported source must remain recoverable. Code above 20,000 characters
+  uses plain code styling to avoid excessive highlighting decorations.
+- Open 40,000 paragraphs, a very long wrapped paragraph, and HTML containing
+  40,000 elements. Documents above the Canvas budget (10,000 model/preview
+  nodes or 250,000 text/source characters) open in source with an explanation.
+  Source editing, search, undo, and Markdown saves retain the complete document.
+  Canvas/outline requests and PDF export must not mount the oversized preview.
+  An oversized Canvas insertion reports the limit and leaves the document and
+  history intact; reducing source content permits Canvas again.
+- Resolve Windows drive-root and UNC image paths, including repeated parent
+  traversal. A relative path must retain its drive or server/share root. Hiding
+  a recent file must not consume a visible Recent slot when it is saved again.
+
+During the October 2026 stress campaign, native checks confirmed exact-byte
+BOM/CRLF saves, safe immediate Quit, independent recovery with damaged settings,
+and responsive source access plus byte-preserving undo/save for a 2 MB,
+40,000-paragraph document. Composition and delayed-operation regressions are
+also exercised by the automated editor and application suites. Real IME
+behavior and Windows-native dialogs still require their platform manual checks.

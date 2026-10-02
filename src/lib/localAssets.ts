@@ -47,15 +47,20 @@ export function localAssetPath(
   const windows = isWindowsFilePath(basePath) || /^[A-Za-z]:[\\/]/.test(path) || (!basePath.startsWith("/") && path.startsWith("\\"));
   if (windows) path = path.replace(/\\/g, "/");
   let base = windows ? basePath.replace(/\\/g, "/") : basePath;
+  if (windows && path.startsWith("/") && !path.startsWith("//")) {
+    const root = /^(?:[A-Za-z]:|\/\/[^/]+\/[^/]+)/.exec(base)?.[0];
+    if (root) path = root + path;
+  }
   const absolute = path.startsWith("/") || /^[A-Za-z]:\//.test(path);
   if (!absolute) path = `${base.replace(/\/$/, "")}/${path}`;
   const prefix = path.startsWith("//") ? "//" : path.startsWith("/") ? "/" : "";
+  const rootSegments = windows && prefix === "//" ? 2 : 0;
   const segments: string[] = [];
   for (const segment of path.slice(prefix.length).split("/")) {
     if (!segment || segment === ".") continue;
     if (
       segment === ".." &&
-      segments.length &&
+      segments.length > rootSegments &&
       segments.at(-1) !== ".." &&
       !(windows && /^[A-Za-z]:$/.test(segments.at(-1)!))
     )

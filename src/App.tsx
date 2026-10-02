@@ -16,6 +16,7 @@ import {
   type MarkdownComment,
 } from './editor/comments';
 import { documentsEqual } from './editor/documentSync';
+import { canvasDocumentSupported } from './editor/canvasCapacity';
 import { htmlPreviewText } from './editor/HtmlPreview';
 import { markdownToDocument } from './editor/markdown';
 import { collectOutline } from './editor/outline';
@@ -144,6 +145,7 @@ function documentStateFromMarkdown(
 
 export default function App() {
   const [file, setFile] = useState<EditorFile>(newEditorFile);
+  const canvasSupported = useMemo(() => canvasDocumentSupported(file.document), [file.document]);
   const [documentId, setDocumentId] = useState(0);
   const [editRevision, setEditRevision] = useState(0);
   const [dirty, setDirty] = useState(false);
@@ -158,6 +160,7 @@ export default function App() {
     request: number;
   }>();
   const [sourceMode, setSourceMode] = useState(false);
+  const [sourceEditorSession, setSourceEditorSession] = useState<number>();
   const [modeTransitioning, setModeTransitioning] = useState(false);
   const [renameRequest, setRenameRequest] = useState<{ name: string; session: number } | null>(null);
   const [rawMarkdownRevision, setRawMarkdownRevision] = useState(0);
@@ -194,6 +197,7 @@ export default function App() {
   const dirtyRef = useRef(dirty);
   const editRevisionRef = useRef(editRevision);
   const documentSessionRef = useRef(0);
+  const persistedDraft = useRef<{ session: number; revision: number } | undefined>(undefined);
   const sourceModeRef = useRef(sourceMode);
   const rawMarkdownRef = useRef('');
   const openedByOperatingSystem = useRef(false);
@@ -502,12 +506,21 @@ export default function App() {
           setFile(normalizedDraft);
           setDocumentId((id) => id + 1);
           documentSessionRef.current += 1;
+          const largeDocument = !canvasDocumentSupported(normalizedDraft.document);
+          if (sourceModeRef.current || largeDocument) {
+            setSourceEditorSession(documentSessionRef.current);
+            setExternalRawMarkdown(normalizedDraft.sourceMarkdown ?? documentToPortableMarkdown(normalizedDraft.document, normalizedDraft.comments));
+            sourceModeRef.current = true;
+            setSourceMode(true);
+          }
           advanceRevision();
+          persistedDraft.current = { session: documentSessionRef.current, revision: editRevisionRef.current };
           setCommentsPanelOpen(normalizedDraft.comments.length > 0);
           dirtyRef.current = true;
           setDirty(true);
           setSaveStatus('draft');
-          setMessage(normalizedDraft.commentWarning ?? (startupError ? `${loadedText.restoredDraft} ${startupError}` : loadedText.restoredDraft));
+          const recoveredMessage = largeDocument ? loadedText.canvasViewLimited : loadedText.restoredDraft;
+          setMessage(normalizedDraft.commentWarning ?? (startupError ? `${recoveredMessage} ${startupError}` : recoveredMessage));
         } else if (documentUntouched && !openedByOperatingSystem.current) {
           setMessage(startupError ?? loadedText.localOnly);
         }
@@ -518,7 +531,7 @@ export default function App() {
         setMessage(error instanceof Error ? error.message : getMessages().loadSettingsFailed);
       });
     return () => { active = false; };
-  }, [advanceRevision]);
+  }, [advanceRevision, setExternalRawMarkdown]);
 
   useEffect(() => {
     if (!preferencesLoaded.current) return;
@@ -592,6 +605,8 @@ export default function App() {
       setModeTransitioning(false);
       clearSourceCommentSync();
       const normalizedFile = { ...nextFile, comments: nextFile.comments ?? [] };
+      const largeDocument = !canvasDocumentSupported(normalizedFile.document);
+      if (largeDocument) normalizedFile.sourceMarkdown ??= documentToPortableMarkdown(normalizedFile.document, normalizedFile.comments);
       fileRef.current = normalizedFile;
       setFile(normalizedFile);
       const recentPanel = sidebarTabs.current?.parentElement?.querySelector('#recent-panel');
@@ -611,15 +626,20 @@ export default function App() {
       dirtyRef.current = false;
       setDirty(false);
       setSaveStatus('saved');
-      sourceModeRef.current = false;
-      setSourceMode(false);
+      sourceModeRef.current = largeDocument;
+      setSourceEditorSession(largeDocument ? session : undefined);
+      setSourceMode(largeDocument);
+      if (largeDocument) {
+        setExternalRawMarkdown(normalizedFile.sourceMarkdown!);
+        setSourceOutline(collectOutline(normalizedFile.document));
+      }
       setOutlineTarget(undefined);
       setNewCommentTarget(null);
       setActiveCommentId(undefined);
       setCommentsPanelOpen(normalizedFile.comments.length > 0);
-      setMessage(normalizedFile.commentWarning ?? getMessages().openedFile(normalizedFile.name));
+      setMessage(normalizedFile.commentWarning ?? (largeDocument ? getMessages().canvasViewLimited : getMessages().openedFile(normalizedFile.name)));
     },
-    [advanceRevision, clearSourceCommentSync, closeToolbarMenus, resetCommentHistory],
+    [advanceRevision, clearSourceCommentSync, closeToolbarMenus, resetCommentHistory, setExternalRawMarkdown],
   );
 
   const replaceWithOpenedFile = useCallback(
@@ -826,12 +846,15 @@ export default function App() {
             const revision = editRevisionRef.current;
             if (fileRef.current.path) {
               if ((dirtyRef.current || pendingSave.current) && !(await saveCurrent())) return;
-            } else if (dirtyRef.current) {
+            } else if (dirtyRef.current && (persistedDraft.current?.session !== session || persistedDraft.current.revision !== revision)) {
               clearSourceCommentSync();
               const draft = sourceModeRef.current
                 ? { ...fileRef.current, ...documentStateFromMarkdown(rawMarkdownRef.current), sourceMarkdown: rawMarkdownRef.current }
                 : fileRef.current;
               await saveDraft(draft);
+              if (documentSessionRef.current === session && editRevisionRef.current === revision) {
+                persistedDraft.current = { session, revision };
+              }
             }
             await flushSettings();
             if (!active || documentSessionRef.current !== session) return;
@@ -866,6 +889,9 @@ export default function App() {
       if (sourceModeRef.current) clearSourceCommentSync();
       else flushCanvasChanges();
       const revision = editRevisionRef.current;
+      // A recovered draft is already durable. Keep its original record until
+      // an actual edit, including any damaged metadata retained for recovery.
+      if (persistedDraft.current?.session === session && persistedDraft.current.revision === revision) return;
       const draft = sourceModeRef.current
         ? {
             ...fileRef.current,
@@ -876,6 +902,7 @@ export default function App() {
       void saveDraft(draft)
         .then(() => {
           if (documentSessionRef.current === session && editRevisionRef.current === revision) {
+            persistedDraft.current = { session, revision };
             setSaveStatus('draft');
           }
         })
@@ -1265,18 +1292,26 @@ export default function App() {
       setExternalRawMarkdown(markdown);
       setSourceOutline(collectOutline(currentFile.document));
       sourceModeRef.current = true;
+      setSourceEditorSession(documentSessionRef.current);
       setSourceMode(true);
       return;
     }
     try {
       clearSourceCommentSync();
       const currentFile = fileRef.current;
+      const unselectedState = currentFile.sourceMarkdown === rawMarkdownRef.current
+        ? { document: currentFile.document, comments: currentFile.comments ?? [], warning: currentFile.commentWarning }
+        : documentStateFromMarkdown(rawMarkdownRef.current, currentFile.path);
+      if (!canvasDocumentSupported(unselectedState.document)) {
+        setMessage(getMessages().canvasViewLimited);
+        return;
+      }
       const parsedSelection = visibleEditorSelection()
         ? markdownToDocumentWithSelection(rawMarkdownRef.current, markdownSearch.current?.getMarkdownOffset?.())
         : undefined;
-      const sourceState = currentFile.sourceMarkdown === rawMarkdownRef.current
-        ? { document: currentFile.document, comments: currentFile.comments ?? [], warning: currentFile.commentWarning }
-        : documentStateFromMarkdown(rawMarkdownRef.current, currentFile.path, parsedSelection?.document);
+      const sourceState = parsedSelection?.document
+        ? documentStateFromMarkdown(rawMarkdownRef.current, currentFile.path, parsedSelection.document)
+        : unselectedState;
       const nextDocument = sourceState.document;
       const nextComments = sourceState.comments;
       beginModeTransition(
@@ -1403,6 +1438,10 @@ export default function App() {
         const sourceState = currentFile.sourceMarkdown === rawMarkdownRef.current
           ? { document: currentFile.document, comments: currentFile.comments ?? [], warning: currentFile.commentWarning }
           : documentStateFromMarkdown(rawMarkdownRef.current, currentFile.path);
+        if (!canvasDocumentSupported(sourceState.document)) {
+          setMessage(getMessages().canvasViewLimited);
+          return;
+        }
         const documentChanged = !documentsEqual(currentFile.document, sourceState.document);
         const nextFile = {
           ...fileRef.current,
@@ -1470,6 +1509,7 @@ export default function App() {
       // currently editing its Markdown source.
       if (sourceModeRef.current) {
         const sourceState = documentStateFromMarkdown(rawMarkdownRef.current, fileRef.current.path);
+        if (!canvasDocumentSupported(sourceState.document)) throw new Error(getMessages().canvasViewLimited);
         const nextFile = {
           ...fileRef.current,
           document: sourceState.document,
@@ -1894,7 +1934,7 @@ export default function App() {
           }
         >
           <div className="editor-mode-pane editor-mode-pane--canvas" hidden={sourceMode}>
-            <CanvasEditor
+            {canvasSupported && <CanvasEditor
               key={documentSessionRef.current}
               ref={canvasSearch}
               language={preferences.language}
@@ -1905,6 +1945,7 @@ export default function App() {
               outlineTarget={outlineTarget}
               onReady={canvasReady}
               onLinkError={setMessage}
+              onCapacityError={setMessage}
               onEdit={markEdited}
               onCommentRequest={handleCanvasContextMenu}
               onCommentClick={handleCommentMarkerClick}
@@ -1924,11 +1965,12 @@ export default function App() {
                 setFile(nextFile);
                 markEdited();
               }}
-            />
+            />}
           </div>
-          {sourceMode && (
-            <div className="editor-mode-pane editor-mode-pane--source">
+          {sourceEditorSession === documentSessionRef.current && (
+            <div className="editor-mode-pane editor-mode-pane--source" hidden={!sourceMode}>
               <MarkdownSourceEditor
+                key={documentSessionRef.current}
                 ref={markdownSearch}
                 language={preferences.language}
                 value={rawMarkdownRef.current}

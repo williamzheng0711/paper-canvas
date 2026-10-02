@@ -65,6 +65,116 @@ describe("MarkdownSourceEditor search", () => {
     host.remove();
   });
 
+  it("retains exact mixed separators and native undo/redo while its source pane is hidden", async () => {
+    const original = "# Original\r\n\r\nBody\nEnd\r";
+    let value = original;
+    const onChange = vi.fn((next: string) => {
+      value = next;
+    });
+    const render = (visible: boolean, revision: number, session = 1) =>
+      root.render(
+        <div hidden={!visible}>
+          <MarkdownSourceEditor
+            key={session}
+            language="en"
+            value={value}
+            valueRevision={revision}
+            onChange={onChange}
+          />
+        </div>,
+      );
+    await act(async () => render(true, 0));
+    const editor = EditorView.findFromDOM(host.querySelector(".cm-editor")!)!;
+    await act(async () =>
+      editor.dispatch({
+        changes: { from: 2, to: 10, insert: "Edited" },
+        annotations: isolateHistory.of("full"),
+      }),
+    );
+    const first = value;
+    const text = editor.state.doc.toString();
+    await act(async () =>
+      editor.dispatch({
+        changes: {
+          from: text.indexOf("Body"),
+          to: text.indexOf("End") + 3,
+          insert: "中文\nNext",
+        },
+        annotations: isolateHistory.of("full"),
+      }),
+    );
+    const second = value;
+    expect(second).toBe("# Edited\r\n\r\n中文\r\nNext\r");
+    for (let revision = 1; revision <= 3; revision += 1) {
+      await act(async () => render(false, revision));
+      await act(async () => render(true, revision));
+      expect(EditorView.findFromDOM(host.querySelector(".cm-editor")!)).toBe(
+        editor,
+      );
+      expect(value).toBe(second);
+    }
+    await act(async () => {
+      expect(undo(editor)).toBe(true);
+    });
+    expect(value).toBe(first);
+    await act(async () => {
+      expect(undo(editor)).toBe(true);
+    });
+    expect(value).toBe(original);
+    await act(async () => {
+      expect(redo(editor)).toBe(true);
+    });
+    expect(value).toBe(first);
+    await act(async () => {
+      expect(redo(editor)).toBe(true);
+    });
+    expect(value).toBe(second);
+
+    value = "# Another file\r\n";
+    await act(async () => render(true, 4, 2));
+    const replacement = EditorView.findFromDOM(
+      host.querySelector(".cm-editor")!,
+    )!;
+    expect(replacement).not.toBe(editor);
+    expect(undo(replacement)).toBe(false);
+    expect(value).toBe("# Another file\r\n");
+  });
+
+  it("clears stale source undo and separator effects when a canvas snapshot replaces the text", async () => {
+    let value = "A\nB\r\nC\n";
+    const onChange = vi.fn((next: string) => {
+      value = next;
+    });
+    const render = (revision: number) =>
+      root.render(
+        <MarkdownSourceEditor
+          language="zh-Hant"
+          value={value}
+          valueRevision={revision}
+          onChange={onChange}
+        />,
+      );
+    await act(async () => render(0));
+    const editor = EditorView.findFromDOM(host.querySelector(".cm-editor")!)!;
+    await act(async () => editor.dispatch({ changes: { from: 3, to: 4 } }));
+    expect(value).toBe("A\nBC\n");
+    const emitted = onChange.mock.calls.length;
+    value = "\nnew\n";
+    await act(async () => render(1));
+    expect(EditorView.findFromDOM(host.querySelector(".cm-editor")!)).toBe(
+      editor,
+    );
+    expect(onChange).toHaveBeenCalledTimes(emitted);
+    expect(undo(editor)).toBe(false);
+    expect(editor.contentDOM.getAttribute("aria-label")).toBe("原始 Markdown");
+    await act(async () => editor.dispatch({ changes: { from: 0, to: 1 } }));
+    expect(value).toBe("new\n");
+    await act(async () => {
+      expect(undo(editor)).toBe(true);
+    });
+    expect(value).toBe("\nnew\n");
+  });
+
   it("highlights, selects, navigates, clears, and restores focus", async () => {
     const search = createRef<SwitchableEditorHandle>();
     await act(async () => {

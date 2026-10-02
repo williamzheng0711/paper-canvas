@@ -6,6 +6,7 @@ import {
   InlineFormula,
   focusFormulaSource,
   focusedFormulaSelection,
+  flushFormulaSources,
 } from "./Formula";
 
 const editors: Editor[] = [];
@@ -496,6 +497,75 @@ describe("inline formula input rule", () => {
 });
 
 describe("formula editing history and selection", () => {
+  it("keeps original formula line separators when reading tools flush an untouched textarea", () => {
+    const value = "x\r\ny\rz";
+    const editor = new Editor({
+      extensions: [StarterKit.configure({ trailingNode: false }), BlockFormula],
+      content: {
+        type: "doc",
+        content: [{ type: "blockFormula", attrs: { latex: value } }],
+      },
+    });
+    editors.push(editor);
+    const before = editor.getJSON();
+    editor.view.dom.querySelector<HTMLElement>(".formula-render")!.click();
+    const source =
+      editor.view.dom.querySelector<HTMLTextAreaElement>("textarea")!;
+    expect(source.value).toBe("x\ny\nz");
+    source.dispatchEvent(new InputEvent("input", { bubbles: true }));
+    flushFormulaSources(editor.view);
+    source.dispatchEvent(
+      new CompositionEvent("compositionstart", { bubbles: true }),
+    );
+    source.dispatchEvent(new FocusEvent("blur"));
+    expect(editor.getJSON()).toEqual(before);
+    expect(editor.commands.undo()).toBe(false);
+  });
+
+  it.each([
+    { flushed: false, value: String.raw`\begin{equation}` },
+    { flushed: true, value: String.raw`\begin{equation}` },
+    { flushed: false, value: "\\begin{equation}\r\nx\ry" },
+    { flushed: true, value: "\\begin{equation}\r\nx\ry" },
+  ])(
+    "preserves incomplete source and separators when composition cancels (candidate flushed: $flushed, source: $value)",
+    ({ flushed, value }) => {
+      const editor = new Editor({
+        extensions: [
+          StarterKit.configure({ trailingNode: false }),
+          BlockFormula,
+        ],
+        content: {
+          type: "doc",
+          content: [{ type: "blockFormula", attrs: { latex: value } }],
+        },
+      });
+      editors.push(editor);
+      const before = editor.getJSON();
+      editor.view.dom.querySelector<HTMLElement>(".formula-render")!.click();
+      const source =
+        editor.view.dom.querySelector<HTMLTextAreaElement>("textarea")!;
+      source.setSelectionRange(value.length, value.length);
+      source.dispatchEvent(
+        new CompositionEvent("compositionstart", { bubbles: true }),
+      );
+      source.value += "z";
+      source.dispatchEvent(
+        new InputEvent("input", { bubbles: true, isComposing: true }),
+      );
+      if (flushed) flushFormulaSources(editor.view);
+      source.value = value;
+      source.setSelectionRange(value.length, value.length);
+      source.dispatchEvent(
+        new CompositionEvent("compositionend", { bubbles: true }),
+      );
+      // Some engines follow compositionend with an unchanged native input event.
+      source.dispatchEvent(new InputEvent("input", { bubbles: true }));
+      expect(editor.getJSON()).toEqual(before);
+      expect(source.value).toBe(value.replace(/\r\n?/g, "\n"));
+    },
+  );
+
   it.each(["Backspace", "Delete"])(
     "removes an empty inline formula immediately with %s before rapid typing",
     (key) => {
@@ -519,15 +589,13 @@ describe("formula editing history and selection", () => {
       editors.push(editor);
       const before = editor.getJSON();
       editor.view.dom.querySelector<HTMLElement>(".formula-render")!.click();
-      editor.view.dom
-        .querySelector("textarea")!
-        .dispatchEvent(
-          new KeyboardEvent("keydown", {
-            key,
-            bubbles: true,
-            cancelable: true,
-          }),
-        );
+      editor.view.dom.querySelector("textarea")!.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key,
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
       expect(editor.getText()).toBe("Before  after");
       const removed = editor.getJSON();
       expect(editor.commands.undo()).toBe(true);
@@ -557,15 +625,13 @@ describe("formula editing history and selection", () => {
     });
     editors.push(editor);
     editor.view.dom.querySelector<HTMLElement>(".formula-render")!.click();
-    editor.view.dom
-      .querySelector("textarea")!
-      .dispatchEvent(
-        new KeyboardEvent("keydown", {
-          key: "Backspace",
-          bubbles: true,
-          cancelable: true,
-        }),
-      );
+    editor.view.dom.querySelector("textarea")!.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Backspace",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
     expect(JSON.stringify(editor.getJSON())).not.toContain("blockFormula");
     editor.commands.setContent("<p>Replacement</p>");
     expect(flush).not.toThrow();

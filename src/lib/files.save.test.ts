@@ -100,7 +100,8 @@ describe('saving documents', () => {
 
   it('writes text-only files without requesting image access', async () => {
     await saveEditorFile({ ...file, document: { type: 'doc', content: [{ type: 'paragraph' }] } });
-    expect(mocks.invoke).toHaveBeenCalledExactlyOnceWith('write_markdown_file', { path: file.path, contents: '' });
+    expect(mocks.invoke).toHaveBeenCalledWith('write_markdown_file', { path: file.path, contents: '' });
+    expect(mocks.invoke).not.toHaveBeenCalledWith('allow_document_assets', expect.anything());
     expect(mocks.writeMarkdown).toHaveBeenCalledOnce();
   });
 

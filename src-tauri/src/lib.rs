@@ -192,6 +192,32 @@ fn recovery_draft_path(app: &AppHandle) -> Result<PathBuf, String> {
         .map_err(|error| error.to_string())
 }
 
+fn validate_settings_file_at(path: &Path) -> Result<(), String> {
+    let contents = match std::fs::read(path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.to_string()),
+    };
+    let value: serde_json::Value =
+        serde_json::from_slice(&contents).map_err(|error| error.to_string())?;
+    if !value.is_object() {
+        return Err("The settings file must contain a JSON object.".into());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn validate_settings_file(app: AppHandle) -> Result<(), String> {
+    let path = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?
+        .join("papercanvas.settings.v1");
+    tauri::async_runtime::spawn_blocking(move || validate_settings_file_at(&path))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
 fn read_recovery_draft_file(path: &Path) -> Result<Option<String>, String> {
     match std::fs::read_to_string(path) {
         Ok(contents) => Ok(Some(contents)),
@@ -739,6 +765,7 @@ pub fn run() {
             read_recovery_draft,
             write_recovery_draft,
             clear_recovery_draft,
+            validate_settings_file,
             allow_document_assets,
             allow_document_rename,
             rename_document_entry,
@@ -971,6 +998,27 @@ mod tests {
         std::fs::write(&path, [0xff]).unwrap();
         assert!(read_recovery_draft_file(&path).is_err());
         assert_eq!(std::fs::read(&path).unwrap(), [0xff]);
+    }
+
+    #[test]
+    fn settings_validation_never_changes_damaged_or_valid_original_bytes() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("papercanvas.settings.v1");
+        assert!(validate_settings_file_at(&path).is_ok());
+        for contents in [
+            b"{}".as_slice(),
+            br#"{"preferences":{"language":"en"},"draft":{"sourceMarkdown":"\u4e2d\u6587"}}"#,
+        ] {
+            std::fs::write(&path, contents).unwrap();
+            assert!(validate_settings_file_at(&path).is_ok());
+            assert_eq!(std::fs::read(&path).unwrap(), contents);
+        }
+        for contents in [b"{ damaged".as_slice(), b"null", b"[]", b"0", &[0xff]] {
+            std::fs::write(&path, contents).unwrap();
+            assert!(validate_settings_file_at(&path).is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), contents);
+        }
+        assert!(validate_settings_file_at(directory.path()).is_err());
     }
 
     #[test]

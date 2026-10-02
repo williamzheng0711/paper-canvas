@@ -24,6 +24,7 @@ import { IndentedListInput } from '../editor/indentedListInput';
 import { TaskListInput } from '../editor/taskListInput';
 import { updateFootnoteLabels } from '../editor/Footnote';
 import { canvasNodesAndMarks } from '../editor/canvasSchema';
+import { CanvasCapacity } from '../editor/canvasCapacity';
 import { replaceDocumentPreservingSelection } from '../editor/documentSync';
 import { documentToMarkdown } from '../editor/markdown';
 import { insertPastedFormula, insertPastedMarkdown, sanitizePastedHtml } from '../editor/paste';
@@ -58,6 +59,7 @@ type Props = {
   onCommentRequest?: (placement: CommentPlacement, coordinates: { x: number; y: number }) => void;
   onCommentClick?: (id: string) => void;
   onLinkError?: (message: string) => void;
+  onCapacityError?: (message: string) => void;
   canUndoComment?: boolean;
   canRedoComment?: boolean;
   onUndoComment?: () => void;
@@ -288,6 +290,7 @@ function sameCanvasProps(previous: Props, next: Props): boolean {
     previous.onCommentRequest === next.onCommentRequest &&
     previous.onCommentClick === next.onCommentClick &&
     previous.onLinkError === next.onLinkError &&
+    previous.onCapacityError === next.onCapacityError &&
     previous.canUndoComment === next.canUndoComment &&
     previous.canRedoComment === next.canRedoComment &&
     previous.onUndoComment === next.onUndoComment &&
@@ -310,6 +313,7 @@ export const CanvasEditor = memo(
     onCommentRequest,
     onCommentClick,
     onLinkError,
+    onCapacityError,
     canUndoComment = false,
     canRedoComment = false,
     onUndoComment,
@@ -347,6 +351,7 @@ export const CanvasEditor = memo(
   const onCommentRequestRef = useRef(onCommentRequest);
   const onCommentClickRef = useRef(onCommentClick);
   const onLinkErrorRef = useRef(onLinkError);
+  const onCapacityErrorRef = useRef(onCapacityError);
   const canUndoCommentRef = useRef(canUndoComment);
   const canRedoCommentRef = useRef(canRedoComment);
   const onUndoCommentRef = useRef(onUndoComment);
@@ -357,6 +362,7 @@ export const CanvasEditor = memo(
   onCommentRequestRef.current = onCommentRequest;
   onCommentClickRef.current = onCommentClick;
   onLinkErrorRef.current = onLinkError;
+  onCapacityErrorRef.current = onCapacityError;
   canUndoCommentRef.current = canUndoComment;
   canRedoCommentRef.current = canRedoComment;
   onUndoCommentRef.current = onUndoComment;
@@ -364,7 +370,7 @@ export const CanvasEditor = memo(
   const markerClickRef = useRef<((id: string) => void) | undefined>(undefined);
   markerClickRef.current = (id) => onCommentClickRef.current?.(id);
   const editorRef = useRef<Editor | null>(null);
-  const contextSelectionRef = useRef<{ from: number; to: number } | undefined>(undefined);
+  const contextSelectionRef = useRef<SelectionBookmark | undefined>(undefined);
   const commentSyncTimerRef = useRef<number | undefined>(undefined);
   const componentMountedRef = useRef(false);
   const pendingChangeRef = useRef(false);
@@ -444,6 +450,7 @@ export const CanvasEditor = memo(
   const editor = useEditor(
     {
       extensions: [
+        CanvasCapacity.configure({ onLimit: () => onCapacityErrorRef.current?.(getMessages().canvasEditLimited) }),
         ...canvasNodesAndMarks(() => textRef.current, getDocumentPath),
         TaskListInput,
         Placeholder.configure({ placeholder: () => textRef.current.canvasPlaceholder }),
@@ -513,10 +520,7 @@ export const CanvasEditor = memo(
         handleDOMEvents: {
           mousedown: (view, event) => {
             if (event instanceof MouseEvent && event.button === 2 && !view.state.selection.empty) {
-              contextSelectionRef.current = {
-                from: view.state.selection.from,
-                to: view.state.selection.to,
-              };
+              contextSelectionRef.current = view.state.selection.getBookmark();
             } else if (event instanceof MouseEvent && event.button !== 2) {
               contextSelectionRef.current = undefined;
             }
@@ -527,7 +531,7 @@ export const CanvasEditor = memo(
             event.preventDefault();
             const currentEditor = editorRef.current;
             if (!currentEditor) return true;
-            const placement = contextMenuPlacement(currentEditor, event, contextSelectionRef.current);
+            const placement = contextMenuPlacement(currentEditor, event, contextSelectionRef.current?.resolve(currentEditor.state.doc));
             if (placement.target.kind !== 'range') contextSelectionRef.current = undefined;
             onCommentRequestRef.current?.(placement, {
               x: event.clientX,
@@ -565,6 +569,9 @@ export const CanvasEditor = memo(
         const changes = [transaction, ...appendedTransactions].filter((change) => change.docChanged);
         if (!changes.length || appliedDocument.current?.editor !== currentEditor ||
           appliedDocument.current.id !== documentSnapshot.current.id) return;
+        for (const change of changes) {
+          contextSelectionRef.current = contextSelectionRef.current?.map(change.mapping);
+        }
         for (const insertion of pendingImagesRef.current) {
           if (insertion.documentId !== documentSnapshot.current.id) continue;
           for (const change of changes) {
@@ -613,7 +620,10 @@ export const CanvasEditor = memo(
       window.clearTimeout(commentSyncTimerRef.current);
       commentSyncTimerRef.current = undefined;
     }
-    if (replacingDocument) pendingChangeRef.current = false;
+    if (replacingDocument) {
+      pendingChangeRef.current = false;
+      contextSelectionRef.current = undefined;
+    }
     decorationSignatureRef.current = undefined;
     decorationDocumentIdRef.current = undefined;
     lastMappedCommentsRef.current = undefined;
@@ -761,7 +771,7 @@ export const CanvasEditor = memo(
         if (preservedSelection) {
           editor.view.dispatch(
             editor.state.tr.setSelection(
-              TextSelection.create(editor.state.doc, preservedSelection.from, preservedSelection.to),
+              preservedSelection.resolve(editor.state.doc),
             ),
           );
         }

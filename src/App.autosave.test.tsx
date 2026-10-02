@@ -31,6 +31,8 @@ const harness = vi.hoisted(() => ({
   sourceProps: null as SourceProps | null,
   canvasMounts: 0,
   canvasUnmounts: 0,
+  sourceMounts: 0,
+  sourceUnmounts: 0,
   searchHandle: {
     search: vi.fn<(query: string, direction: 'reset' | 'next' | 'previous' | 'refresh') => { current: number; total: number }>(
       () => ({ current: 0, total: 0 }),
@@ -84,7 +86,7 @@ const files = vi.hoisted(() => ({
   revealFileInFolder: vi.fn(async () => undefined),
   renameEditorFile: vi.fn(async (file: EditorFile): Promise<EditorFile> => ({ ...file, name: 'renamed.md', path: '/tmp/renamed.md' })),
   saveEditorFile: vi.fn(),
-  saveDraft: vi.fn(async () => undefined),
+  saveDraft: vi.fn<typeof FileLibrary.saveDraft>(async () => undefined),
   savePreferences: vi.fn<(preferences: FileLibrary.AppPreferences) => Promise<void>>(async () => undefined),
 }));
 
@@ -130,6 +132,10 @@ vi.mock('./components/MarkdownSourceEditor', () => ({
     harness.sourceProps = props;
     if (typeof props.ref === 'function') props.ref(harness.searchHandle);
     if (props.ref && typeof props.ref === 'object') props.ref.current = harness.searchHandle;
+    useEffect(() => {
+      harness.sourceMounts += 1;
+      return () => { harness.sourceUnmounts += 1; };
+    }, []);
     useEffect(() => {
       onReady?.();
     }, [onReady]);
@@ -282,6 +288,8 @@ describe('App autosave cursor stability', () => {
     harness.sourceProps = null;
     harness.canvasMounts = 0;
     harness.canvasUnmounts = 0;
+    harness.sourceMounts = 0;
+    harness.sourceUnmounts = 0;
     let activeSearchResult = 0;
     harness.searchHandle.search.mockImplementation((query, direction) => {
       if (!query) return { current: 0, total: 0 };
@@ -338,6 +346,21 @@ describe('App autosave cursor stability', () => {
     expect(harness.canvasProps?.initialDocument).toEqual(savedDocument);
   });
 
+  it('keeps a visible source pane when a late startup draft replaces the document session', async () => {
+    await act(async () => root.unmount());
+    let restore!: (draft: EditorFile) => void;
+    files.loadDraft.mockImplementationOnce(() => new Promise<EditorFile>((resolve) => { restore = resolve; }));
+    root = createRoot(host);
+    await act(async () => { root.render(<App />); await flushEffects(); });
+    await act(async () => { readingModeButton('source').click(); await flushEffects(); });
+    const sourceMarkdown = '# Restored\r\n\r\nExact bytes\n';
+    await act(async () => { restore({ name: 'Recovered.md', sourceMarkdown, document: markdownToDocument(sourceMarkdown) }); await flushEffects(); });
+    expect(host.querySelector('.editor-mode-pane--source')?.hasAttribute('hidden')).toBe(false);
+    expect(harness.sourceProps?.value).toBe(sourceMarkdown);
+    expect(harness.sourceMounts).toBe(2);
+    expect(harness.sourceUnmounts).toBe(1);
+  });
+
   it.each(['history', 'preferences'] as const)('recovers available writing when startup %s is unavailable', async (unavailable) => {
     await act(async () => root.unmount());
     const failure = new Error(`${unavailable} unavailable`);
@@ -359,6 +382,78 @@ describe('App autosave cursor stability', () => {
     await act(async () => { root.render(<App />); await flushEffects(); });
     expect(harness.canvasProps?.initialDocument).toEqual(savedDocument);
     expect(host.querySelector('.status-message')?.textContent).toBe('Damaged comments preserved for recovery');
+  });
+
+  it('opens an oversized recovery draft in source without mounting its large canvas or losing exact bytes', async () => {
+    await act(async () => root.unmount());
+    const sourceMarkdown = '\ufeff# Large recovery 中文\r\n\r\n' + 'Retained writing.\r\n\r\n'.repeat(5_100);
+    const large = markdownToDocument(sourceMarkdown);
+    files.loadDraft.mockResolvedValueOnce({ name: 'Large.md', document: large, sourceMarkdown });
+    root = createRoot(host);
+    await act(async () => { root.render(<App />); await flushEffects(); });
+    expect(harness.sourceProps?.value).toBe(sourceMarkdown);
+    expect(harness.canvasProps?.initialDocument).not.toEqual(large);
+    expect(readingModeButton('source').getAttribute('aria-pressed')).toBe('true');
+    expect(host.querySelector('.status-message')?.textContent).toBe(getMessages().canvasViewLimited);
+    await act(async () => { readingModeButton('canvas').click(); await flushEffects(); });
+    expect(readingModeButton('source').getAttribute('aria-pressed')).toBe('true');
+    expect(harness.sourceProps?.value).toBe(sourceMarkdown);
+    await act(async () => { documentAction(getMessages().save).click(); await flushEffects(); });
+    const [saved, forceDialog, sourceOverride] = files.saveEditorFile.mock.calls.at(-1)!;
+    expect(saved.sourceMarkdown).toBe(sourceMarkdown);
+    expect(saved.document).toEqual(large);
+    expect(forceDialog).toBe(false);
+    expect(sourceOverride).toBe(sourceMarkdown);
+  });
+
+  it('returns an oversized source document to canvas after its content is reduced', async () => {
+    await act(async () => root.unmount());
+    const sourceMarkdown = 'Retained writing.\n\n'.repeat(5_100);
+    files.loadDraft.mockResolvedValueOnce({ name: 'Large.md', document: markdownToDocument(sourceMarkdown), sourceMarkdown });
+    root = createRoot(host);
+    await act(async () => { root.render(<App />); await flushEffects(); });
+    await act(async () => { harness.sourceProps?.onChange('# Smaller\r\n\r\nRetained writing.\r\n'); });
+    await act(async () => { readingModeButton('canvas').click(); await flushEffects(); });
+    expect(readingModeButton('canvas').getAttribute('aria-pressed')).toBe('true');
+    expect(harness.canvasProps?.initialDocument).toEqual(markdownToDocument('# Smaller\r\n\r\nRetained writing.\r\n'));
+  });
+
+  it('keeps a newly oversized source edit intact when canvas, outline, or PDF is requested', async () => {
+    await act(async () => { readingModeButton('source').click(); await flushEffects(); });
+    const sourceMarkdown = '# Large heading\r\n\r\n' + 'Retained writing.\r\n\r\n'.repeat(5_100);
+    await act(async () => { harness.sourceProps?.onChange(sourceMarkdown); });
+    await act(async () => { readingModeButton('canvas').click(); await flushEffects(); });
+    expect(readingModeButton('source').getAttribute('aria-pressed')).toBe('true');
+    expect(harness.sourceProps?.value).toBe(sourceMarkdown);
+    await act(async () => { await vi.advanceTimersByTimeAsync(300); await flushEffects(); });
+    const heading = Array.from(host.querySelectorAll<HTMLButtonElement>('.outline-list button'))
+      .find((button) => button.textContent === 'Large heading');
+    expect(heading).toBeDefined();
+    await act(async () => { heading!.click(); await flushEffects(); });
+    expect(readingModeButton('source').getAttribute('aria-pressed')).toBe('true');
+    await act(async () => { exportAction('PDF (.pdf)').click(); await flushEffects(); });
+    expect(files.exportPdfFile).not.toHaveBeenCalled();
+    expect(readingModeButton('source').getAttribute('aria-pressed')).toBe('true');
+    expect(harness.sourceProps?.value).toBe(sourceMarkdown);
+    expect(host.querySelector('.status-message')?.textContent).toBe(getMessages().canvasViewLimited);
+  });
+
+  it('opens an oversized file directly in source while preserving the original bytes', async () => {
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    try {
+      const sourceMarkdown = '\ufeff# Opened large file\r\n\r\n' + 'Retained writing.\r\n\r\n'.repeat(5_100);
+      files.openRecent.mockResolvedValueOnce({
+        name: 'large.md', path: '/tmp/large.md', document: markdownToDocument(sourceMarkdown), sourceMarkdown,
+      });
+      await act(async () => { (await recentFileButton()).click(); await flushEffects(); });
+      expect(readingModeButton('source').getAttribute('aria-pressed')).toBe('true');
+      expect(harness.sourceProps?.value).toBe(sourceMarkdown);
+      expect(host.querySelector('.status-message')?.textContent).toBe(getMessages().canvasViewLimited);
+      await act(async () => { documentAction(getMessages().save).click(); await flushEffects(); });
+      expect(files.saveEditorFile.mock.calls.at(-1)?.[2]).toBe(sourceMarkdown);
+    } finally {
+      confirm.mockRestore();
+    }
   });
 
   it('retains an unread preferences file until the user explicitly changes a setting', async () => {
@@ -915,6 +1010,41 @@ describe('App autosave cursor stability', () => {
     expect(host.querySelector('.editor-mode-pane--canvas')?.hasAttribute('hidden')).toBe(false);
     expect(harness.canvasMounts).toBe(mounts);
     expect(harness.canvasUnmounts).toBe(unmounts);
+  });
+
+  it('retains a lazily opened source editor during canvas visits and isolates new files', async () => {
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    try {
+      expect(harness.sourceMounts).toBe(0);
+      expect(host.querySelector('.editor-mode-pane--source')).toBeNull();
+      await act(async () => { readingModeButton('source').click(); await flushEffects(); });
+      const source = '# Edited\r\n\r\nMixed\nend\r';
+      await act(async () => { harness.sourceProps?.onChange(source); });
+      await act(async () => { readingModeButton('canvas').click(); await flushEffects(); });
+      expect(host.querySelector('.editor-mode-pane--source')?.hasAttribute('hidden')).toBe(true);
+      expect(harness.sourceMounts).toBe(1);
+      expect(harness.sourceUnmounts).toBe(0);
+      await act(async () => { readingModeButton('source').click(); await flushEffects(); });
+      expect(harness.sourceProps?.value).toBe(source);
+      expect(harness.sourceMounts).toBe(1);
+      await act(async () => { readingModeButton('canvas').click(); await flushEffects(); });
+      const canvasSource = '# Changed on canvas\n';
+      await act(async () => { harness.canvasProps?.onChange(markdownToDocument(canvasSource)); });
+      await act(async () => { readingModeButton('source').click(); await flushEffects(); });
+      expect(harness.sourceProps?.value).toBe(canvasSource);
+      expect(harness.sourceMounts).toBe(1);
+
+      const nextSource = '# Another file\r\n';
+      files.openRecent.mockResolvedValueOnce({ path: '/tmp/another.md', name: 'another.md', sourceMarkdown: nextSource, document: markdownToDocument(nextSource) });
+      await act(async () => { (await recentFileButton()).click(); await flushEffects(); });
+      expect(host.querySelector('.editor-mode-pane--source')).toBeNull();
+      expect(harness.sourceUnmounts).toBe(1);
+      await act(async () => { readingModeButton('source').click(); await flushEffects(); });
+      expect(harness.sourceMounts).toBe(2);
+      expect(harness.sourceProps?.value).toBe(nextSource);
+    } finally {
+      confirm.mockRestore();
+    }
   });
 
   it('waits for a pending canvas image before serializing Markdown and coalesces repeated mode clicks', async () => {
@@ -2335,5 +2465,70 @@ describe('App autosave cursor stability', () => {
     await showNavigationTab(getMessages().outline);
     expect(recentPanel?.hidden).toBe(true);
     expect(files.savePreferences).not.toHaveBeenCalledWith(expect.objectContaining({ recentFilesExpanded: false }));
+  });
+
+  it('retains an untouched recovered draft record through autosave delays and reading-mode switches', async () => {
+    await act(async () => root.unmount());
+    files.loadDraft.mockResolvedValueOnce({ name: 'Recovered.md', document: savedDocument, comments: [], commentWarning: 'Damaged comments kept on disk' });
+    root = createRoot(host);
+    await act(async () => { root.render(<App />); await flushEffects(); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+    await act(async () => { readingModeButton('source').click(); await flushEffects(); });
+    await act(async () => { readingModeButton('canvas').click(); await flushEffects(); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+    expect(files.saveDraft).not.toHaveBeenCalled();
+    expect(host.querySelector('.dirty-dot')).not.toBeNull();
+    expect(host.querySelector('.status-message')?.textContent).toBe('Damaged comments kept on disk');
+  });
+
+  it('closes an untouched recovered draft without replacing its retained recovery data', async () => {
+    const close = await startNative({ name: 'Recovered.md', document: savedDocument, comments: [], commentWarning: 'Damaged comments kept on disk' });
+    await act(async () => { await close({ preventDefault: vi.fn() }); });
+    expect(files.saveDraft).not.toHaveBeenCalled();
+    expect(files.flushSettings).toHaveBeenCalledOnce();
+    expect(native.destroy).toHaveBeenCalledOnce();
+  });
+
+  it('does not repeat a successful draft autosave when closing the same revision', async () => {
+    const close = await startNative({ name: 'Recovered.md', document: savedDocument });
+    const latest = markdownToDocument('Edited after recovery');
+    await act(async () => { harness.canvasProps?.onChange(latest); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+    expect(files.saveDraft).toHaveBeenCalledOnce();
+    expect(files.saveDraft).toHaveBeenCalledWith(expect.objectContaining({ document: latest }));
+    await act(async () => { await close({ preventDefault: vi.fn() }); });
+    expect(files.saveDraft).toHaveBeenCalledOnce();
+    expect(native.destroy).toHaveBeenCalledOnce();
+  });
+
+  it('retries a failed draft autosave before closing the unchanged revision', async () => {
+    const close = await startNative({ name: 'Recovered.md', document: savedDocument });
+    files.saveDraft.mockRejectedValueOnce(new Error('Recovery disk full'));
+    const latest = markdownToDocument('Must remain recoverable');
+    await act(async () => { harness.canvasProps?.onChange(latest); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+    expect(files.saveDraft).toHaveBeenCalledOnce();
+    expect(host.querySelector('.save-status')?.textContent).toBe(getMessages().saveStatus.error);
+    await act(async () => { await close({ preventDefault: vi.fn() }); });
+    expect(files.saveDraft).toHaveBeenCalledTimes(2);
+    expect(files.saveDraft.mock.calls.at(-1)?.[0].document).toEqual(latest);
+    expect(native.destroy).toHaveBeenCalledOnce();
+  });
+
+  it('saves edits arriving while an unnamed close write is pending before destroying the window', async () => {
+    const close = await startNative({ name: 'Recovered.md', document: savedDocument });
+    let finishDraft!: () => void;
+    files.saveDraft.mockImplementationOnce(() => new Promise<void>((resolve) => { finishDraft = resolve; }));
+    await act(async () => { harness.canvasProps?.onChange(markdownToDocument('First edit')); });
+    let closing!: Promise<void>;
+    await act(async () => { closing = close({ preventDefault: vi.fn() }); await flushEffects(); });
+    const latest = markdownToDocument('Late edit during close');
+    await act(async () => { harness.canvasProps?.onChange(latest); });
+    await act(async () => { finishDraft(); await closing; });
+    expect(files.saveDraft).toHaveBeenCalledTimes(2);
+    expect(files.saveDraft.mock.calls.at(-1)?.[0].document).toEqual(latest);
+    expect(native.destroy).toHaveBeenCalledOnce();
   });
 });

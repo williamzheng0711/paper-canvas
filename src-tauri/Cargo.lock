@@ -2312,6 +2312,7 @@ dependencies = [
  "objc2-foundation",
  "objc2-web-kit",
  "rustix",
+ "serde_json",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",

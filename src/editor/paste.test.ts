@@ -10,6 +10,7 @@ import { PaperImage } from "./PaperImage";
 import { PaperTableCell, PaperTableHeader } from "./PaperTable";
 import { markdownToDocument } from "./markdown";
 import { BlockFormula, InlineFormula } from "./Formula";
+import { HtmlPreview } from "./HtmlPreview";
 import {
   insertPastedFormula,
   insertPastedMarkdown,
@@ -164,6 +165,90 @@ describe("HTML paste sanitization", () => {
     });
     expect(sanitized).not.toMatch(/on\w+=|style=/i);
     editor.destroy();
+  });
+
+  it("preserves exact formula source through native HTML clipboard serialization and repeated paste", () => {
+    const latex = "x\r\ny\rz\0\\alpha\uD800";
+    const original = clipboardEditor({
+      type: "doc",
+      content: [
+        {
+          type: "paragraph",
+          content: [{ type: "inlineFormula", attrs: { latex } }],
+        },
+        { type: "blockFormula", attrs: { latex } },
+      ],
+    });
+    const destination = clipboardEditor(markdownToDocument("replace me"));
+    try {
+      for (const html of [
+        original.getHTML(),
+        sanitizePastedHtml(sanitizePastedHtml(original.getHTML())),
+      ]) {
+        destination.commands.selectAll();
+        expect(pasteHtml(destination, html)).toBe(true);
+        expect(destination.getJSON().content?.[0].content?.[0]).toMatchObject({
+          type: "inlineFormula",
+          attrs: { latex },
+        });
+        expect(destination.getJSON().content?.[1]).toMatchObject({
+          type: "blockFormula",
+          attrs: { latex },
+        });
+      }
+    } finally {
+      original.destroy();
+      destination.destroy();
+    }
+  });
+
+  it("preserves formula CRLF from rich HTML previews when the preview body is copied", () => {
+    const latex = "x\r\ny\rz";
+    const source =
+      '<ol start="7"><li><div data-formula-kind="block" latex="x&#13;&#10;y&#13;z" data-latex="x&#13;&#10;y&#13;z"><pre>$$&#10;x&#13;&#10;y&#13;z&#10;$$</pre></div></li></ol>';
+    const original = new Editor({
+      extensions: [StarterKit, HtmlPreview],
+      content: {
+        type: "doc",
+        content: [{ type: "htmlPreview", attrs: { source } }],
+      },
+    });
+    const destination = clipboardEditor(markdownToDocument("replace me"));
+    try {
+      destination.commands.selectAll();
+      expect(pasteHtml(destination, original.getHTML())).toBe(true);
+      let copiedSource: string | undefined;
+      destination.state.doc.descendants((node) => {
+        if (node.type.name === "blockFormula")
+          copiedSource = node.attrs.latex as string;
+      });
+      expect(copiedSource).toBe(latex);
+      expect(destination.getJSON().content?.[0].attrs?.start).toBe(7);
+    } finally {
+      original.destroy();
+      destination.destroy();
+    }
+  });
+
+  it("falls back to plain formula metadata when encoded source is malformed or not a string", () => {
+    const destination = clipboardEditor(markdownToDocument("replace me"));
+    try {
+      for (const encoded of ["invalid-json", "123"]) {
+        destination.commands.selectAll();
+        expect(
+          pasteHtml(
+            destination,
+            `<div data-formula-kind="block" data-latex-json="${encoded}" latex="retained"></div>`,
+          ),
+        ).toBe(true);
+        expect(destination.getJSON().content?.[0]).toMatchObject({
+          type: "blockFormula",
+          attrs: { latex: "retained" },
+        });
+      }
+    } finally {
+      destination.destroy();
+    }
   });
 
   it("includes LaTeX delimiters when a formula selection is copied as plain text", () => {

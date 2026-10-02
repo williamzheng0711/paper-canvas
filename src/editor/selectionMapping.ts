@@ -157,11 +157,15 @@ function stripMarkerFromValue(value: unknown): unknown {
 function stripSelectionMarker(node: JSONContent): JSONContent | null {
   const strippedText = node.text?.replace(selectionMarker, '');
   if (node.type === 'text' && strippedText === '') return null;
+  const attrs = node.attrs ? stripMarkerFromValue(node.attrs) as Record<string, unknown> : undefined;
+  // A marker-only fence info string becomes no language when the marker is
+  // removed, matching the parser's null rather than an empty-string language.
+  if (node.type === 'codeBlock' && node.attrs?.language === selectionMarker && attrs) attrs.language = null;
 
   const stripped: JSONContent = {
     ...node,
     ...(node.text !== undefined ? { text: strippedText } : {}),
-    ...(node.attrs ? { attrs: stripMarkerFromValue(node.attrs) as Record<string, unknown> } : {}),
+    ...(attrs ? { attrs } : {}),
     ...(node.marks ? { marks: stripMarkerFromValue(node.marks) as JSONContent['marks'] } : {}),
   };
   if (node.content) {
@@ -237,21 +241,37 @@ function tableDelimiterOffsets(source: string, requested: number, lineStart: num
   return [headerStart + cell.to - (value.length - value.trimEnd().length)];
 }
 
-function nearbyOffsets(markdown: string, requestedOffset: number): number[] {
+type OffsetCandidate = { offset: number; codeBoundary?: boolean };
+
+function nearbyOffsets(markdown: string, requestedOffset: number): OffsetCandidate[] {
   const requested = clampOffset(markdown.length, requestedOffset);
   const lineStart = markdown.lastIndexOf('\n', Math.max(0, requested - 1)) + 1;
   const lineBreak = markdown.indexOf('\n', requested);
   const lineEnd = lineBreak < 0 ? markdown.length : lineBreak;
   // Try the authored position first: table-like text inside a code block is
   // real content and must retain its exact caret rather than snapping upward.
-  const candidates = [requested, ...tableDelimiterOffsets(markdown, requested, lineStart, lineEnd)];
+  const candidates: OffsetCandidate[] = [
+    { offset: requested },
+    ...tableDelimiterOffsets(markdown, requested, lineStart, lineEnd).map((offset) => ({ offset })),
+  ];
+  const fence = /^[ \t]{0,3}(`{3,}|~{3,})/.exec(markdown.slice(lineStart, lineEnd));
+  if (fence && requested - lineStart <= fence[0].length) {
+    // Fence punctuation has no native text position. An opening's info string
+    // maps to the code start; the line before a closing maps to the code end.
+    candidates.push({ offset: lineEnd, codeBoundary: true }, { offset: lineStart - 1, codeBoundary: true });
+  }
   for (let distance = 1; distance <= 8; distance += 1) {
-    candidates.push(requested - distance, requested + distance);
+    candidates.push({ offset: requested - distance }, { offset: requested + distance });
   }
 
-  candidates.push(lineStart, lineEnd);
+  candidates.push({ offset: lineStart }, { offset: lineEnd });
 
-  return [...new Set(candidates.map((candidate) => clampOffset(markdown.length, candidate)))];
+  const unique = new Map<number, OffsetCandidate>();
+  for (const candidate of candidates) {
+    const offset = clampOffset(markdown.length, candidate.offset);
+    if (!unique.has(offset)) unique.set(offset, { ...candidate, offset });
+  }
+  return [...unique.values()];
 }
 
 /**
@@ -264,11 +284,17 @@ function selectionAnchorAtOffset(
   requestedOffset: number,
   canonicalSignature: string,
 ): DocumentSelectionAnchor | undefined {
-  for (const offset of nearbyOffsets(source, requestedOffset)) {
+  for (const { offset, codeBoundary } of nearbyOffsets(source, requestedOffset)) {
     const markedMarkdown = `${source.slice(0, offset)}${selectionMarker}${source.slice(offset)}`;
     const markedDocument = markdownToDocument(markedMarkdown);
     const anchor = locateSelectionMarker(markedDocument);
     const strippedDocument = stripSelectionMarker(markedDocument);
+    if (codeBoundary) {
+      if (anchor?.kind !== 'text' || !strippedDocument) continue;
+      let target: JSONContent | undefined = strippedDocument;
+      for (const index of anchor.path) target = target?.content?.[index];
+      if (target?.type !== 'codeBlock') continue;
+    }
     if (anchor && strippedDocument && JSON.stringify(canonicalDocument(strippedDocument)) === canonicalSignature) {
       return anchor;
     }

@@ -73,6 +73,16 @@ const hiddenRecentKey = 'hiddenRecentFiles';
 const draftKey = 'unsavedDraft';
 
 let settingsMutationQueue: Promise<unknown> = Promise.resolve();
+async function loadSettingsStore(): Promise<Store> {
+  // Store.load silently ignores malformed disk JSON. Validate before loading
+  // can turn that data into an empty store and autosave over the original.
+  try {
+    await invoke('validate_settings_file');
+  } catch {
+    throw new Error(getMessages().settingsReadFailed);
+  }
+  return Store.load(settingsKey, { autoSave: 200 });
+}
 
 function queueSettingsMutation<T>(operation: () => Promise<T>): Promise<T> {
   const result = settingsMutationQueue.then(operation);
@@ -568,7 +578,7 @@ function visibleRecentFiles(value: unknown, hiddenValue: unknown): RecentFile[] 
 
 export async function loadRecent(): Promise<RecentFile[]> {
   if (isTauri()) {
-    const store = await Store.load(settingsKey, { autoSave: 200 });
+    const store = await loadSettingsStore();
     return visibleRecentFiles(await store.get<unknown>(recentKey), await store.get<unknown>(hiddenRecentKey));
   }
   const storage = await browserSettings();
@@ -576,20 +586,22 @@ export async function loadRecent(): Promise<RecentFile[]> {
 }
 
 async function updateRecentFiles(update: (files: RecentFile[]) => RecentFile[]): Promise<RecentFile[]> {
-  const files = update(await loadRecent());
+  const updated = update(await loadRecent());
   if (isTauri()) {
-    const store = await Store.load(settingsKey, { autoSave: 200 });
+    const store = await loadSettingsStore();
+    const files = visibleRecentFiles(updated, await store.get<unknown>(hiddenRecentKey));
     await store.set(recentKey, files);
-  } else {
-    const storage = await browserSettings();
-    storage.setItem(recentKey, JSON.stringify(files));
+    return files;
   }
+  const storage = await browserSettings();
+  const files = visibleRecentFiles(updated, parseRecentValue(storage.getItem(hiddenRecentKey)));
+  storage.setItem(recentKey, JSON.stringify(files));
   return files;
 }
 
 export function rememberRecent(recent: RecentFile, replacedPath?: string): Promise<void> {
   return queueSettingsMutation(async () => {
-    await updateRecentFiles((files) => [recent, ...files.filter((item) => item.path !== recent.path && item.path !== replacedPath)].slice(0, 12));
+    await updateRecentFiles((files) => [recent, ...files.filter((item) => item.path !== recent.path && item.path !== replacedPath)]);
   });
 }
 
@@ -601,7 +613,7 @@ export function hideRecentFile(path: string): Promise<RecentFile[]> {
   return queueSettingsMutation(async () => {
     const files = await updateRecentFiles((items) => items.filter((item) => item.path !== path));
     if (isTauri()) {
-      const store = await Store.load(settingsKey, { autoSave: 200 });
+      const store = await loadSettingsStore();
       const hidden = hiddenRecentPaths(await store.get<unknown>(hiddenRecentKey));
       hidden.add(path);
       await store.set(hiddenRecentKey, [...hidden]);
@@ -667,7 +679,7 @@ function mergePreferences(stored: Partial<AppPreferences> | null | undefined): A
 
 async function readPreferences(): Promise<AppPreferences> {
   if (isTauri()) {
-    const store = await Store.load(settingsKey, { autoSave: 200 });
+    const store = await loadSettingsStore();
     const stored = await store.get<Partial<AppPreferences>>(preferencesKey);
     const preferences = mergePreferences(stored);
     if (stored?.compactLayoutVersion !== preferences.compactLayoutVersion) await store.set(preferencesKey, preferences);
@@ -697,7 +709,7 @@ export function savePreferences(preferences: AppPreferences): Promise<void> {
   };
   return queueSettingsMutation(async () => {
     if (isTauri()) {
-      const store = await Store.load(settingsKey, { autoSave: 200 });
+      const store = await loadSettingsStore();
       await store.set(preferencesKey, saved);
       return;
     }
@@ -769,7 +781,7 @@ export function loadDraft(): Promise<EditorFile | null> {
           throw new Error(getMessages().draftRecoveryFailed);
         }
       }
-      const store = await Store.load(settingsKey, { autoSave: 200 });
+      const store = await loadSettingsStore();
       const legacy = await store.get<unknown>(draftKey);
       // Copy the original record, including damaged supplementary metadata.
       // Migration failure must not prevent restoring readable legacy writing.
@@ -801,7 +813,7 @@ export function clearDraft(): Promise<void> {
   return queueSettingsMutation(async () => {
     if (isTauri()) {
       await invoke('clear_recovery_draft');
-      const store = await Store.load(settingsKey, { autoSave: 200 });
+      const store = await loadSettingsStore();
       await store.delete(draftKey);
       return;
     }
@@ -813,7 +825,7 @@ export function clearDraft(): Promise<void> {
 export function flushSettings(): Promise<void> {
   return queueSettingsMutation(async () => {
     if (!isTauri()) return;
-    const store = await Store.load(settingsKey, { autoSave: 200 });
+    const store = await loadSettingsStore();
     await store.save();
   });
 }

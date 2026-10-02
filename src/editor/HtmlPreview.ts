@@ -286,7 +286,9 @@ class HtmlPreviewView {
     });
     this.dom.className = preview.className;
     this.dom.hidden = preview.hidden;
-    this.dom.replaceChildren(...Array.from(preview.childNodes));
+    const contents = document.createDocumentFragment();
+    while (preview.firstChild) contents.appendChild(preview.firstChild);
+    this.dom.replaceChildren(contents);
   }
 }
 

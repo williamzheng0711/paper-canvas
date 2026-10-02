@@ -1,5 +1,6 @@
 import type { Editor } from '@tiptap/core';
 import { TextSelection } from '@tiptap/pm/state';
+import { closeHistory } from '@tiptap/pm/history';
 import type * as TiptapReact from '@tiptap/react';
 import { act, createRef } from 'react';
 import { createRoot } from 'react-dom/client';
@@ -1022,6 +1023,90 @@ it('settles an aborted image read so saving does not wait forever', async () => 
     await act(async () => root.unmount());
     host.remove();
     vi.unstubAllGlobals();
+    Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: false });
+  }
+});
+
+it.each(['copy', 'cut'] as const)('keeps context %s anchored to its captured text after a pending insertion', async (action) => {
+  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+  const host = document.createElement('div');
+  document.body.append(host);
+  const root = createRoot(host);
+  const handle = createRef<SwitchableEditorHandle>();
+  const originalExec = Object.getOwnPropertyDescriptor(document, 'execCommand');
+  const executed = vi.fn((command: string) => {
+    const editor = harness.editor!;
+    const { from, to } = editor.state.selection;
+    expect(editor.state.doc.textBetween(from, to)).toBe('world');
+    if (command === 'cut') editor.view.dispatch(closeHistory(editor.state.tr).deleteSelection());
+    return true;
+  });
+  Object.defineProperty(document, 'execCommand', { configurable: true, value: executed });
+  try {
+    await act(async () => root.render(<CanvasEditor ref={handle} language="en" documentId={1} initialDocument={markdownConversion.markdownToDocument('hello world')} onChange={() => {}} />));
+    const editor = harness.editor!;
+    vi.spyOn(editor.view, 'coordsAtPos').mockReturnValue({ left: 0, right: 0, top: 0, bottom: 0 });
+    const initial = editor.getJSON();
+    await act(async () => {
+      editor.view.dispatch(editor.state.tr.setSelection(TextSelection.create(editor.state.doc, 7, 12)));
+      editor.options.editorProps?.handleDOMEvents?.mousedown?.(editor.view, new MouseEvent('mousedown', { button: 2 }));
+      editor.view.dispatch(closeHistory(editor.state.tr).insertText('prefix ', 1));
+    });
+    const beforeAction = editor.getJSON();
+    await act(async () => handle.current!.runContextAction!(action));
+    expect(executed).toHaveBeenCalledWith(action);
+    const afterAction = editor.getJSON();
+    expect(editor.state.doc.textContent).toBe(action === 'cut' ? 'prefix hello ' : 'prefix hello world');
+    await act(async () => {
+      if (action === 'cut') { expect(editor.commands.undo()).toBe(true); expect(editor.getJSON()).toEqual(beforeAction); }
+      expect(editor.commands.undo()).toBe(true);
+      expect(editor.getJSON()).toEqual(initial);
+      expect(editor.commands.redo()).toBe(true);
+      expect(editor.getJSON()).toEqual(beforeAction);
+      if (action === 'cut') { expect(editor.commands.redo()).toBe(true); expect(editor.getJSON()).toEqual(afterAction); }
+    });
+  } finally {
+    if (originalExec) Object.defineProperty(document, 'execCommand', originalExec); else Reflect.deleteProperty(document, 'execCommand');
+    await act(async () => root.unmount());
+    host.remove();
+    Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: false });
+  }
+});
+
+it.each(['appended normalization', 'deleted range', 'replaced file'] as const)('resolves a context selection safely after %s', async (scenario) => {
+  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+  const host = document.createElement('div');
+  document.body.append(host);
+  const root = createRoot(host);
+  const handle = createRef<SwitchableEditorHandle>();
+  const originalExec = Object.getOwnPropertyDescriptor(document, 'execCommand');
+  const executed = vi.fn(() => {
+    const editor = harness.editor!;
+    const { from, to } = editor.state.selection;
+    expect(editor.state.doc.textBetween(from, to)).toBe(scenario === 'appended normalization' ? 'world' : '');
+    return true;
+  });
+  Object.defineProperty(document, 'execCommand', { configurable: true, value: executed });
+  const render = (id: number, markdown: string) => root.render(<CanvasEditor ref={handle} language="en" documentId={id} initialDocument={markdownConversion.markdownToDocument(markdown)} onChange={() => {}} />);
+  try {
+    await act(async () => render(1, 'hello world'));
+    const editor = harness.editor!;
+    await act(async () => {
+      editor.view.dispatch(editor.state.tr.setSelection(TextSelection.create(editor.state.doc, 7, 12)));
+      editor.options.editorProps?.handleDOMEvents?.mousedown?.(editor.view, new MouseEvent('mousedown', { button: 2 }));
+      if (scenario === 'appended normalization') editor.view.dispatch(editor.state.tr.setSelection(TextSelection.create(editor.state.doc, 1)).insertText('`x`'));
+      if (scenario === 'deleted range') editor.view.dispatch(editor.state.tr.delete(7, 12));
+    });
+    if (scenario === 'appended normalization') expect(editor.getJSON().content?.[0].content?.[0].marks).toEqual([{ type: 'code' }]);
+    if (scenario === 'replaced file') await act(async () => render(2, 'a'));
+    const beforeAction = harness.editor!.getJSON();
+    await act(async () => handle.current!.runContextAction!('cut'));
+    expect(executed).toHaveBeenCalledWith('cut');
+    expect(harness.editor!.getJSON()).toEqual(beforeAction);
+  } finally {
+    if (originalExec) Object.defineProperty(document, 'execCommand', originalExec); else Reflect.deleteProperty(document, 'execCommand');
+    await act(async () => root.unmount());
+    host.remove();
     Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: false });
   }
 });

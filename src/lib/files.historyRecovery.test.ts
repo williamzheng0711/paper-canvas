@@ -124,6 +124,23 @@ describe.each([
     expect(read("recentFiles")).toEqual([latest, valid, older]);
   });
 
+  it("does not let a hidden file consume a slot or remove the oldest visible recent", async () => {
+    const visible = Array.from({ length: 12 }, (_, index) => ({ path: `/notes/${index}.md`, name: `${index}.md` }));
+    write("recentFiles", visible);
+    write("hiddenRecentFiles", [hidden.path]);
+    await rememberRecent(hidden);
+    expect(await loadRecent()).toEqual(visible);
+    expect(read("recentFiles")).toEqual(visible);
+  });
+
+  it("removes a renamed original even when its new path is permanently hidden", async () => {
+    write("recentFiles", [valid, older]);
+    write("hiddenRecentFiles", [hidden.path]);
+    await rememberRecent(hidden, valid.path);
+    expect(await loadRecent()).toEqual([older]);
+    expect(read("recentFiles")).toEqual([older]);
+  });
+
   it("replaces invalid hidden-path state while preserving the other recovered files", async () => {
     write("recentFiles", [valid, null, unnamed]);
     write("hiddenRecentFiles", {});

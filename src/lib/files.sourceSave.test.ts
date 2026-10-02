@@ -69,7 +69,7 @@ describe('saving Markdown source', () => {
 
     expect(mocks.writeMarkdown).toHaveBeenNthCalledWith(1, file.path, source);
     expect(mocks.writeMarkdown).toHaveBeenNthCalledWith(2, file.path, source);
-    expect(mocks.invoke.mock.calls.map(([command]) => command)).toEqual(['write_markdown_file', 'write_markdown_file']);
+    expect(mocks.invoke.mock.calls.map(([command]) => command).filter((command) => command !== 'validate_settings_file')).toEqual(['write_markdown_file', 'write_markdown_file']);
     expect(mocks.writeFile).not.toHaveBeenCalled();
     expect(mocks.mkdir).not.toHaveBeenCalled();
     expect(source).toContain(dataUrl);

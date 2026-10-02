@@ -126,6 +126,43 @@ describe('canvas and Markdown selection mapping', () => {
     expect(mapped.anchor).toEqual({ kind: 'text', path: [0], offset: requested - '```text\n'.length });
   });
 
+  it.each(['`', '~'])('maps long %s code fence boundaries with bounded parsing', (character) => {
+    const fence = character.repeat(32);
+    const markdown = `${fence}\ncontent\n${fence}\n\n${'Reading paragraph with several words.\n\n'.repeat(1000)}`;
+    const expected = markdownToDocument(markdown);
+    for (const closing of [false, true]) {
+      const requested = (closing ? markdown.indexOf(fence, fence.length) : 0) + 16;
+      const parse = vi.spyOn(markdownConversion, 'markdownToDocument');
+      try {
+        const mapped = markdownToDocumentWithSelection(markdown, requested);
+        expect(mapped.document).toEqual(expected);
+        expect(mapped.anchor).toEqual({ kind: 'text', path: [0], offset: closing ? 'content'.length : 0 });
+        expect(parse.mock.calls.length).toBeLessThanOrEqual(4);
+      } finally {
+        parse.mockRestore();
+      }
+    }
+  });
+
+  it('maps an empty fenced code block without inventing a language or selecting a neighboring paragraph', () => {
+    const fence = '`'.repeat(32);
+    const markdown = `${fence}\n${fence}\n\nFollowing paragraph.`;
+    for (const requested of [16, fence.length + 1 + 16]) {
+      const mapped = markdownToDocumentWithSelection(markdown, requested);
+      expect(mapped.document).toEqual(markdownToDocument(markdown));
+      expect(mapped.anchor).toEqual({ kind: 'text', path: [0], offset: 0 });
+    }
+  });
+
+  it('keeps an exact caret on fence-like text inside a longer code fence', () => {
+    const fence = '`'.repeat(32);
+    const markdown = `${fence}\nBefore\n\`\`\`text\nAfter\n${fence}`;
+    const requested = markdown.indexOf('```text') + 1;
+    const mapped = markdownToDocumentWithSelection(markdown, requested);
+    expect(mapped.document).toEqual(markdownToDocument(markdown));
+    expect(mapped.anchor).toEqual({ kind: 'text', path: [0], offset: requested - fence.length - 1 });
+  });
+
   it('handles escaped header pipes and inline marks when snapping a separator', () => {
     const markdown = '| A \\| B | **Title** |\n| ------------------------------ | ------------------------------ |\n| C | D |';
     const requested = markdown.lastIndexOf('------------------------------') + 15;

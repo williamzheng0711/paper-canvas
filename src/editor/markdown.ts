@@ -1269,13 +1269,25 @@ function toMdast(node: JSONContent): MdNode | null {
       };
     case "bulletList":
       return { type: "list", ordered: false, children: childNodes };
-    case "orderedList":
+    case "orderedList": {
+      const start = Number(node.attrs?.start ?? 1);
+      // CommonMark accepts only nonnegative markers with at most nine digits.
+      // Preserve the entire list as HTML when any emitted marker exceeds that
+      // range, rather than resetting its numbering or splitting off its items.
+      if (
+        !Number.isInteger(start) ||
+        start < 0 ||
+        start > 999999999 ||
+        start + (node.content?.length ?? 0) - 1 > 999999999
+      )
+        return { type: "html", value: tableToHtml(node) };
       return {
         type: "list",
         ordered: true,
-        start: Number(node.attrs?.start ?? 1),
+        start,
         children: childNodes,
       };
+    }
     case "listItem":
       return { type: "listItem", children: listItemChildren(childNodes) };
     case "taskList":

@@ -28,6 +28,10 @@ import {
 
 export type FormulaKind = "inline" | "block";
 
+function textareaValue(source: string): string {
+  return source.replace(/\r\n?/g, "\n");
+}
+
 export function formulaBoundaryTarget(
   selection: { from: number; to: number; nodeType: string } | null,
   key: "ArrowLeft" | "ArrowRight",
@@ -191,7 +195,10 @@ class FormulaNodeView {
     if (this.editing && this.source) {
       // Normal typing already updated the textarea. Only synchronize external
       // changes (including undo), preserving the caret and IME composition.
-      if (!this.sourceIsComposing && this.source.value !== this.latex) {
+      if (
+        !this.sourceIsComposing &&
+        this.source.value !== textareaValue(this.latex)
+      ) {
         const { selectionStart, selectionEnd } = this.source;
         this.source.value = this.latex;
         this.source.setSelectionRange(
@@ -318,9 +325,11 @@ class FormulaNodeView {
   }
 
   flushSource(): void {
-    if (!this.source || this.source.value === this.latex) return;
+    if (!this.source || this.source.value === textareaValue(this.latex)) return;
     this.updateLatex(this.source.value);
-    const preview = this.dom.querySelector<HTMLElement>(".formula-live-preview");
+    const preview = this.dom.querySelector<HTMLElement>(
+      ".formula-live-preview",
+    );
     if (preview) this.renderPreview(preview, this.source.value);
   }
 
@@ -387,12 +396,24 @@ class FormulaNodeView {
     this.source = source;
     this.sourceInput = () => this.handleSourceInput(source, preview);
     this.sourceKeyDown = (event) => this.handleSourceKeyDown(event, source);
+    let compositionValue: string | undefined;
+    let compositionLatex: string | undefined;
     this.sourceCompositionStart = () => {
+      compositionValue = source.value;
+      compositionLatex = this.latex;
       this.sourceIsComposing = true;
     };
     this.sourceCompositionEnd = () => {
       this.sourceIsComposing = false;
-      this.handleSourceInput(source, preview);
+      const changed =
+        compositionValue !== undefined && source.value !== compositionValue;
+      compositionValue = undefined;
+      if (changed) this.handleSourceInput(source, preview, true);
+      else if (compositionLatex !== undefined) {
+        this.updateLatex(compositionLatex);
+        this.renderPreview(preview, compositionLatex);
+      }
+      compositionLatex = undefined;
     };
     this.sourceBlur = (event) => {
       if (
@@ -446,8 +467,8 @@ class FormulaNodeView {
         ".formula-live-preview",
       );
       this.sourceIsComposing = false;
-      this.updateLatex(this.source.value);
-      if (preview) this.renderPreview(preview, this.source.value);
+      this.flushSource();
+      if (preview) this.renderPreview(preview, this.latex);
     }
     this.editing = false;
     this.dom.classList.remove("is-editing");
@@ -483,6 +504,7 @@ class FormulaNodeView {
   }
 
   private updateLatex(latex: string): void {
+    if (latex === this.latex) return;
     const position = this.position();
     if (position === null) return;
     this.view.dispatch(
@@ -527,8 +549,13 @@ class FormulaNodeView {
   private handleSourceInput(
     source: HTMLTextAreaElement,
     preview: HTMLElement,
+    completeUnchanged = false,
   ): void {
-    if (this.sourceIsComposing) return;
+    if (
+      this.sourceIsComposing ||
+      (!completeUnchanged && source.value === textareaValue(this.latex))
+    )
+      return;
     // Closing a separately typed $$ line completes multiline Markdown entry.
     if (
       this.kind === "block" &&
@@ -680,7 +707,25 @@ function createFormulaNode(
 
     addAttributes() {
       return {
-        latex: { default: "" },
+        latex: {
+          default: "",
+          parseHTML: (element: HTMLElement) => {
+            const encoded = element.getAttribute("data-latex-json");
+            if (encoded !== null) {
+              try {
+                const source: unknown = JSON.parse(encoded);
+                if (typeof source === "string") return source;
+              } catch {
+                /* Older or external HTML can use the plain attributes. */
+              }
+            }
+            return (
+              element.getAttribute("latex") ??
+              element.getAttribute("data-latex") ??
+              ""
+            );
+          },
+        },
         autoEdit: { default: false, rendered: false },
         sourceCaret: { default: null, rendered: false },
       };
@@ -700,6 +745,8 @@ function createFormulaNode(
         mergeAttributes(HTMLAttributes, {
           "data-formula-kind": kind,
           "data-latex": HTMLAttributes.latex,
+          // HTML parsers normalize literal CR/CRLF and NULs in attributes.
+          "data-latex-json": JSON.stringify(HTMLAttributes.latex ?? ""),
         }),
       ];
     },

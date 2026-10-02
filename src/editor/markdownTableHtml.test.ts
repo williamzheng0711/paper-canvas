@@ -376,7 +376,7 @@ describe("rich table HTML source preservation", () => {
     expect(documentToMarkdown(reopened)).toBe(markdown);
     expect(
       nodesOfType(copiedHtml(table), "inlineFormula")[0].attrs?.latex,
-    ).toBe(latex.replace(/\r\n/g, "\n"));
+    ).toBe(latex);
   });
 
   it("retains nested tables, alignment, image links and sizes in the safe HTML fallback", () => {

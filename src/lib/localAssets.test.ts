@@ -49,6 +49,21 @@ describe("local Markdown resource paths", () => {
     ).toEqual({ path: "D:\\images\\figure.png", suffix: "" });
   });
 
+  it.each([
+    ["\\\\server\\share", "..\\image.png", "\\\\server\\share\\image.png"],
+    ["\\\\server\\share\\notes", "..\\..\\..\\image.png", "\\\\server\\share\\image.png"],
+    ["\\\\server\\share\\notes", "../images/My%20figure.png#view", "\\\\server\\share\\images\\My figure.png"],
+    ["D:\\notes", "\\image.png", "D:\\image.png"],
+    ["D:\\notes", "/../image.png", "D:\\image.png"],
+    ["\\\\server\\share\\notes", "\\image.png", "\\\\server\\share\\image.png"],
+    ["\\\\server\\share\\notes", "/../image.png", "\\\\server\\share\\image.png"],
+    ["D:\\notes", "\\\\other\\share\\..\\image.png", "\\\\other\\share\\image.png"],
+    ["\\\\server\\share\\notes", "//other/share/images/../image.png", "\\\\other\\share\\image.png"],
+    ["\\\\server\\share\\notes", "E:/images/image.png", "E:\\images\\image.png"],
+  ])("preserves Windows drive and network share roots for %s + %s", (base, source, path) => {
+    expect(localAssetPath(base, source)).toEqual({ path, suffix: source.includes("#") ? "#view" : "" });
+  });
+
   it("retains literal backslashes in POSIX directory and image names", () => {
     expect(localAssetPath("/notes/Folder\\", "image%5Cname.png")).toEqual({ path: "/notes/Folder\\/image\\name.png", suffix: "" });
     expect(localAssetPath("/notes", "%5Cleading.png")).toEqual({ path: "/notes/\\leading.png", suffix: "" });

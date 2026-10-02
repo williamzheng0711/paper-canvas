@@ -179,13 +179,25 @@ export function sanitizePastedHtml(html: string): string {
       "latex",
       "data-formula-kind",
       "data-latex",
+      "data-latex-json",
     ],
     ALLOW_DATA_ATTR: false,
     ADD_URI_SAFE_ATTR: ["data-image-original-src"],
+    RETURN_DOM_FRAGMENT: true,
   });
-  if (!sanitized.includes("data-papercanvas-task-marker")) return sanitized;
   const template = document.createElement("template");
-  template.innerHTML = sanitized;
+  template.content.append(sanitized);
+  // Preserve formula source before another HTML serialization/parsing pass
+  // normalizes the line endings of raw source attributes.
+  template.content
+    .querySelectorAll<HTMLElement>("[data-formula-kind]")
+    .forEach((formula) => {
+      if (formula.hasAttribute("data-latex-json")) return;
+      const source =
+        formula.getAttribute("latex") ?? formula.getAttribute("data-latex");
+      if (source !== null)
+        formula.setAttribute("data-latex-json", JSON.stringify(source));
+    });
   // Rich-table source carries a readable checkbox for HTML previews. Native
   // task nodes already render their own checkbox when that source is pasted.
   template.content
