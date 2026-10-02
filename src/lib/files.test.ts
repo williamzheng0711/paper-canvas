@@ -16,7 +16,7 @@ import {
 } from './files';
 
 describe('preferences', () => {
-  it('adds default line spacing to legacy preferences and normalizes invalid stored values', async () => {
+  it('applies Compact defaults to legacy preferences and normalizes customized spacing afterward', async () => {
     localStorage.setItem(
       'preferences',
       JSON.stringify({
@@ -27,10 +27,10 @@ describe('preferences', () => {
       }),
     );
     await expect(loadPreferences()).resolves.toEqual(
-      expect.objectContaining({ theme: 'dark', lineSpacing: 1.78, recentFilesExpanded: true }),
+      expect.objectContaining({ theme: 'dark', fontSize: 15, lineSpacing: 1.62, recentFilesExpanded: true }),
     );
 
-    localStorage.setItem('preferences', JSON.stringify({ lineSpacing: 9, recentFilesExpanded: false }));
+    localStorage.setItem('preferences', JSON.stringify({ compactLayoutVersion: 1, lineSpacing: 9, recentFilesExpanded: false }));
     await expect(loadPreferences()).resolves.toEqual(
       expect.objectContaining({ lineSpacing: 3, recentFilesExpanded: false }),
     );

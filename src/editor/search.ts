@@ -1,10 +1,19 @@
-import { Extension, type Editor, type JSONContent } from '@tiptap/core';
-import type { Node as ProseMirrorNode } from '@tiptap/pm/model';
-import { Plugin, PluginKey, TextSelection } from '@tiptap/pm/state';
-import { Decoration, DecorationSet } from '@tiptap/pm/view';
-import type { DocumentSelectionAnchor, MarkdownSelection } from './selectionMapping';
+import { Extension, type Editor, type JSONContent } from "@tiptap/core";
+import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
+import {
+  NodeSelection,
+  Plugin,
+  PluginKey,
+  TextSelection,
+} from "@tiptap/pm/state";
+import { Decoration, DecorationSet } from "@tiptap/pm/view";
+import { htmlPreviewText } from "./HtmlPreview";
+import type {
+  DocumentSelectionAnchor,
+  MarkdownSelection,
+} from "./selectionMapping";
 
-export type SearchDirection = 'reset' | 'next' | 'previous' | 'refresh';
+export type SearchDirection = "reset" | "next" | "previous" | "refresh";
 
 export type SearchMatch = {
   from: number;
@@ -23,7 +32,7 @@ export type SearchableEditorHandle = {
   getSelectedText: () => string;
 };
 
-export type ContextMenuAction = 'cut' | 'copy' | 'paste' | 'selectAll';
+export type ContextMenuAction = "cut" | "copy" | "paste" | "selectAll";
 
 export type SwitchableEditorHandle = SearchableEditorHandle & {
   /** Canvas-only: read the current document without publishing a change. */
@@ -56,16 +65,18 @@ type DocumentSearchState = {
   decorations: DecorationSet;
 };
 
-type SearchMeta = Pick<DocumentSearchState, 'query' | 'matches' | 'active'>;
+type SearchMeta = Pick<DocumentSearchState, "query" | "matches" | "active">;
 
-export const documentSearchPluginKey = new PluginKey<DocumentSearchState>('documentSearch');
+export const documentSearchPluginKey = new PluginKey<DocumentSearchState>(
+  "documentSearch",
+);
 
 /** Find non-overlapping, case-insensitive matches using string offsets. */
 export function findTextMatches(text: string, query: string): SearchMatch[] {
   if (!query) return [];
   const matches: SearchMatch[] = [];
-  const escapedQuery = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const pattern = new RegExp(escapedQuery, 'giu');
+  const escapedQuery = query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const pattern = new RegExp(escapedQuery, "giu");
   let match: RegExpExecArray | null;
 
   while ((match = pattern.exec(text))) {
@@ -75,13 +86,39 @@ export function findTextMatches(text: string, query: string): SearchMatch[] {
   return matches;
 }
 
-function collectTextSegments(document: ProseMirrorNode): Array<{ from: number; text: string }> {
-  const segments: Array<{ from: number; text: string }> = [];
+type TextSegment = { from: number; to?: number; text: string };
+
+// ProseMirror nodes are immutable: edits create a new identity, while search
+// navigation reuses the sanitized text for unchanged HTML atoms.
+const htmlTextCache = new WeakMap<ProseMirrorNode, string>();
+
+function collectTextSegments(document: ProseMirrorNode): TextSegment[] {
+  const segments: TextSegment[] = [];
 
   document.descendants((node, position) => {
+    if (
+      node.type.name === "htmlPreview" ||
+      node.type.name === "inlineHtmlPreview"
+    ) {
+      let text = htmlTextCache.get(node);
+      if (text === undefined) {
+        text = htmlPreviewText(
+          String(node.attrs.source ?? ""),
+          node.isInline ? "inline" : "block",
+        );
+        htmlTextCache.set(node, text);
+      }
+      if (text)
+        segments.push({ from: position, to: position + node.nodeSize, text });
+      return false;
+    }
     if (!node.isText || !node.text) return;
     const previous = segments.at(-1);
-    if (previous && previous.from + previous.text.length === position) {
+    if (
+      previous &&
+      previous.to === undefined &&
+      previous.from + previous.text.length === position
+    ) {
       previous.text += node.text;
       return;
     }
@@ -91,29 +128,53 @@ function collectTextSegments(document: ProseMirrorNode): Array<{ from: number; t
   return segments;
 }
 
-export function findDocumentMatches(document: ProseMirrorNode, query: string): SearchMatch[] {
+export function findDocumentMatches(
+  document: ProseMirrorNode,
+  query: string,
+): SearchMatch[] {
+  if (!query) return [];
   return collectTextSegments(document).flatMap((segment) =>
     findTextMatches(segment.text, query).map((match) => ({
-      from: segment.from + match.from,
-      to: segment.from + match.to,
+      from: segment.to === undefined ? segment.from + match.from : segment.from,
+      to: segment.to ?? segment.from + match.to,
     })),
   );
 }
 
-function buildDecorations(document: ProseMirrorNode, matches: SearchMatch[], active: number): DecorationSet {
+function buildDecorations(
+  document: ProseMirrorNode,
+  matches: SearchMatch[],
+  active: number,
+): DecorationSet {
+  const ranges = new Map<string, { match: SearchMatch; active: boolean }>();
+  matches.forEach((match, index) => {
+    const key = `${match.from}:${match.to}`;
+    const previous = ranges.get(key);
+    ranges.set(key, {
+      match,
+      active: index === active || Boolean(previous?.active),
+    });
+  });
   return DecorationSet.create(
     document,
-    matches.map((match, index) =>
-      Decoration.inline(match.from, match.to, {
-        class: index === active ? 'document-search-match document-search-match--active' : 'document-search-match',
-      }),
-    ),
+    Array.from(ranges.values(), ({ match, active: isActive }) => {
+      const attributes = {
+        class: isActive
+          ? "document-search-match document-search-match--active"
+          : "document-search-match",
+      };
+      return document.nodeAt(match.from)?.type.name === "htmlPreview"
+        ? Decoration.node(match.from, match.to, attributes)
+        : Decoration.inline(match.from, match.to, attributes);
+    }),
   );
 }
 
 function closestMatch(matches: SearchMatch[], position: number): number {
   if (matches.length === 0) return -1;
-  const following = matches.findIndex((match) => match.from >= position || match.to > position);
+  const following = matches.findIndex(
+    (match) => match.from >= position || match.to > position,
+  );
   return following >= 0 ? following : 0;
 }
 
@@ -126,13 +187,20 @@ export function resolveActiveMatch(
   position: number,
 ): number {
   if (matches.length === 0) return -1;
-  if (query === previousQuery && previousActive >= 0 && previousActive < matches.length) {
-    if (direction === 'next') return (previousActive + 1) % matches.length;
-    if (direction === 'previous') return (previousActive - 1 + matches.length) % matches.length;
+  if (
+    query === previousQuery &&
+    previousActive >= 0 &&
+    previousActive < matches.length
+  ) {
+    if (direction === "next") return (previousActive + 1) % matches.length;
+    if (direction === "previous")
+      return (previousActive - 1 + matches.length) % matches.length;
+    if (direction === "refresh" && matches[previousActive].from === position)
+      return previousActive;
   }
 
   const closest = closestMatch(matches, position);
-  if (direction !== 'previous') return closest;
+  if (direction !== "previous") return closest;
   if (matches[closest]?.from < position) return closest;
   return (closest - 1 + matches.length) % matches.length;
 }
@@ -142,25 +210,50 @@ function createDocumentSearchPlugin(): Plugin<DocumentSearchState> {
     key: documentSearchPluginKey,
     state: {
       init: () => ({
-        query: '',
+        query: "",
         matches: [],
         active: -1,
         decorations: DecorationSet.empty,
       }),
       apply: (transaction, current) => {
-        const meta = transaction.getMeta(documentSearchPluginKey) as SearchMeta | undefined;
+        const meta = transaction.getMeta(documentSearchPluginKey) as
+          SearchMeta | undefined;
         if (meta) {
           return {
             ...meta,
-            decorations: buildDecorations(transaction.doc, meta.matches, meta.active),
+            decorations: buildDecorations(
+              transaction.doc,
+              meta.matches,
+              meta.active,
+            ),
           };
         }
         if (!transaction.docChanged || !current.query) return current;
 
         const matches = findDocumentMatches(transaction.doc, current.query);
-        const previousPosition = current.matches[current.active]?.from ?? transaction.selection.from;
+        const previousMatch = current.matches[current.active];
+        const previousPosition =
+          previousMatch?.from ?? transaction.selection.from;
         const mappedPosition = transaction.mapping.map(previousPosition);
-        const active = closestMatch(matches, mappedPosition);
+        let active = closestMatch(matches, mappedPosition);
+        if (previousMatch) {
+          const mappedEnd = transaction.mapping.map(previousMatch.to, -1);
+          const occurrence = current.matches
+            .slice(0, current.active)
+            .filter(
+              (match) =>
+                match.from === previousMatch.from &&
+                match.to === previousMatch.to,
+            ).length;
+          const matchingIndices = matches.flatMap((match, index) =>
+            match.from === mappedPosition && match.to === mappedEnd
+              ? [index]
+              : [],
+          );
+          active =
+            matchingIndices[Math.min(occurrence, matchingIndices.length - 1)] ??
+            active;
+        }
         return {
           query: current.query,
           matches,
@@ -170,26 +263,32 @@ function createDocumentSearchPlugin(): Plugin<DocumentSearchState> {
       },
     },
     props: {
-      decorations: (state) => documentSearchPluginKey.getState(state)?.decorations ?? DecorationSet.empty,
+      decorations: (state) =>
+        documentSearchPluginKey.getState(state)?.decorations ??
+        DecorationSet.empty,
     },
   });
 }
 
 export const DocumentSearch = Extension.create({
-  name: 'documentSearch',
+  name: "documentSearch",
   addProseMirrorPlugins() {
     return [createDocumentSearchPlugin()];
   },
 });
 
-export function searchDocument(editor: Editor, query: string, direction: SearchDirection): SearchResult {
+export function searchDocument(
+  editor: Editor,
+  query: string,
+  direction: SearchDirection,
+): SearchResult {
   const previous = documentSearchPluginKey.getState(editor.state);
   const matches = findDocumentMatches(editor.state.doc, query);
   const active = resolveActiveMatch(
     matches,
     query,
     direction,
-    previous?.query ?? '',
+    previous?.query ?? "",
     previous?.active ?? -1,
     editor.state.selection.from,
   );
@@ -199,18 +298,20 @@ export function searchDocument(editor: Editor, query: string, direction: SearchD
     active,
   } satisfies SearchMeta);
 
-  if (active >= 0 && direction !== 'refresh') {
+  if (active >= 0 && direction !== "refresh") {
     const match = matches[active];
-    transaction = transaction
-      .setSelection(TextSelection.create(transaction.doc, match.from, match.to))
-      .scrollIntoView();
+    const selection =
+      transaction.doc.nodeAt(match.from)?.type.name === "htmlPreview"
+        ? NodeSelection.create(transaction.doc, match.from)
+        : TextSelection.create(transaction.doc, match.from, match.to);
+    transaction = transaction.setSelection(selection).scrollIntoView();
   }
   editor.view.dispatch(transaction);
 
-  if (active >= 0 && direction !== 'refresh') {
+  if (active >= 0 && direction !== "refresh") {
     editor.view.dom
-      .querySelector<HTMLElement>('.document-search-match--active')
-      ?.scrollIntoView?.({ block: 'center', inline: 'nearest' });
+      .querySelector<HTMLElement>(".document-search-match--active")
+      ?.scrollIntoView?.({ block: "center", inline: "nearest" });
   }
 
   return { current: active + 1, total: matches.length };
@@ -219,7 +320,7 @@ export function searchDocument(editor: Editor, query: string, direction: SearchD
 export function clearDocumentSearch(editor: Editor): void {
   editor.view.dispatch(
     editor.state.tr.setMeta(documentSearchPluginKey, {
-      query: '',
+      query: "",
       matches: [],
       active: -1,
     } satisfies SearchMeta),
@@ -228,5 +329,5 @@ export function clearDocumentSearch(editor: Editor): void {
 
 export function getSelectedDocumentText(editor: Editor): string {
   const { from, to, empty } = editor.state.selection;
-  return empty ? '' : editor.state.doc.textBetween(from, to, ' ');
+  return empty ? "" : editor.state.doc.textBetween(from, to, " ");
 }

@@ -15,7 +15,9 @@ import {
   type MarkdownComment,
 } from './editor/comments';
 import { documentsEqual } from './editor/documentSync';
-import { collectOutline, markdownToDocument } from './editor/markdown';
+import { markdownToDocument } from './editor/markdown';
+import { collectOutline } from './editor/outline';
+import { imagePathSourceChanges, mapImagePathComments, renameMarkdownImageAssets } from './editor/markdownAssetReferences';
 import { captureViewport, restoreViewport, type ViewportSnapshot } from './editor/modeTransition';
 import type { SearchDirection, SearchResult, SwitchableEditorHandle } from './editor/search';
 import { markdownToDocumentWithSelection, type DocumentSelectionAnchor } from './editor/selectionMapping';
@@ -36,9 +38,11 @@ import {
   newEditorFile,
   openMarkdownFile,
   openRecent,
+  rebaseEditorFileAssets,
   removeRecentFile,
   revealFileInFolder,
   renameEditorFile,
+  renameDocumentAssetReferences,
   saveEditorFile,
   saveDraft,
   savePreferences,
@@ -64,6 +68,17 @@ type PendingModeTransition = {
 
 const emptyComments: readonly MarkdownComment[] = [];
 
+function ToolbarIcon({ name }: { name: 'sidebar' | 'search' | 'comments' | 'more' | 'theme' }) {
+  const paths = {
+    sidebar: <><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M9 4v16" /></>,
+    search: <><circle cx="10.5" cy="10.5" r="6.5" /><path d="m16 16 5 5" /></>,
+    comments: <path d="M21 15a2 2 0 0 1-2 2H8l-5 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />,
+    more: <><circle cx="5" cy="12" r="1" /><circle cx="12" cy="12" r="1" /><circle cx="19" cy="12" r="1" /></>,
+    theme: <><circle cx="12" cy="12" r="9" /><path d="M12 3v18a9 9 0 0 0 0-18Z" fill="currentColor" stroke="none" /></>,
+  };
+  return <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name]}</svg>;
+}
+
 function documentMetrics(document: JSONContent): {
   characters: number;
   words: number;
@@ -88,17 +103,19 @@ function documentMetrics(document: JSONContent): {
 function documentStateFromMarkdown(
   markdown: string,
   path?: string,
+  parsedDocument?: JSONContent,
 ): {
   document: JSONContent;
   comments: MarkdownComment[];
   warning?: string;
 } {
   const parsed = parseMarkdownComments(markdown);
-  const document = hydrateDocumentAssets(markdownToDocument(parsed.body), path);
-  const canonicalMarkdown = documentToPortableMarkdown(document);
+  const document = hydrateDocumentAssets(parsedDocument ?? markdownToDocument(parsed.body), path);
   return {
     document,
-    comments: relocateMarkdownComments(parsed.comments, parsed.body, canonicalMarkdown),
+    comments: parsed.comments.length > 0
+      ? relocateMarkdownComments(parsed.comments, parsed.body, documentToPortableMarkdown(document))
+      : [],
     ...(parsed.status === 'invalid' || parsed.status === 'unknown-version'
       ? { warning: getMessages().commentDataWarning }
       : {}),
@@ -113,6 +130,7 @@ export default function App() {
   const [saveStatus, setSaveStatus] = useState<SaveStatus>('saved');
   const [message, setMessage] = useState(() => getMessages().localOnly);
   const [recent, setRecent] = useState<RecentFile[]>([]);
+  const [sidebarTab, setSidebarTab] = useState<'outline' | 'recent'>('outline');
   const [recentContextMenu, setRecentContextMenu] = useState<RecentContextMenu | null>(null);
   const [canvasContextMenu, setCanvasContextMenu] = useState<CanvasContextMenu | null>(null);
   const [outlineTarget, setOutlineTarget] = useState<{
@@ -122,6 +140,7 @@ export default function App() {
   const [sourceMode, setSourceMode] = useState(false);
   const [modeTransitioning, setModeTransitioning] = useState(false);
   const [rawMarkdownRevision, setRawMarkdownRevision] = useState(0);
+  const rawMarkdownChangesRef = useRef<ReturnType<typeof imagePathSourceChanges>>(undefined);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResult, setSearchResult] = useState<SearchResult>({
@@ -135,16 +154,18 @@ export default function App() {
   const [preferences, setPreferences] = useState<AppPreferences>({
     theme: 'light',
     font: 'system',
-    fontSize: 18,
-    lineSpacing: 1.78,
+    fontSize: 15,
+    lineSpacing: 1.62,
     sidebarOpen: true,
     recentFilesExpanded: true,
     language: 'zh-Hant',
   });
   const text = getMessages(preferences.language);
-  const [fontSizeInput, setFontSizeInput] = useState('18');
-  const [lineSpacingInput, setLineSpacingInput] = useState('1.78');
-  const saving = useRef(false);
+  const [fontSizeInput, setFontSizeInput] = useState('15');
+  const [lineSpacingInput, setLineSpacingInput] = useState('1.62');
+  const pendingSave = useRef<Promise<boolean> | undefined>(undefined);
+  const pendingSaveSession = useRef<number | undefined>(undefined);
+  const fileOperationQueue = useRef<Promise<void>>(Promise.resolve());
   const preferencesLoaded = useRef(false);
   const fileRef = useRef(file);
   const dirtyRef = useRef(dirty);
@@ -161,6 +182,9 @@ export default function App() {
   } | undefined>(undefined);
   const recentExternalOpen = useRef(new Map<string, number>());
   const exportMenu = useRef<HTMLDetailsElement>(null);
+  const documentActionsMenu = useRef<HTMLDetailsElement>(null);
+  const readingSettingsMenu = useRef<HTMLDetailsElement>(null);
+  const sidebarTabs = useRef<HTMLDivElement>(null);
   const searchInput = useRef<HTMLInputElement>(null);
   const canvasSearch = useRef<SwitchableEditorHandle>(null);
   const markdownSearch = useRef<SwitchableEditorHandle>(null);
@@ -170,6 +194,7 @@ export default function App() {
   const sourceCommentSyncTimerRef = useRef<number | undefined>(undefined);
   const revisionSyncTimerRef = useRef<number | undefined>(undefined);
   const outlineRequest = useRef(0);
+  const openRequest = useRef(0);
   const pdfExportingRef = useRef(false);
   const commentHistory = useRef<{
     undo: MarkdownComment[][];
@@ -179,7 +204,47 @@ export default function App() {
   dirtyRef.current = dirty;
   sourceModeRef.current = sourceMode;
 
-  const setExternalRawMarkdown = useCallback((value: string) => {
+  const closeToolbarMenus = useCallback(() => {
+    if (documentActionsMenu.current) documentActionsMenu.current.open = false;
+    if (readingSettingsMenu.current) readingSettingsMenu.current.open = false;
+    if (exportMenu.current) exportMenu.current.open = false;
+  }, []);
+
+  useEffect(() => {
+    const closeOutside = (event: PointerEvent) => {
+      if (!(event.target instanceof Node)) return;
+      for (const menu of [documentActionsMenu.current, readingSettingsMenu.current]) {
+        if (menu?.open && !menu.contains(event.target)) {
+          menu.open = false;
+          if (menu === documentActionsMenu.current && exportMenu.current) exportMenu.current.open = false;
+        }
+      }
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      const openMenu = [documentActionsMenu.current, readingSettingsMenu.current].find((menu) => menu?.open);
+      if (!openMenu) return;
+      event.preventDefault();
+      event.stopPropagation();
+      closeToolbarMenus();
+      openMenu.querySelector('summary')?.focus();
+    };
+    document.addEventListener('pointerdown', closeOutside);
+    document.addEventListener('keydown', closeOnEscape);
+    return () => {
+      document.removeEventListener('pointerdown', closeOutside);
+      document.removeEventListener('keydown', closeOnEscape);
+    };
+  }, [closeToolbarMenus]);
+
+  const setExternalRawMarkdown = useCallback((value: string, imagePaths?: {
+    oldPath: string;
+    newPath: string;
+    operation?: 'rebase' | 'rename';
+  }) => {
+    rawMarkdownChangesRef.current = imagePaths
+      ? imagePathSourceChanges(rawMarkdownRef.current, value, imagePaths.oldPath, imagePaths.newPath, imagePaths.operation)
+      : undefined;
     rawMarkdownRef.current = value;
     setRawMarkdownRevision((revision) => revision + 1);
   }, []);
@@ -241,22 +306,34 @@ export default function App() {
   const setComments = useCallback(
     (nextComments: readonly MarkdownComment[], options: { recordHistory?: boolean; markEdited?: boolean } = {}) => {
       const currentRawComments = sourceModeRef.current ? parseMarkdownComments(rawMarkdownRef.current) : undefined;
-      const currentComments =
-        currentRawComments?.status === 'valid' ? currentRawComments.comments : fileRef.current.comments ?? [];
-      const next = cloneComments(nextComments);
+      const sourceState = sourceModeRef.current
+        ? documentStateFromMarkdown(rawMarkdownRef.current, fileRef.current.path)
+        : undefined;
+      const currentComments = sourceState?.comments ?? fileRef.current.comments ?? [];
+      const next = cloneComments(nextComments.map((comment) => {
+        const relocated = sourceState?.comments.find((item) => item.id === comment.id);
+        return relocated ? { ...relocated, content: comment.content } : comment;
+      }));
       if (JSON.stringify(currentComments) === JSON.stringify(next)) return;
       if (options.recordHistory !== false) {
         commentHistory.current.undo.push(cloneComments(currentComments));
         commentHistory.current.redo = [];
       }
-      const nextFile = { ...fileRef.current, comments: next };
+      const nextFile = {
+        ...fileRef.current,
+        ...(sourceState ? { document: sourceState.document } : {}),
+        comments: next,
+        sourceMarkdown: undefined,
+      };
+      if (sourceState && !documentsEqual(fileRef.current.document, sourceState.document)) setDocumentId((id) => id + 1);
       fileRef.current = nextFile;
       setFile(nextFile);
       if (sourceModeRef.current) {
         clearSourceCommentSync();
         const parsed = currentRawComments ?? parseMarkdownComments(rawMarkdownRef.current);
         const body = parsed.status === 'valid' ? parsed.body : rawMarkdownRef.current;
-        const nextMarkdown = serializeMarkdownWithComments(body, next);
+        const rawComments = relocateMarkdownComments(next, documentToPortableMarkdown(nextFile.document), body);
+        const nextMarkdown = serializeMarkdownWithComments(body, rawComments);
         setExternalRawMarkdown(nextMarkdown);
       }
       if (options.markEdited !== false) markEdited();
@@ -324,10 +401,18 @@ export default function App() {
 
   const locateComment = useCallback((comment: MarkdownComment) => {
     setActiveCommentId(comment.id);
+    let located = comment;
+    if (sourceModeRef.current) {
+      const parsed = parseMarkdownComments(rawMarkdownRef.current);
+      located = relocateMarkdownComments(parsed.comments, parsed.body, parsed.body)
+        .find((item) => item.id === comment.id) ?? relocateMarkdownComments(
+          [comment], documentToPortableMarkdown(fileRef.current.document), parsed.body,
+        )[0];
+    }
     const range =
-      comment.target.kind === 'position'
-        ? { from: comment.target.offset, to: comment.target.offset }
-        : { from: comment.target.from, to: comment.target.to };
+      located.target.kind === 'position'
+        ? { from: located.target.offset, to: located.target.offset }
+        : { from: located.target.from, to: located.target.to };
     const editor = sourceModeRef.current ? markdownSearch.current : canvasSearch.current;
     editor?.setMarkdownSelection?.(range);
   }, []);
@@ -450,11 +535,21 @@ export default function App() {
 
   const loadFile = useCallback(
     (nextFile: EditorFile) => {
+      pendingModeTransition.current = undefined;
+      if (modeTransitionFrame.current !== undefined) cancelAnimationFrame(modeTransitionFrame.current);
+      modeTransitionFrame.current = undefined;
+      setModeTransitioning(false);
       clearSourceCommentSync();
       if (nextFile.path) void clearDraft();
       const normalizedFile = { ...nextFile, comments: nextFile.comments ?? [] };
       fileRef.current = normalizedFile;
       setFile(normalizedFile);
+      const recentPanel = sidebarTabs.current?.parentElement?.querySelector('#recent-panel');
+      if (recentPanel?.contains(document.activeElement)) {
+        sidebarTabs.current?.querySelector<HTMLButtonElement>('[aria-controls="outline-panel"]')?.focus();
+      }
+      setSidebarTab('outline');
+      closeToolbarMenus();
       setDocumentId((id) => id + 1);
       documentSessionRef.current += 1;
       advanceRevision();
@@ -464,19 +559,19 @@ export default function App() {
       setSaveStatus('saved');
       sourceModeRef.current = false;
       setSourceMode(false);
+      setOutlineTarget(undefined);
       setNewCommentTarget(null);
       setActiveCommentId(undefined);
       setCommentsPanelOpen(normalizedFile.comments.length > 0);
       setMessage(normalizedFile.commentWarning ?? getMessages().openedFile(normalizedFile.name));
     },
-    [advanceRevision, clearSourceCommentSync, resetCommentHistory],
+    [advanceRevision, clearSourceCommentSync, closeToolbarMenus, resetCommentHistory],
   );
 
   const replaceWithOpenedFile = useCallback(
     async (nextFile: EditorFile) => {
       if (
         dirtyRef.current &&
-        fileRef.current.path !== nextFile.path &&
         !window.confirm(getMessages().confirmDiscardAndOpen)
       ) {
         return false;
@@ -495,92 +590,140 @@ export default function App() {
       const now = Date.now();
       if (now - (recentExternalOpen.current.get(path) ?? 0) < 2_000) return;
       recentExternalOpen.current.set(path, now);
+      const request = ++openRequest.current;
       // A file open from Finder/Explorer takes precedence over a recovered
       // unnamed draft if both asynchronous startup paths complete together.
       openedByOperatingSystem.current = true;
 
       try {
         const nextFile = await openMarkdownFile(path);
+        if (request !== openRequest.current) return;
         const replaced = await replaceWithOpenedFile(nextFile);
         if (replaced) setRecent(await loadRecent());
       } catch (error) {
-        setMessage(error instanceof Error ? error.message : getMessages().externalOpenFailed);
+        if (request === openRequest.current) {
+          setMessage(error instanceof Error ? error.message : getMessages().externalOpenFailed);
+        }
       }
     },
     [replaceWithOpenedFile],
   );
 
-  const saveCurrent = useCallback(async (forceSaveAs = false) => {
-    if (saving.current) return;
+  const queueFileOperation = useCallback((operation: () => Promise<void>) => {
+    const result = fileOperationQueue.current.then(operation);
+    fileOperationQueue.current = result.catch(() => undefined);
+    return result;
+  }, []);
+
+  const saveCurrent = useCallback((forceSaveAs = false): Promise<boolean> => {
+    const saveSession = documentSessionRef.current;
+    if (!forceSaveAs && pendingSave.current && pendingSaveSession.current === saveSession) return pendingSave.current;
     if (sourceModeRef.current) clearSourceCommentSync();
     else flushCanvasChanges();
-    saving.current = true;
     setSaveStatus('saving');
-    const saveSession = documentSessionRef.current;
-    try {
-      let shouldSaveAs = forceSaveAs;
-      while (documentSessionRef.current === saveSession) {
-        const revision = editRevisionRef.current;
-        const editingSource = sourceModeRef.current;
-        const sourceState = editingSource
-          ? documentStateFromMarkdown(rawMarkdownRef.current, fileRef.current.path)
-          : undefined;
-        const candidate = editingSource
-          ? {
+    let succeeded = false;
+    const operation = queueFileOperation(async () => {
+      try {
+        let shouldSaveAs = forceSaveAs;
+        while (documentSessionRef.current === saveSession) {
+          if (!sourceModeRef.current) flushCanvasChanges();
+          const revision = editRevisionRef.current;
+          const editingSource = sourceModeRef.current;
+          const sourceState = editingSource
+            ? documentStateFromMarkdown(rawMarkdownRef.current, fileRef.current.path)
+            : undefined;
+          const candidate = editingSource
+            ? {
+                ...fileRef.current,
+                document: sourceState!.document,
+                comments: sourceState!.comments,
+                sourceMarkdown: rawMarkdownRef.current,
+              }
+            : fileRef.current;
+          const saved = editingSource
+            ? await saveEditorFile(candidate, shouldSaveAs, rawMarkdownRef.current)
+            : await saveEditorFile(candidate, shouldSaveAs);
+          shouldSaveAs = false;
+
+          if (documentSessionRef.current !== saveSession) return;
+          if (!sourceModeRef.current) flushCanvasChanges();
+          if (editRevisionRef.current !== revision) {
+            // Keep edits made during the write. Save As must also resolve their
+            // image paths from the original directory before adopting its path.
+            const liveFile = fileRef.current;
+            let latest: EditorFile = {
               ...fileRef.current,
-              document: sourceState!.document,
-              comments: sourceState!.comments,
+              path: saved.path,
+              name: saved.name,
+            };
+            if (candidate.path && saved.path && candidate.path !== saved.path) {
+              const current = sourceModeRef.current
+                ? { ...liveFile, ...documentStateFromMarkdown(rawMarkdownRef.current, candidate.path), sourceMarkdown: rawMarkdownRef.current }
+                : liveFile;
+              latest = rebaseEditorFileAssets(current, candidate.path, saved.path);
+              if (sourceModeRef.current && latest.sourceMarkdown !== undefined && latest.sourceMarkdown !== rawMarkdownRef.current) {
+                setExternalRawMarkdown(latest.sourceMarkdown, { oldPath: candidate.path, newPath: saved.path });
+              }
+              if (!documentsEqual(liveFile.document, latest.document)) setDocumentId((id) => id + 1);
             }
-          : fileRef.current;
-        const saved = editingSource
-          ? await saveEditorFile(candidate, shouldSaveAs, rawMarkdownRef.current)
-          : await saveEditorFile(candidate, shouldSaveAs);
-        shouldSaveAs = false;
+            fileRef.current = latest;
+            setFile(latest);
+            setSaveStatus('saving');
+            continue;
+          }
 
-        if (documentSessionRef.current !== saveSession) return;
-        if (editRevisionRef.current !== revision) {
-          // Keep edits made while the asynchronous write was in flight. If
-          // this was Save As, carry the new path into the next save pass.
-          const latest = {
-            ...fileRef.current,
-            path: saved.path,
-            name: saved.name,
-          };
-          fileRef.current = latest;
-          setFile(latest);
-          setSaveStatus('saving');
-          continue;
+          // In Markdown mode the visible source can be newer than the hidden
+          // canvas. Compare against the document currently held by the canvas,
+          // not only against the parsed save candidate, so it is refreshed before
+          // the next mode switch.
+          const canvasDocumentChanged = !documentsEqual(fileRef.current.document, saved.document);
+          fileRef.current = saved;
+          setFile(saved);
+          if (canvasDocumentChanged) {
+            setDocumentId((id) => id + 1);
+          }
+          // Save As rebases relative image paths. Publish that exact saved source
+          // through the editor's external update without creating a user edit.
+          if (candidate.path !== saved.path && sourceModeRef.current && saved.sourceMarkdown !== undefined && saved.sourceMarkdown !== rawMarkdownRef.current) {
+            setExternalRawMarkdown(saved.sourceMarkdown, candidate.path && saved.path
+              ? { oldPath: candidate.path, newPath: saved.path }
+              : undefined);
+          }
+          dirtyRef.current = false;
+          setDirty(false);
+          setSaveStatus('saved');
+          setMessage(getMessages().savedFile(saved.name));
+          await clearDraft();
+          const recentFiles = await loadRecent();
+          if (documentSessionRef.current !== saveSession) return;
+          setRecent(recentFiles);
+          // Edits can arrive while updating recovery/recent-file metadata too.
+          // A coalesced autosave must still write that newer revision.
+          if (editRevisionRef.current !== revision) {
+            setSaveStatus('saving');
+            continue;
+          }
+          succeeded = true;
+          return;
         }
-
-        // In Markdown mode the visible source can be newer than the hidden
-        // canvas. Compare against the document currently held by the canvas,
-        // not only against the parsed save candidate, so it is refreshed before
-        // the next mode switch.
-        const canvasDocumentChanged = !documentsEqual(fileRef.current.document, saved.document);
-        fileRef.current = saved;
-        setFile(saved);
-        if (canvasDocumentChanged) {
-          setDocumentId((id) => id + 1);
+      } catch (error) {
+        if (documentSessionRef.current === saveSession) {
+          setSaveStatus('error');
+          setMessage(error instanceof Error ? error.message : getMessages().saveFailed);
         }
-        // Saving must not replace the live source: normalization inserts escapes,
-        // adds artificial undo steps and moves the caret while the user is still typing.
-        dirtyRef.current = false;
-        setDirty(false);
-        setSaveStatus('saved');
-        setMessage(getMessages().savedFile(saved.name));
-        await clearDraft();
-        setRecent(await loadRecent());
-        return;
       }
-    } catch (error) {
-      if (documentSessionRef.current === saveSession) {
-        setSaveStatus('error');
-        setMessage(error instanceof Error ? error.message : getMessages().saveFailed);
+    });
+    const outcome = operation.then(() => succeeded);
+    pendingSave.current = outcome;
+    pendingSaveSession.current = saveSession;
+    void outcome.finally(() => {
+      if (pendingSave.current === outcome) {
+        pendingSave.current = undefined;
+        pendingSaveSession.current = undefined;
       }
-    } finally {
-      saving.current = false;
-    }
-  }, [clearSourceCommentSync, flushCanvasChanges]);
+    });
+    return outcome;
+  }, [clearSourceCommentSync, flushCanvasChanges, queueFileOperation, setExternalRawMarkdown]);
 
   useEffect(() => {
     if (!dirty) return;
@@ -597,6 +740,7 @@ export default function App() {
         ? {
             ...fileRef.current,
             ...documentStateFromMarkdown(rawMarkdownRef.current, fileRef.current.path),
+            sourceMarkdown: rawMarkdownRef.current,
           }
         : fileRef.current;
       void saveDraft(draft)
@@ -606,42 +750,56 @@ export default function App() {
           }
         })
         .catch((error: unknown) => {
-          setSaveStatus('error');
-          setMessage(error instanceof Error ? error.message : getMessages().autosaveFailed);
+          if (documentSessionRef.current === session && editRevisionRef.current === revision) {
+            setSaveStatus('error');
+            setMessage(error instanceof Error ? error.message : getMessages().autosaveFailed);
+          }
         });
     }, 850);
     return () => window.clearTimeout(timer);
   }, [clearSourceCommentSync, dirty, editRevision, flushCanvasChanges, saveCurrent]);
 
   const openFile = useCallback(async () => {
+    const request = ++openRequest.current;
     try {
       const nextFile = await chooseMarkdownFile();
+      if (request !== openRequest.current) return;
       if (nextFile) await replaceWithOpenedFile(nextFile);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : getMessages().openFailed);
+      if (request === openRequest.current) {
+        setMessage(error instanceof Error ? error.message : getMessages().openFailed);
+      }
     }
   }, [replaceWithOpenedFile]);
 
   const openRecentFile = useCallback(
     async (item: RecentFile) => {
       setRecentContextMenu(null);
+      const request = ++openRequest.current;
       try {
         const nextFile = await openRecent(item);
+        if (request !== openRequest.current) return;
         if (!nextFile) {
           const missingMessage = getMessages().missingRecentFile(item.name);
           setRecent((current) => current.filter((recentItem) => recentItem.path !== item.path));
           window.alert(missingMessage);
           try {
-            setRecent(await removeRecentFile(item.path));
+            const recentFiles = await removeRecentFile(item.path);
+            if (request !== openRequest.current) return;
+            setRecent(recentFiles);
             setMessage(missingMessage);
           } catch {
-            setMessage(`${missingMessage} ${getMessages().removeMissingRecentFailed}`);
+            if (request === openRequest.current) {
+              setMessage(`${missingMessage} ${getMessages().removeMissingRecentFailed}`);
+            }
           }
           return;
         }
         await replaceWithOpenedFile(nextFile);
       } catch (error) {
-        setMessage(error instanceof Error ? error.message : getMessages().recentOpenFailed);
+        if (request === openRequest.current) {
+          setMessage(error instanceof Error ? error.message : getMessages().recentOpenFailed);
+        }
       }
     },
     [replaceWithOpenedFile],
@@ -698,6 +856,7 @@ export default function App() {
 
   const newFile = useCallback(() => {
     if (dirty && !window.confirm(getMessages().confirmDiscardAndNew)) return;
+    openRequest.current += 1;
     void clearDraft();
     loadFile(newEditorFile());
   }, [dirty, loadFile]);
@@ -705,15 +864,67 @@ export default function App() {
   const renameFile = useCallback(async () => {
     const nextName = window.prompt(getMessages().newFilenamePrompt, fileRef.current.name);
     if (!nextName) return;
-    try {
-      const renamed = await renameEditorFile(fileRef.current, nextName);
-      setFile(renamed);
-      setMessage(getMessages().renamedFile(renamed.name));
-      setRecent(await loadRecent());
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : getMessages().renameFailed);
-    }
-  }, []);
+    const session = documentSessionRef.current;
+    const precedingSave = pendingSaveSession.current === session ? pendingSave.current : undefined;
+    await queueFileOperation(async () => {
+      if (documentSessionRef.current !== session) return;
+      // The write must finish before the old path is moved. A failed write leaves
+      // the save error visible and cancels this rename rather than moving partial
+      // source; subsequent saves are queued behind a successful rename.
+      if (precedingSave && !(await precedingSave)) return;
+      try {
+        if (sourceModeRef.current) clearSourceCommentSync();
+        else flushCanvasChanges();
+        const currentFile = fileRef.current;
+        const candidate = sourceModeRef.current
+          ? { ...currentFile, ...documentStateFromMarkdown(rawMarkdownRef.current, currentFile.path), sourceMarkdown: rawMarkdownRef.current }
+          : currentFile;
+        const renamed = await renameEditorFile(candidate, nextName);
+        if (documentSessionRef.current !== session) return;
+        // Typing can still be waiting for CanvasEditor's debounce while the
+        // filesystem rename is in flight. Publish it before refreshing node views.
+        if (!sourceModeRef.current) flushCanvasChanges();
+        const liveFile = fileRef.current;
+        const rewriteAssets = (markdown: string) => currentFile.path && renamed.path
+          ? renameMarkdownImageAssets(markdown, currentFile.path, renamed.path)
+          : markdown;
+        const sourceMarkdown = sourceModeRef.current
+          ? rewriteAssets(rawMarkdownRef.current)
+          : liveFile.sourceMarkdown === undefined ? undefined : rewriteAssets(liveFile.sourceMarkdown);
+        const sourceState = sourceModeRef.current
+          ? documentStateFromMarkdown(sourceMarkdown!, renamed.path)
+          : undefined;
+        const document = sourceState?.document ?? (currentFile.path && renamed.path
+          ? hydrateDocumentAssets(renameDocumentAssetReferences(liveFile.document, currentFile.path, renamed.path), renamed.path)
+          : liveFile.document);
+        const documentChanged = !documentsEqual(liveFile.document, document);
+        const comments = sourceState?.comments ?? (documentChanged && (liveFile.comments?.length ?? 0) > 0 && currentFile.path && renamed.path
+          ? mapImagePathComments(liveFile.comments!, documentToPortableMarkdown(liveFile.document), documentToPortableMarkdown(document), currentFile.path, renamed.path, 'rename')
+          : liveFile.comments);
+        const nextFile = {
+          ...liveFile,
+          path: renamed.path,
+          name: renamed.name,
+          document,
+          comments,
+          sourceMarkdown,
+          ...(sourceState ? { commentWarning: sourceState.warning } : {}),
+        };
+        if (sourceModeRef.current && sourceMarkdown !== rawMarkdownRef.current) {
+          setExternalRawMarkdown(sourceMarkdown!, currentFile.path && renamed.path
+            ? { oldPath: currentFile.path, newPath: renamed.path, operation: 'rename' }
+            : undefined);
+        }
+        fileRef.current = nextFile;
+        setFile(nextFile);
+        if (documentChanged) setDocumentId((id) => id + 1);
+        setMessage(getMessages().renamedFile(renamed.name));
+        setRecent(await loadRecent());
+      } catch (error) {
+        if (documentSessionRef.current === session) setMessage(error instanceof Error ? error.message : getMessages().renameFailed);
+      }
+    });
+  }, [clearSourceCommentSync, flushCanvasChanges, queueFileOperation, setExternalRawMarkdown]);
 
   const activeSearchEditor = useCallback(
     () => (sourceModeRef.current ? markdownSearch.current : canvasSearch.current),
@@ -850,43 +1061,62 @@ export default function App() {
     setModeTransitioning(true);
   };
 
+  const visibleEditorSelection = () => {
+    const editor = sourceModeRef.current ? markdownSearch.current : canvasSearch.current;
+    if (!editor?.isFocused()) return false;
+    const offset = editor.getSelectionViewportOffset();
+    return offset !== undefined && offset >= 0 && offset <= (canvasArea.current?.clientHeight ?? 0);
+  };
+
   const toggleSourceMode = () => {
     if (!sourceMode) {
       flushCanvasChanges();
-      const mappedSelection = canvasSearch.current?.getMarkdownSelection?.();
-      const body = mappedSelection?.markdown ?? documentToPortableMarkdown(fileRef.current.document);
-      const markdown = serializeMarkdownWithComments(body, fileRef.current.comments ?? []);
-      beginModeTransition('source', mappedSelection ? { kind: 'markdown', offset: mappedSelection.offset } : undefined);
+      const mappedSelection = visibleEditorSelection() ? canvasSearch.current?.getMarkdownSelection?.() : undefined;
+      const currentFile = fileRef.current;
+      const markdown = currentFile.sourceMarkdown ?? serializeMarkdownWithComments(
+        mappedSelection?.markdown ?? documentToPortableMarkdown(currentFile.document),
+        currentFile.comments ?? [],
+      );
+      const selectionMatchesSource = mappedSelection &&
+        parseMarkdownComments(markdown).body === mappedSelection.markdown;
+      beginModeTransition('source', selectionMatchesSource ? { kind: 'markdown', offset: mappedSelection.offset } : undefined);
+      const nextFile = { ...currentFile, sourceMarkdown: markdown };
+      fileRef.current = nextFile;
+      setFile(nextFile);
       setExternalRawMarkdown(markdown);
+      setSourceOutline(collectOutline(currentFile.document));
       sourceModeRef.current = true;
       setSourceMode(true);
       return;
     }
     try {
       clearSourceCommentSync();
-      const parsedSelection = markdownToDocumentWithSelection(
-        rawMarkdownRef.current,
-        markdownSearch.current?.getMarkdownOffset?.(),
-      );
       const currentFile = fileRef.current;
-      const sourceState = documentStateFromMarkdown(rawMarkdownRef.current, currentFile.path);
+      const parsedSelection = visibleEditorSelection()
+        ? markdownToDocumentWithSelection(rawMarkdownRef.current, markdownSearch.current?.getMarkdownOffset?.())
+        : undefined;
+      const sourceState = currentFile.sourceMarkdown === rawMarkdownRef.current
+        ? { document: currentFile.document, comments: currentFile.comments ?? [], warning: currentFile.commentWarning }
+        : documentStateFromMarkdown(rawMarkdownRef.current, currentFile.path, parsedSelection?.document);
       const nextDocument = sourceState.document;
       const nextComments = sourceState.comments;
       beginModeTransition(
         'canvas',
-        parsedSelection.anchor ? { kind: 'document', anchor: parsedSelection.anchor } : undefined,
+        parsedSelection?.anchor ? { kind: 'document', anchor: parsedSelection.anchor } : undefined,
       );
       const commentsChanged = JSON.stringify(currentFile.comments ?? []) !== JSON.stringify(nextComments);
-      if (!documentsEqual(currentFile.document, nextDocument) || commentsChanged) {
+      const documentChanged = !documentsEqual(currentFile.document, nextDocument);
+      if (documentChanged || commentsChanged || currentFile.sourceMarkdown !== rawMarkdownRef.current) {
         const nextFile = {
           ...currentFile,
           document: nextDocument,
           comments: nextComments,
+          sourceMarkdown: rawMarkdownRef.current,
           ...(sourceState.warning ? { commentWarning: sourceState.warning } : { commentWarning: undefined }),
         };
         fileRef.current = nextFile;
         setFile(nextFile);
-        if (!documentsEqual(currentFile.document, nextDocument)) setDocumentId((id) => id + 1);
+        if (documentChanged) setDocumentId((id) => id + 1);
       }
       resetCommentHistory();
       sourceModeRef.current = false;
@@ -932,7 +1162,9 @@ export default function App() {
     return () => window.removeEventListener('keydown', shortcuts);
   }, [closeSearch, newFile, openFile, openSearch, saveCurrent, searchOpen]);
 
-  const outline = useMemo(() => collectOutline(file.document), [file.document]);
+  const canvasOutline = useMemo(() => collectOutline(file.document), [file.document]);
+  const [sourceOutline, setSourceOutline] = useState(canvasOutline);
+  const outline = sourceMode ? sourceOutline : canvasOutline;
   const [metrics, setMetrics] = useState(() => documentMetrics(file.document));
 
   const metricsTimerRef = useRef<number | undefined>(undefined);
@@ -950,9 +1182,12 @@ export default function App() {
     metricsTimerRef.current = window.setTimeout(() => {
       metricsTimerRef.current = undefined;
       const currentDocument = sourceModeRef.current
-        ? markdownToDocument(parseMarkdownComments(rawMarkdownRef.current).body)
+        ? fileRef.current.sourceMarkdown === rawMarkdownRef.current
+          ? fileRef.current.document
+          : markdownToDocument(parseMarkdownComments(rawMarkdownRef.current).body)
         : canvasSearch.current?.getDocument?.() ?? fileRef.current.document;
       const next = documentMetrics(currentDocument);
+      if (sourceModeRef.current) setSourceOutline(collectOutline(currentDocument));
       setMetrics((current) =>
         current.characters === next.characters && current.words === next.words ? current : next,
       );
@@ -966,14 +1201,14 @@ export default function App() {
     [],
   );
 
-  const commitFontSize = () => {
-    const fontSize = normalizeFontSize(fontSizeInput, preferences.fontSize);
+  const commitFontSize = (value: string) => {
+    const fontSize = normalizeFontSize(value, preferences.fontSize);
     setFontSizeInput(String(fontSize));
     setPreferences((current) => ({ ...current, fontSize }));
   };
 
-  const commitLineSpacing = () => {
-    const lineSpacing = normalizeLineSpacing(lineSpacingInput, preferences.lineSpacing);
+  const commitLineSpacing = (value: string) => {
+    const lineSpacing = normalizeLineSpacing(value, preferences.lineSpacing);
     setLineSpacingInput(String(lineSpacing));
     setPreferences((current) => ({ ...current, lineSpacing }));
   };
@@ -983,18 +1218,23 @@ export default function App() {
   const jumpToOutline = (index: number) => {
     if (sourceMode) {
       try {
-        const sourceState = documentStateFromMarkdown(rawMarkdownRef.current, fileRef.current.path);
+        clearSourceCommentSync();
+        const currentFile = fileRef.current;
+        const sourceState = currentFile.sourceMarkdown === rawMarkdownRef.current
+          ? { document: currentFile.document, comments: currentFile.comments ?? [], warning: currentFile.commentWarning }
+          : documentStateFromMarkdown(rawMarkdownRef.current, currentFile.path);
+        const documentChanged = !documentsEqual(currentFile.document, sourceState.document);
         const nextFile = {
           ...fileRef.current,
           document: sourceState.document,
           comments: sourceState.comments,
+          sourceMarkdown: rawMarkdownRef.current,
           ...(sourceState.warning ? { commentWarning: sourceState.warning } : { commentWarning: undefined }),
         };
         fileRef.current = nextFile;
         setFile(nextFile);
-        setDocumentId((id) => id + 1);
+        if (documentChanged) setDocumentId((id) => id + 1);
         resetCommentHistory();
-        markEdited();
         sourceModeRef.current = false;
         setSourceMode(false);
       } catch (error) {
@@ -1012,7 +1252,7 @@ export default function App() {
       if (!sourceModeRef.current) flushCanvasChanges();
       const markdown = sourceModeRef.current
         ? rawMarkdownRef.current
-        : documentToPortableMarkdown(fileRef.current.document, fileRef.current.comments ?? []);
+        : fileRef.current.sourceMarkdown ?? documentToPortableMarkdown(fileRef.current.document, fileRef.current.comments ?? []);
       const exportedName = await exportMarkdownFile(markdown, fileRef.current.name);
       if (exportedName) setMessage(getMessages().exportedFile(exportedName));
     } catch (error) {
@@ -1035,6 +1275,7 @@ export default function App() {
           ...fileRef.current,
           document: sourceState.document,
           comments: sourceState.comments,
+          sourceMarkdown: rawMarkdownRef.current,
           ...(sourceState.warning ? { commentWarning: sourceState.warning } : { commentWarning: undefined }),
         };
         fileRef.current = nextFile;
@@ -1094,67 +1335,75 @@ export default function App() {
   const cancelNewComment = useCallback(() => setNewCommentTarget(null), []);
 
   return (
-    <main className={`app-shell theme-${preferences.theme} font-${preferences.font}`} lang={preferences.language}>
+    <main className={`app-shell compact-layout theme-${preferences.theme} font-${preferences.font}`} lang={preferences.language}>
       <header className="topbar">
         <button
           className="icon-button"
+          type="button"
+          aria-label={text.showSidebar}
+          aria-pressed={preferences.sidebarOpen}
           title={text.showSidebar}
           onClick={() => setPreferences((p) => ({ ...p, sidebarOpen: !p.sidebarOpen }))}
         >
-          ☰
+          <ToolbarIcon name="sidebar" />
         </button>
         <div className="document-name" title={file.path ?? text.unsavedLocation}>
           {dirty && <span className="dirty-dot">●</span>}
           {file.name}
         </div>
-        <nav className="file-actions" aria-label={text.fileActions}>
-          <button onClick={newFile}>{text.new}</button>
-          <button onClick={() => void openFile()}>{text.open}</button>
-          <button onClick={() => void saveCurrent()}>{text.save}</button>
-          <button onClick={() => void saveCurrent(true)}>{text.saveAs}</button>
-          <button onClick={() => void renameFile()}>{text.rename}</button>
-          <details ref={exportMenu} className="export-menu">
-            <summary>{text.export}</summary>
-            <div className="export-options" role="menu" aria-label={text.chooseExportFormat}>
-              <button role="menuitem" onClick={() => void exportMarkdown()}>
-                Markdown (.md)
-              </button>
-              <button role="menuitem" aria-busy={pdfExporting} disabled={pdfExporting} onClick={() => void exportPdf()}>
-                PDF (.pdf)
-              </button>
-            </div>
-          </details>
+        <div className="view-switch" role="group" aria-label={text.documentView}>
           <button
-            className={sourceMode ? 'source-mode-button is-active' : 'source-mode-button'}
-            onPointerDown={(event) => {
-              if (event.button === 0) event.preventDefault();
-            }}
-            onClick={toggleSourceMode}
+            type="button"
+            className={!sourceMode ? 'is-active' : ''}
+            aria-label={text.backToCanvas}
+            aria-pressed={!sourceMode}
+            onPointerDown={(event) => { if (event.button === 0) event.preventDefault(); }}
+            onClick={() => { if (sourceMode) toggleSourceMode(); }}
           >
-            {sourceMode ? text.backToCanvas : text.showMarkdownSource}
+            {text.canvas}
           </button>
-        </nav>
-        <button
-          className="icon-button search-button"
-          type="button"
-          aria-keyshortcuts="Meta+F Control+F"
-          aria-label={text.findDocument}
-          title={text.findShortcut}
-          onClick={openSearch}
-        >
-          ⌕
-        </button>
-        <button
-          className={commentsPanelOpen ? 'icon-button comments-toggle is-active' : 'icon-button comments-toggle'}
-          type="button"
-          aria-pressed={commentsPanelOpen}
-          aria-label={commentsPanelOpen ? text.closeComments : text.openComments}
-          title={text.commentsCount(comments.length)}
-          onClick={() => setCommentsPanelOpen((open) => !open)}
-        >
-          ◧{comments.length > 0 && <span className="comments-toggle__count">{comments.length}</span>}
-        </button>
-        <div className="topbar-spacer" />
+          <button
+            type="button"
+            className={sourceMode ? 'source-mode-button is-active' : 'source-mode-button'}
+            aria-label={text.showMarkdownSource}
+            aria-pressed={sourceMode}
+            onPointerDown={(event) => { if (event.button === 0) event.preventDefault(); }}
+            onClick={() => { if (!sourceMode) toggleSourceMode(); }}
+          >
+            Markdown
+          </button>
+        </div>
+        <div className="toolbar-actions">
+          <button
+            className="icon-button search-button"
+            type="button"
+            aria-keyshortcuts="Meta+F Control+F"
+            aria-label={text.findDocument}
+            title={text.findShortcut}
+            onClick={openSearch}
+          >
+            <ToolbarIcon name="search" />
+          </button>
+          <button
+            className={commentsPanelOpen ? 'icon-button comments-toggle is-active' : 'icon-button comments-toggle'}
+            type="button"
+            aria-pressed={commentsPanelOpen}
+            aria-label={commentsPanelOpen ? text.closeComments : text.openComments}
+            title={text.commentsCount(comments.length)}
+            onClick={() => setCommentsPanelOpen((open) => !open)}
+          >
+            <ToolbarIcon name="comments" />
+            {comments.length > 0 && <span className="comments-toggle__count">{comments.length}</span>}
+          </button>
+          <details
+            ref={readingSettingsMenu}
+            className="toolbar-menu reading-settings"
+            onToggle={(event) => {
+              if (event.currentTarget.open && documentActionsMenu.current) documentActionsMenu.current.open = false;
+            }}
+          >
+            <summary className="icon-button" role="button" aria-label={text.readingSettings} title={text.readingSettings}>Aa</summary>
+            <div className="toolbar-popover typography-popover" aria-label={text.readingSettings}>
         <label className="compact-control">
           {text.font}{' '}
           <select
@@ -1181,11 +1430,13 @@ export default function App() {
             value={fontSizeInput}
             onFocus={(event) => event.currentTarget.select()}
             onChange={(event) => setFontSizeInput(event.target.value)}
-            onBlur={commitFontSize}
+            onBlur={(event) => commitFontSize(event.currentTarget.value)}
             onKeyDown={(event) => {
               if (event.key === 'Enter') event.currentTarget.blur();
               if (event.key === 'Escape') {
-                setFontSizeInput(String(preferences.fontSize));
+                const original = String(preferences.fontSize);
+                event.currentTarget.value = original;
+                setFontSizeInput(original);
                 event.currentTarget.blur();
               }
             }}
@@ -1202,11 +1453,13 @@ export default function App() {
             value={lineSpacingInput}
             onFocus={(event) => event.currentTarget.select()}
             onChange={(event) => setLineSpacingInput(event.target.value)}
-            onBlur={commitLineSpacing}
+            onBlur={(event) => commitLineSpacing(event.currentTarget.value)}
             onKeyDown={(event) => {
               if (event.key === 'Enter') event.currentTarget.blur();
               if (event.key === 'Escape') {
-                setLineSpacingInput(String(preferences.lineSpacing));
+                const original = String(preferences.lineSpacing);
+                event.currentTarget.value = original;
+                setLineSpacingInput(original);
                 event.currentTarget.blur();
               }
             }}
@@ -1231,8 +1484,9 @@ export default function App() {
           </select>
         </label>
         <button
-          className="icon-button"
+          className="theme-control"
           title={text.toggleTheme}
+          aria-label={text.toggleTheme}
           onClick={() =>
             setPreferences((p) => ({
               ...p,
@@ -1240,8 +1494,37 @@ export default function App() {
             }))
           }
         >
-          {preferences.theme === 'light' ? '◐' : '◑'}
+          <ToolbarIcon name="theme" />
+          <span>{text.toggleTheme}</span>
         </button>
+            </div>
+          </details>
+          <details
+            ref={documentActionsMenu}
+            className="toolbar-menu document-actions"
+            onToggle={(event) => {
+              if (event.currentTarget.open && readingSettingsMenu.current) readingSettingsMenu.current.open = false;
+              if (!event.currentTarget.open && exportMenu.current) exportMenu.current.open = false;
+              if (!event.currentTarget.open && exportMenu.current) exportMenu.current.open = false;
+            }}
+          >
+            <summary className="icon-button" role="button" aria-label={text.fileActions} title={text.fileActions}><ToolbarIcon name="more" /></summary>
+            <nav className="toolbar-popover document-actions-popover file-actions" aria-label={text.fileActions}>
+              <button onClick={() => { closeToolbarMenus(); newFile(); }}>{text.new}</button>
+              <button onClick={() => { closeToolbarMenus(); void openFile(); }}>{text.open}</button>
+              <button onClick={() => { closeToolbarMenus(); void saveCurrent(); }}>{text.save}</button>
+              <button onClick={() => { closeToolbarMenus(); void saveCurrent(true); }}>{text.saveAs}</button>
+              <button onClick={() => { closeToolbarMenus(); void renameFile(); }}>{text.rename}</button>
+              <details ref={exportMenu} className="export-menu">
+                <summary>{text.export}</summary>
+                <div className="export-options" role="menu" aria-label={text.chooseExportFormat}>
+                  <button role="menuitem" onClick={() => { closeToolbarMenus(); void exportMarkdown(); }}>Markdown (.md)</button>
+                  <button role="menuitem" aria-busy={pdfExporting} disabled={pdfExporting} onClick={() => { closeToolbarMenus(); void exportPdf(); }}>PDF (.pdf)</button>
+                </div>
+              </details>
+            </nav>
+          </details>
+        </div>
       </header>
       {searchOpen && (
         <form
@@ -1308,78 +1591,67 @@ export default function App() {
       )}
       <section className="workspace">
         {preferences.sidebarOpen && (
-          <aside className="sidebar">
-            <section className={preferences.recentFilesExpanded ? '' : 'recent-section--collapsed'}>
-              <button
-                type="button"
-                className="sidebar-heading sidebar-section-toggle"
-                aria-expanded={preferences.recentFilesExpanded}
-                aria-controls="recent-files-panel"
-                title={preferences.recentFilesExpanded ? text.collapseRecentFiles : text.expandRecentFiles}
-                onClick={() =>
-                  setPreferences((current) => ({
-                    ...current,
-                    recentFilesExpanded: !current.recentFilesExpanded,
-                  }))
-                }
-              >
-                <span className="sidebar-section-chevron" aria-hidden="true">
-                  {preferences.recentFilesExpanded ? '▾' : '▸'}
-                </span>
-                {text.recentFiles}
-              </button>
-              {preferences.recentFilesExpanded && (
-                <div id="recent-files-panel">
-                  {recent.length === 0 ? (
-                    <p className="muted">{text.noRecentFiles}</p>
-                  ) : (
-                    <ul className="recent-list">
-                      {recent.map((item) => (
-                        <li key={item.path}>
-                          <button
-                            title={item.path}
-                            onClick={() => void openRecentFile(item)}
-                            onContextMenu={(event) => {
-                              event.preventDefault();
-                              const menuWidth = 196;
-                              const menuHeight = 116;
-                              setRecentContextMenu({
-                                item,
-                                x: Math.max(8, Math.min(event.clientX, window.innerWidth - menuWidth - 8)),
-                                y: Math.max(8, Math.min(event.clientY, window.innerHeight - menuHeight - 8)),
-                              });
-                            }}
-                          >
-                            {item.name}
-                          </button>
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                </div>
-              )}
-            </section>
-            <section>
-              <div className="sidebar-heading">{text.outline}</div>
-              {outline.length === 0 ? (
-                <p className="muted">{text.noHeadings}</p>
-              ) : (
-                <ol className="outline-list">
-                  {outline.map((item, index) => (
-                    <li
-                      key={`${item.text}-${index}`}
-                      style={{
-                        paddingInlineStart: `${(item.level - 1) * 12}px`,
-                      }}
-                    >
-                      <button type="button" title={item.text} onClick={() => jumpToOutline(index)}>
-                        {item.text}
-                      </button>
-                    </li>
-                  ))}
-                </ol>
-              )}
-            </section>
+          <aside className="sidebar" aria-label={text.documentNavigation}>
+            <div
+              ref={sidebarTabs}
+              className="sidebar-tabs"
+              role="tablist"
+              aria-label={text.documentNavigation}
+              onKeyDown={(event) => {
+                if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+                event.preventDefault();
+                const nextTab = event.key === 'Home' ? 'outline' : event.key === 'End' ? 'recent' : sidebarTab === 'outline' ? 'recent' : 'outline';
+                setSidebarTab(nextTab);
+                sidebarTabs.current?.querySelector<HTMLButtonElement>(`[aria-controls="${nextTab}-panel"]`)?.focus();
+              }}
+            >
+              <button type="button" id="outline-tab" role="tab" aria-label={text.outline} aria-selected={sidebarTab === 'outline'} aria-controls="outline-panel" tabIndex={sidebarTab === 'outline' ? 0 : -1} onClick={() => setSidebarTab('outline')}>{text.outline}</button>
+              <button type="button" id="recent-tab" role="tab" aria-label={text.recentFiles} aria-selected={sidebarTab === 'recent'} aria-controls="recent-panel" tabIndex={sidebarTab === 'recent' ? 0 : -1} onClick={() => setSidebarTab('recent')}>{text.recentTab}</button>
+            </div>
+            <div className="sidebar-content">
+              <section id="outline-panel" role="tabpanel" aria-labelledby="outline-tab" hidden={sidebarTab !== 'outline'}>
+                {outline.length === 0 ? (
+                  <p className="muted">{text.noHeadings}</p>
+                ) : (
+                  <ol className="outline-list">
+                    {outline.map((item, index) => (
+                      <li key={`${item.text}-${index}`} style={{ paddingInlineStart: `${Math.min(item.level - 1, 3) * 10}px` }}>
+                        <button type="button" title={item.text} aria-current={(outlineTarget?.index ?? 0) === index ? 'location' : undefined} onClick={() => jumpToOutline(index)}>{item.text}</button>
+                      </li>
+                    ))}
+                  </ol>
+                )}
+              </section>
+              <section id="recent-panel" role="tabpanel" aria-labelledby="recent-tab" hidden={sidebarTab !== 'recent'}>
+                {recent.length === 0 ? (
+                  <p className="muted">{text.noRecentFiles}</p>
+                ) : (
+                  <ul className="recent-list">
+                    {recent.map((item) => (
+                      <li key={item.path}>
+                        <button
+                          className={item.path === file.path ? 'is-active' : undefined}
+                          title={item.path}
+                          onClick={() => void openRecentFile(item)}
+                          onContextMenu={(event) => {
+                            event.preventDefault();
+                            const menuWidth = 196;
+                            const menuHeight = 116;
+                            setRecentContextMenu({
+                              item,
+                              x: Math.max(8, Math.min(event.clientX, window.innerWidth - menuWidth - 8)),
+                              y: Math.max(8, Math.min(event.clientY, window.innerHeight - menuHeight - 8)),
+                            });
+                          }}
+                        >
+                          {item.name}
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </section>
+            </div>
           </aside>
         )}
         <section
@@ -1402,6 +1674,7 @@ export default function App() {
               comments={comments}
               outlineTarget={outlineTarget}
               onReady={canvasReady}
+              onLinkError={setMessage}
               onEdit={markEdited}
               onCommentRequest={handleCanvasContextMenu}
               onCommentClick={handleCommentMarkerClick}
@@ -1414,6 +1687,7 @@ export default function App() {
                 const nextFile = {
                   ...fileRef.current,
                   document,
+                  sourceMarkdown: undefined,
                   ...(mappedComments ? { comments: mappedComments } : {}),
                 };
                 fileRef.current = nextFile;
@@ -1429,6 +1703,7 @@ export default function App() {
                 language={preferences.language}
                 value={rawMarkdownRef.current}
                 valueRevision={rawMarkdownRevision}
+                externalChanges={rawMarkdownChangesRef.current}
                 onReady={sourceReady}
                 onChange={(value) => {
                   rawMarkdownRef.current = value;
@@ -1504,7 +1779,7 @@ export default function App() {
       <footer className="statusbar">
         <span className={`save-status save-status--${saveStatus}`}>{text.saveStatus[saveStatus]}</span>
         <span>{text.metrics(metrics.words, metrics.characters)}</span>
-        <span className="status-message">{message}</span>
+        <span className="status-message" title={message}>{message}</span>
         <span>{text.localFirst}</span>
       </footer>
     </main>

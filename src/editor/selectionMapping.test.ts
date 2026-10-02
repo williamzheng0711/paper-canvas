@@ -1,11 +1,13 @@
 import { Editor, type JSONContent } from '@tiptap/core';
 import StarterKit from '@tiptap/starter-kit';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { markdownToDocument } from './markdown';
+import * as markdownConversion from './markdown';
 import {
   markdownSelectionFromMarkedDocument,
   markdownToDocumentWithSelection,
   positionFromDocumentAnchor,
+  positionFromMarkdownOffset,
   selectionMarker,
 } from './selectionMapping';
 
@@ -73,6 +75,37 @@ describe('canvas and Markdown selection mapping', () => {
       path: [0, 1, 0, 0],
       offset: 4,
     });
+  });
+
+  it.each([0, 1])('snaps a long table delimiter to header column %s with bounded parsing', (column) => {
+    const markdown = `${'Reading paragraph with several words.\n\n'.repeat(1000)}| First header | Second header |\n| ${'-'.repeat(30)} | :${'-'.repeat(30)}: |\n| Alpha | Beta |`;
+    const delimiter = markdown.indexOf('-'.repeat(30), column === 0 ? 0 : markdown.indexOf('-'.repeat(30)) + 30);
+    const expected = markdownToDocument(markdown);
+    const parse = vi.spyOn(markdownConversion, 'markdownToDocument');
+    try {
+      const mapped = markdownToDocumentWithSelection(markdown, delimiter + 15);
+      expect(mapped.document).toEqual(expected);
+      expect(mapped.anchor).toEqual({ kind: 'text', path: [1000, 0, column, 0], offset: column === 0 ? 12 : 13 });
+      expect(parse).toHaveBeenCalledTimes(3);
+    } finally {
+      parse.mockRestore();
+    }
+  });
+
+  it('keeps the exact caret in table-like fenced code', () => {
+    const markdown = '```text\n| First header | Second header |\n| ------------------------------ | ------------------------------ |\n```';
+    const requested = markdown.indexOf('------------------------------') + 15;
+    const mapped = markdownToDocumentWithSelection(markdown, requested);
+    expect(mapped.document).toEqual(markdownToDocument(markdown));
+    expect(mapped.anchor).toEqual({ kind: 'text', path: [0], offset: requested - '```text\n'.length });
+  });
+
+  it('handles escaped header pipes and inline marks when snapping a separator', () => {
+    const markdown = '| A \\| B | **Title** |\n| ------------------------------ | ------------------------------ |\n| C | D |';
+    const requested = markdown.lastIndexOf('------------------------------') + 15;
+    const mapped = markdownToDocumentWithSelection(markdown, requested);
+    expect(mapped.document).toEqual(markdownToDocument(markdown));
+    expect(mapped.anchor).toEqual({ kind: 'text', path: [0, 0, 1, 0], offset: 5 });
   });
 
   it.each(['Before $x^2 + y$ after', '$$\nx^2 + y\n$$'])('preserves source offsets inside formulas: %s', (markdown) => {
@@ -183,5 +216,28 @@ describe('canvas and Markdown selection mapping', () => {
       path: [0],
       offset: 0,
     });
+  });
+
+  it('reuses the parsed baseline and exact offsets until the live document changes', () => {
+    const markdown = 'First target and another target\n';
+    const editor = new Editor({ extensions: [StarterKit], content: markdownToDocument(markdown) });
+    const parse = vi.spyOn(markdownConversion, 'markdownToDocument');
+    try {
+      const first = positionFromMarkdownOffset(editor.state.doc, markdown, markdown.indexOf('target'));
+      expect(first?.position).toBe(7);
+      expect(parse).toHaveBeenCalledTimes(2);
+      expect(positionFromMarkdownOffset(editor.state.doc, markdown, markdown.indexOf('target'))).toEqual(first);
+      expect(parse).toHaveBeenCalledTimes(2);
+      expect(positionFromMarkdownOffset(editor.state.doc, markdown, markdown.lastIndexOf('target'))?.position).toBe(26);
+      expect(parse).toHaveBeenCalledTimes(3);
+
+      editor.commands.insertContent('New ');
+      const changedMarkdown = 'New ' + markdown;
+      expect(positionFromMarkdownOffset(editor.state.doc, changedMarkdown, changedMarkdown.indexOf('target'))?.position).toBe(11);
+      expect(parse).toHaveBeenCalledTimes(5);
+    } finally {
+      parse.mockRestore();
+      editor.destroy();
+    }
   });
 });

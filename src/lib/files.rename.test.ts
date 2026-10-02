@@ -1,0 +1,258 @@
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  createMarkdownComment,
+  serializeMarkdownWithComments,
+  parseMarkdownComments,
+  markdownFingerprint,
+} from "../editor/comments";
+import { markdownToDocument } from "../editor/markdown";
+import { documentToPortableMarkdown, renameEditorFile } from "./files";
+
+const mocks = vi.hoisted(() => ({
+  entries: new Map<string, string | null>(),
+  rename: vi.fn(),
+  writeTextFile: vi.fn(),
+  storeSet: vi.fn(),
+}));
+vi.mock("@tauri-apps/api/core", () => ({
+  isTauri: () => true,
+  convertFileSrc: (path: string) => `asset:${path}`,
+  invoke: vi.fn(),
+}));
+vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn(), save: vi.fn() }));
+vi.mock("@tauri-apps/plugin-fs", () => ({
+  exists: async (path: string) => mocks.entries.has(path),
+  readTextFile: async (path: string) => {
+    const source = mocks.entries.get(path);
+    if (typeof source !== "string") throw new Error(`File missing: ${path}`);
+    return source;
+  },
+  rename: mocks.rename,
+  writeTextFile: mocks.writeTextFile,
+  mkdir: vi.fn(),
+  writeFile: vi.fn(),
+}));
+vi.mock("@tauri-apps/plugin-store", () => ({
+  Store: { load: async () => ({ get: async () => [], set: mocks.storeSet }) },
+}));
+
+const path = "/notes/research.md";
+const target = "/notes/renamed.md";
+
+describe("native document rename", () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+    mocks.entries.clear();
+    mocks.rename.mockImplementation(async (from: string, to: string) => {
+      if (!mocks.entries.has(from)) throw new Error(`Path missing: ${from}`);
+      for (const [key, value] of [...mocks.entries]) {
+        if (key === from || key.startsWith(from + "/")) {
+          mocks.entries.delete(key);
+          mocks.entries.set(to + key.slice(from.length), value);
+        }
+      }
+    });
+    mocks.writeTextFile.mockImplementation(
+      async (filePath: string, source: string) => {
+        mocks.entries.set(filePath, source);
+      },
+    );
+  });
+
+  it("keeps disk source, cache and rendered images consistent while preserving literal paths and comments", async () => {
+    const body =
+      '# research.assets/\n\nLiteral `research.assets/` and [Download](research.assets/download.png).\n\n![Diagram](./research%2Eassets/diagram.png)\n\n![Reference][image]\n\n[image]: research.assets/reference.png "research.assets/title"\n\n<div data-src="research.assets/literal.png"><img src="research.assets/html.png"></div>\n\n![Remote](https://example.com/research.assets/remote.png)\n';
+    const comment = createMarkdownComment(
+      body,
+      { kind: "position", offset: 0 },
+      "research.assets/comment text",
+    );
+    const sourceMarkdown = serializeMarkdownWithComments(body, [comment]);
+    mocks.entries.set(path, sourceMarkdown);
+    mocks.entries.set("/notes/research.assets", null);
+    mocks.entries.set("/notes/research.assets/diagram.png", "image bytes");
+    const expectedBody = body
+      .replace(
+        "./research%2Eassets/diagram.png",
+        "./renamed.assets/diagram.png",
+      )
+      .replace("research.assets/reference.png", "renamed.assets/reference.png")
+      .replace("research.assets/html.png", "renamed.assets/html.png");
+    const renamed = await renameEditorFile(
+      {
+        path,
+        name: "research.md",
+        document: markdownToDocument(body),
+        sourceMarkdown,
+        comments: [comment],
+      },
+      "renamed.md",
+    );
+
+    const diskSource = mocks.entries.get(target) as string;
+    const parsed = parseMarkdownComments(diskSource);
+    expect(parsed.body).toBe(expectedBody);
+    expect(parsed.comments[0].content).toBe("research.assets/comment text");
+    expect(parsed.comments[0].target).toEqual(comment.target);
+    expect(parsed.comments[0].bodyFingerprint).toBe(
+      markdownFingerprint(expectedBody),
+    );
+    expect(mocks.entries.has(path)).toBe(false);
+    expect(mocks.entries.get("/notes/renamed.assets/diagram.png")).toBe(
+      "image bytes",
+    );
+    expect(renamed.sourceMarkdown).toBe(diskSource);
+    expect(renamed.comments?.[0]).toEqual(
+      expect.objectContaining({
+        content: comment.content,
+        target: comment.target,
+        status: "active",
+        bodyFingerprint: markdownFingerprint(
+          documentToPortableMarkdown(renamed.document),
+        ),
+      }),
+    );
+    const images = renamed.document.content?.filter(
+      (node) => node.type === "image",
+    );
+    expect(images?.[0]?.attrs).toEqual(
+      expect.objectContaining({
+        src: "asset:/notes/renamed.assets/diagram.png",
+        originalSrc: "./renamed.assets/diagram.png",
+      }),
+    );
+    expect(images?.[1]?.attrs?.originalSrc).toBe(
+      "renamed.assets/reference.png",
+    );
+    expect(JSON.stringify(renamed.document)).toContain(
+      '<img src=\\"renamed.assets/html.png\\">',
+    );
+    expect(mocks.writeTextFile).toHaveBeenCalledOnce();
+  });
+
+  it("does not rewrite disk bytes when only prose/code/remote URLs mention the old asset folder", async () => {
+    const sourceMarkdown =
+      "# research.assets/\r\n\r\n`![literal](research.assets/image.png)`\r\n\r\n![Remote](https://example.com/research.assets/image.png)\r\n";
+    mocks.entries.set(path, sourceMarkdown);
+    const renamed = await renameEditorFile(
+      {
+        path,
+        name: "research.md",
+        document: markdownToDocument(sourceMarkdown),
+        sourceMarkdown,
+      },
+      "renamed.md",
+    );
+    expect(mocks.entries.get(target)).toBe(sourceMarkdown);
+    expect(renamed.sourceMarkdown).toBe(sourceMarkdown);
+    expect(mocks.writeTextFile).not.toHaveBeenCalled();
+  });
+
+  it("returns the completed rename when persisting recent history fails", async () => {
+    const sourceMarkdown = "# Reading\n\n![Diagram](research.assets/diagram.png)\n";
+    const expectedSource = sourceMarkdown.replace("research.assets/", "renamed.assets/");
+    mocks.entries.set(path, sourceMarkdown);
+    mocks.entries.set("/notes/research.assets", null);
+    mocks.entries.set("/notes/research.assets/diagram.png", "image bytes");
+    mocks.storeSet.mockRejectedValueOnce(new Error("Settings write failed"));
+
+    const renamed = await renameEditorFile({
+      path,
+      name: "research.md",
+      document: markdownToDocument(sourceMarkdown),
+      sourceMarkdown,
+    }, "renamed.md");
+
+    expect(mocks.entries.has(path)).toBe(false);
+    expect(mocks.entries.get(target)).toBe(expectedSource);
+    expect(mocks.entries.get("/notes/renamed.assets/diagram.png")).toBe("image bytes");
+    expect(renamed).toEqual(expect.objectContaining({
+      path: target, name: "renamed.md", sourceMarkdown: expectedSource,
+    }));
+    expect(renamed.document.content?.find((node) => node.type === "image")?.attrs).toEqual(
+      expect.objectContaining({
+        src: "asset:/notes/renamed.assets/diagram.png",
+        originalSrc: "renamed.assets/diagram.png",
+      }),
+    );
+    expect(mocks.storeSet).toHaveBeenCalledOnce();
+  });
+
+  it("recovers original bytes and both paths when a rewrite partly truncates the file then rejects", async () => {
+    const sourceMarkdown =
+      "# Original\n\n![Diagram](research.assets/diagram.png)\n";
+    mocks.entries.set(path, sourceMarkdown);
+    mocks.entries.set("/notes/research.assets", null);
+    mocks.entries.set("/notes/research.assets/diagram.png", "image bytes");
+    mocks.writeTextFile.mockImplementationOnce(async (filePath: string) => {
+      mocks.entries.set(filePath, "# Partial");
+      throw new Error("Disk write failed");
+    });
+    await expect(
+      renameEditorFile(
+        {
+          path,
+          name: "research.md",
+          document: markdownToDocument(sourceMarkdown),
+          sourceMarkdown,
+        },
+        "renamed.md",
+      ),
+    ).rejects.toThrow("Disk write failed");
+    expect(mocks.entries.get(path)).toBe(sourceMarkdown);
+    expect(mocks.entries.get("/notes/research.assets/diagram.png")).toBe(
+      "image bytes",
+    );
+    expect(mocks.entries.has(target)).toBe(false);
+    expect(mocks.entries.has("/notes/renamed.assets")).toBe(false);
+    expect(mocks.writeTextFile).toHaveBeenNthCalledWith(
+      2,
+      target,
+      sourceMarkdown,
+    );
+    expect(mocks.storeSet).not.toHaveBeenCalled();
+  });
+
+  it("restores the file name if moving the asset directory fails before any source rewrite", async () => {
+    const sourceMarkdown = "![Diagram](research.assets/diagram.png)\n";
+    mocks.entries.set(path, sourceMarkdown);
+    mocks.entries.set("/notes/research.assets", null);
+    mocks.rename
+      .mockImplementationOnce(async (from: string, to: string) => {
+        mocks.entries.set(to, mocks.entries.get(from)!);
+        mocks.entries.delete(from);
+      })
+      .mockRejectedValueOnce(new Error("Directory move failed"));
+    await expect(
+      renameEditorFile(
+        {
+          path,
+          name: "research.md",
+          document: markdownToDocument(sourceMarkdown),
+        },
+        "renamed.md",
+      ),
+    ).rejects.toThrow("Directory move failed");
+    expect(mocks.entries.get(path)).toBe(sourceMarkdown);
+    expect(mocks.entries.has("/notes/research.assets")).toBe(true);
+    expect(mocks.writeTextFile).not.toHaveBeenCalled();
+  });
+
+  it.each([target, "/notes/renamed.assets"])(
+    "rejects a destination collision before changing files: %s",
+    async (collision) => {
+      mocks.entries.set(path, "Original source");
+      mocks.entries.set("/notes/research.assets", null);
+      mocks.entries.set(collision, null);
+      await expect(
+        renameEditorFile(
+          { path, name: "research.md", document: { type: "doc" } },
+          "renamed.md",
+        ),
+      ).rejects.toThrow();
+      expect(mocks.entries.get(path)).toBe("Original source");
+      expect(mocks.rename).not.toHaveBeenCalled();
+      expect(mocks.writeTextFile).not.toHaveBeenCalled();
+    },
+  );
+});

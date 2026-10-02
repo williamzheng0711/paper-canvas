@@ -12,6 +12,16 @@ import {
 import { documentToMarkdown, markdownToDocument } from '../editor/markdown';
 import { detectLanguage, getMessages, isLanguage, type Language } from '../i18n';
 import { normalizeLineSpacing } from './lineSpacing';
+import { localAssetUrl } from './localAssets';
+import {
+  rebaseHtmlImageAssets,
+  rebaseImageDestination,
+  rebaseMarkdownImageAssets,
+  mapImagePathComments,
+  renameHtmlImageAssets,
+  renameImageDestination,
+  renameMarkdownImageAssets,
+} from '../editor/markdownAssetReferences';
 
 export type RecentFile = { path: string; name: string };
 export type EditorFile = {
@@ -20,6 +30,8 @@ export type EditorFile = {
   document: JSONContent;
   comments?: MarkdownComment[];
   commentWarning?: string;
+  /** Exact source for the current document; invalidated by canvas edits. */
+  sourceMarkdown?: string;
 };
 
 export type AppPreferences = {
@@ -30,6 +42,8 @@ export type AppPreferences = {
   sidebarOpen: boolean;
   recentFilesExpanded: boolean;
   language: Language;
+  /** Records the one-time application of the approved Compact layout defaults. */
+  compactLayoutVersion?: number;
 };
 
 const settingsKey = 'papercanvas.settings.v1';
@@ -51,7 +65,9 @@ export function isMarkdownFilePath(path: string): boolean {
 
 function parentPath(path: string): string {
   const index = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
-  return index > 0 ? path.slice(0, index) : '.';
+  if (index < 0) return '.';
+  const parent = path.slice(0, index);
+  return /^[A-Za-z]:$/.test(parent) ? parent + path[index] : parent || separator(path);
 }
 
 function joinPath(base: string, child: string): string {
@@ -125,7 +141,7 @@ export function hydrateDocumentAssets(document: JSONContent, path?: string): JSO
       node.attrs = {
         ...node.attrs,
         originalSrc: src,
-        src: convertFileSrc(joinPath(basePath, src)),
+        src: localAssetUrl(basePath, src, convertFileSrc),
       };
     }
   });
@@ -152,19 +168,53 @@ export function documentToPortableMarkdown(
 }
 
 export function renameDocumentAssetReferences(document: JSONContent, oldPath: string, newPath: string): JSONContent {
-  const oldPrefix = `${fileName(oldPath).replace(/\.md$/i, '')}.assets/`;
-  const newPrefix = `${fileName(newPath).replace(/\.md$/i, '')}.assets/`;
   const renamed = restoreRelativeImagePaths(document);
   visit(renamed, (node) => {
-    if (node.type !== 'image' || typeof node.attrs?.src !== 'string') return;
-    if (node.attrs.src.startsWith(oldPrefix)) {
+    if (node.type === 'image' && typeof node.attrs?.src === 'string') {
       node.attrs = {
         ...node.attrs,
-        src: `${newPrefix}${node.attrs.src.slice(oldPrefix.length)}`,
+        src: renameImageDestination(node.attrs.src, oldPath, newPath),
       };
+    } else if ((node.type === 'htmlPreview' || node.type === 'inlineHtmlPreview') && typeof node.attrs?.source === 'string') {
+      node.attrs = { ...node.attrs, source: renameHtmlImageAssets(node.attrs.source, oldPath, newPath) };
+    } else if (node.type === 'unsupportedMarkdown' && typeof node.attrs?.source === 'string') {
+      node.attrs = { ...node.attrs, source: renameMarkdownImageAssets(node.attrs.source, oldPath, newPath) };
     }
   });
   return renamed;
+}
+
+export function rebaseDocumentAssetReferences(document: JSONContent, oldPath: string, newPath: string): JSONContent {
+  const rebased = restoreRelativeImagePaths(document);
+  visit(rebased, (node) => {
+    if (node.type === 'image' && typeof node.attrs?.src === 'string') {
+      node.attrs = { ...node.attrs, src: rebaseImageDestination(node.attrs.src, oldPath, newPath) };
+    } else if ((node.type === 'htmlPreview' || node.type === 'inlineHtmlPreview') && typeof node.attrs?.source === 'string') {
+      node.attrs = { ...node.attrs, source: rebaseHtmlImageAssets(node.attrs.source, oldPath, newPath) };
+    } else if (node.type === 'unsupportedMarkdown' && typeof node.attrs?.source === 'string') {
+      node.attrs = { ...node.attrs, source: rebaseMarkdownImageAssets(node.attrs.source, oldPath, newPath) };
+    }
+  });
+  return rebased;
+}
+
+/** Rebase once before adopting a Save As path, including edits made mid-save. */
+export function rebaseEditorFileAssets(file: EditorFile, oldPath: string, newPath: string): EditorFile {
+  const portable = rebaseDocumentAssetReferences(file.document, oldPath, newPath);
+  const previousMarkdown = documentToPortableMarkdown(file.document);
+  const nextMarkdown = documentToMarkdown(portable);
+  const comments = previousMarkdown === nextMarkdown
+    ? file.comments ?? []
+    : mapImagePathComments(file.comments ?? [], previousMarkdown, nextMarkdown, oldPath, newPath);
+  const sourceMarkdown = file.sourceMarkdown === undefined ? undefined : rebaseMarkdownImageAssets(file.sourceMarkdown, oldPath, newPath);
+  return {
+    ...file,
+    path: newPath,
+    name: fileName(newPath),
+    document: hydrateDocumentAssets(portable, newPath),
+    comments,
+    sourceMarkdown,
+  };
 }
 
 export async function chooseMarkdownFile(): Promise<EditorFile | null> {
@@ -187,10 +237,11 @@ export async function openMarkdownFile(path: string): Promise<EditorFile> {
   const markdown = await readTextFile(path);
   const parsed = parseMarkdownComments(markdown);
   const document = hydrateDocumentAssets(markdownToDocument(parsed.body), path);
-  const canonicalMarkdown = documentToPortableMarkdown(document);
+  const canonicalMarkdown = parsed.comments.length > 0 ? documentToPortableMarkdown(document) : parsed.body;
   const file = {
     path,
     name: fileName(path),
+    sourceMarkdown: markdown,
     document,
     comments: relocateMarkdownComments(parsed.comments, parsed.body, canonicalMarkdown),
     ...(parsed.status === 'invalid' || parsed.status === 'unknown-version'
@@ -285,28 +336,36 @@ export async function saveEditorFile(
     path = selected;
   }
   if (!path) throw new Error(getMessages().saveCancelled);
-  const portable = restoreRelativeImagePaths(file.document);
-  if (rawMarkdown !== undefined) {
-    await writeTextFile(path, rawMarkdown);
-    await rememberRecent({ path, name: fileName(path) });
+  const candidate = { ...file, sourceMarkdown: rawMarkdown ?? file.sourceMarkdown };
+  const prepared = file.path && file.path !== path ? rebaseEditorFileAssets(candidate, file.path, path) : candidate;
+  const portable = restoreRelativeImagePaths(prepared.document);
+  const sourceMarkdown = prepared.sourceMarkdown;
+  if (sourceMarkdown !== undefined) {
+    await writeTextFile(path, sourceMarkdown);
+    // The file is already committed. History failure must not prevent adopting
+    // a Save As destination and leave subsequent saves targeting the old path.
+    await rememberRecent({ path, name: fileName(path) }).catch(() => undefined);
     return {
       path,
       name: fileName(path),
       document: hydrateDocumentAssets(portable, path),
-      comments: file.comments ?? [],
+      comments: prepared.comments ?? [],
+      sourceMarkdown,
     };
   }
   const markdownBeforeAssets = documentToMarkdown(portable);
   const withAssets = await persistEmbeddedImages(portable, path);
   const markdown = documentToMarkdown(withAssets);
-  const comments = relocateMarkdownComments(file.comments ?? [], markdownBeforeAssets, markdown);
-  await writeTextFile(path, serializeMarkdownWithComments(markdown, comments));
-  await rememberRecent({ path, name: fileName(path) });
+  const comments = relocateMarkdownComments(prepared.comments ?? [], markdownBeforeAssets, markdown);
+  const savedMarkdown = serializeMarkdownWithComments(markdown, comments);
+  await writeTextFile(path, savedMarkdown);
+  await rememberRecent({ path, name: fileName(path) }).catch(() => undefined);
   return {
     path,
     name: fileName(path),
     document: hydrateDocumentAssets(withAssets, path),
     comments,
+    sourceMarkdown: savedMarkdown,
   };
 }
 
@@ -330,16 +389,23 @@ export async function renameEditorFile(file: EditorFile, newName: string): Promi
     throw new Error(text.assetsDirectoryExists);
   }
 
+  let originalSource: string | undefined;
+  let rewriteAttempted = false;
   await rename(file.path, target);
   try {
     if (hasAssets) await rename(oldAssets, nextAssets);
-    const onDisk = await readTextFile(target);
-    const oldPrefix = `${fileName(file.path).replace(/\.md$/i, '')}.assets/`;
-    const nextPrefix = `${fileName(target).replace(/\.md$/i, '')}.assets/`;
-    if (oldPrefix !== nextPrefix && onDisk.includes(oldPrefix)) {
-      await writeTextFile(target, onDisk.replaceAll(oldPrefix, nextPrefix));
+    originalSource = await readTextFile(target);
+    const renamedSource = renameMarkdownImageAssets(originalSource, file.path, target);
+    if (renamedSource !== originalSource) {
+      rewriteAttempted = true;
+      await writeTextFile(target, renamedSource);
     }
   } catch (error) {
+    // A failed write may already have truncated the file. Recover source bytes
+    // before restoring its name, as well as the companion directory.
+    if (rewriteAttempted && originalSource !== undefined) {
+      await writeTextFile(target, originalSource).catch(() => undefined);
+    }
     // Recover the original pair when moving the companion directory fails.
     if (hasAssets && (await exists(nextAssets)) && !(await exists(oldAssets))) {
       await rename(nextAssets, oldAssets).catch(() => undefined);
@@ -349,12 +415,17 @@ export async function renameEditorFile(file: EditorFile, newName: string): Promi
     }
     throw error;
   }
-  await rememberRecent({ path: target, name: fileName(target) });
+  // The file and companion assets have moved successfully; keep the live path
+  // consistent with disk even if persisting recent history fails.
+  await rememberRecent({ path: target, name: fileName(target) }).catch(() => undefined);
+  const document = hydrateDocumentAssets(renameDocumentAssetReferences(file.document, file.path, target), target);
   return {
     ...file,
     path: target,
     name: fileName(target),
-    document: hydrateDocumentAssets(renameDocumentAssetReferences(file.document, file.path, target), target),
+    document,
+    comments: mapImagePathComments(file.comments ?? [], documentToPortableMarkdown(file.document), documentToPortableMarkdown(document), file.path, target, 'rename'),
+    sourceMarkdown: file.sourceMarkdown === undefined ? undefined : renameMarkdownImageAssets(file.sourceMarkdown, file.path, target),
   };
 }
 
@@ -428,47 +499,74 @@ export async function revealFileInFolder(path: string): Promise<void> {
 }
 
 const preferencesKey = 'preferences';
+const currentCompactLayoutVersion = 1;
 const defaultPreferences: AppPreferences = {
   theme: 'light',
   font: 'system',
-  fontSize: 18,
-  lineSpacing: 1.78,
+  fontSize: 15,
+  lineSpacing: 1.62,
   sidebarOpen: true,
   recentFilesExpanded: true,
   language: detectLanguage(),
+  compactLayoutVersion: currentCompactLayoutVersion,
 };
 
 function mergePreferences(stored: Partial<AppPreferences> | null | undefined): AppPreferences {
-  return {
+  const appliedCompact = typeof stored?.compactLayoutVersion === 'number' &&
+    stored.compactLayoutVersion >= currentCompactLayoutVersion;
+  const preferences = {
     ...defaultPreferences,
     ...stored,
+    ...(!appliedCompact ? {
+      font: defaultPreferences.font,
+      fontSize: defaultPreferences.fontSize,
+      lineSpacing: defaultPreferences.lineSpacing,
+      sidebarOpen: defaultPreferences.sidebarOpen,
+    } : {}),
+  };
+  return {
+    ...preferences,
     lineSpacing: normalizeLineSpacing(
-      stored?.lineSpacing ?? defaultPreferences.lineSpacing,
+      preferences.lineSpacing,
       defaultPreferences.lineSpacing,
     ),
     language: isLanguage(stored?.language) ? stored.language : defaultPreferences.language,
+    compactLayoutVersion: appliedCompact ? stored!.compactLayoutVersion : currentCompactLayoutVersion,
   };
 }
 
 export async function loadPreferences(): Promise<AppPreferences> {
   if (isTauri()) {
     const store = await Store.load(settingsKey, { autoSave: 200 });
-    return mergePreferences(await store.get<Partial<AppPreferences>>(preferencesKey));
+    const stored = await store.get<Partial<AppPreferences>>(preferencesKey);
+    const preferences = mergePreferences(stored);
+    if (stored?.compactLayoutVersion !== preferences.compactLayoutVersion) await store.set(preferencesKey, preferences);
+    return preferences;
   }
+  let stored: Partial<AppPreferences> | undefined;
   try {
-    return mergePreferences(JSON.parse(localStorage.getItem(preferencesKey) ?? '{}') as Partial<AppPreferences>);
+    stored = JSON.parse(localStorage.getItem(preferencesKey) ?? '{}') as Partial<AppPreferences>;
   } catch {
-    return defaultPreferences;
+    // Recover malformed settings using the current layout defaults.
   }
+  const preferences = mergePreferences(stored);
+  if (stored?.compactLayoutVersion !== preferences.compactLayoutVersion) {
+    localStorage.setItem(preferencesKey, JSON.stringify(preferences));
+  }
+  return preferences;
 }
 
 export async function savePreferences(preferences: AppPreferences): Promise<void> {
+  const saved = {
+    ...preferences,
+    compactLayoutVersion: Math.max(currentCompactLayoutVersion, preferences.compactLayoutVersion ?? 0),
+  };
   if (isTauri()) {
     const store = await Store.load(settingsKey, { autoSave: 200 });
-    await store.set(preferencesKey, preferences);
+    await store.set(preferencesKey, saved);
     return;
   }
-  localStorage.setItem(preferencesKey, JSON.stringify(preferences));
+  localStorage.setItem(preferencesKey, JSON.stringify(saved));
 }
 
 export async function openRecent(recent: RecentFile): Promise<EditorFile | null> {
@@ -485,10 +583,11 @@ export async function openRecent(recent: RecentFile): Promise<EditorFile | null>
   }
   const parsed = parseMarkdownComments(markdown);
   const document = hydrateDocumentAssets(markdownToDocument(parsed.body), recent.path);
-  const canonicalMarkdown = documentToPortableMarkdown(document);
+  const canonicalMarkdown = parsed.comments.length > 0 ? documentToPortableMarkdown(document) : parsed.body;
   return {
     path: recent.path,
     name: recent.name,
+    sourceMarkdown: markdown,
     document,
     comments: relocateMarkdownComments(parsed.comments, parsed.body, canonicalMarkdown),
     ...(parsed.status === 'invalid' || parsed.status === 'unknown-version'
@@ -509,23 +608,35 @@ export async function loadDraft(): Promise<EditorFile | null> {
   }
 }
 
-export async function saveDraft(file: EditorFile): Promise<void> {
-  const draft = { ...file, path: undefined };
-  if (isTauri()) {
-    const store = await Store.load(settingsKey, { autoSave: 200 });
-    await store.set(draftKey, draft);
-    return;
-  }
-  localStorage.setItem(draftKey, JSON.stringify(draft));
+let draftMutationQueue: Promise<void> = Promise.resolve();
+
+function queueDraftMutation(operation: () => Promise<void>): Promise<void> {
+  const result = draftMutationQueue.then(operation);
+  draftMutationQueue = result.catch(() => undefined);
+  return result;
 }
 
-export async function clearDraft(): Promise<void> {
-  if (isTauri()) {
-    const store = await Store.load(settingsKey, { autoSave: 200 });
-    await store.delete(draftKey);
-    return;
-  }
-  localStorage.removeItem(draftKey);
+export function saveDraft(file: EditorFile): Promise<void> {
+  const draft = { ...file, path: undefined };
+  return queueDraftMutation(async () => {
+    if (isTauri()) {
+      const store = await Store.load(settingsKey, { autoSave: 200 });
+      await store.set(draftKey, draft);
+      return;
+    }
+    localStorage.setItem(draftKey, JSON.stringify(draft));
+  });
+}
+
+export function clearDraft(): Promise<void> {
+  return queueDraftMutation(async () => {
+    if (isTauri()) {
+      const store = await Store.load(settingsKey, { autoSave: 200 });
+      await store.delete(draftKey);
+      return;
+    }
+    localStorage.removeItem(draftKey);
+  });
 }
 
 export function newEditorFile(): EditorFile {

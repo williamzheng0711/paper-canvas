@@ -168,6 +168,7 @@ class FormulaNodeView {
   update(node: NodeViewRendererProps["node"]): boolean {
     if (node.type !== this.node.type) return false;
     this.node = node;
+    this.dom.dataset.latex = this.latex;
     if (this.editing && this.source) {
       // Normal typing already updated the textarea. Only synchronize external
       // changes (including undo), preserving the caret and IME composition.
@@ -225,6 +226,7 @@ class FormulaNodeView {
 
   private render(): void {
     if (this.editing) return;
+    this.dom.dataset.latex = this.latex;
     const text = getMessages();
     this.dom.textContent = "";
     const latex = this.latex;

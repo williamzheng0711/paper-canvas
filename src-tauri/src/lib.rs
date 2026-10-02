@@ -175,6 +175,45 @@ fn show_in_folder(path: String) -> Result<(), String> {
     Err("Showing a document in its folder is unavailable on this platform.".to_string())
 }
 
+fn validated_external_url(value: &str) -> Result<tauri::Url, String> {
+    let url = tauri::Url::parse(value).map_err(|_| "The link URL is invalid.".to_string())?;
+    match url.scheme() {
+        "http" | "https" if url.host_str().is_some() => Ok(url),
+        "mailto" => Ok(url),
+        _ => Err("Only HTTP, HTTPS, and email links can be opened externally.".into()),
+    }
+}
+
+#[tauri::command]
+fn open_external_url(url: String) -> Result<(), String> {
+    let target = validated_external_url(&url)?;
+
+    #[cfg(target_os = "macos")]
+    return Command::new("open")
+        .arg(target.as_str())
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("Could not open the link: {error}"));
+
+    #[cfg(target_os = "windows")]
+    return Command::new("rundll32.exe")
+        .arg("url.dll,FileProtocolHandler")
+        .arg(target.as_str())
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("Could not open the link: {error}"));
+
+    #[cfg(target_os = "linux")]
+    return Command::new("xdg-open")
+        .arg(target.as_str())
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("Could not open the link: {error}"));
+
+    #[allow(unreachable_code)]
+    Err("Opening external links is unavailable on this platform.".into())
+}
+
 #[cfg(target_os = "macos")]
 fn temporary_pdf_path(path: &Path) -> Result<PathBuf, String> {
     let name = path
@@ -373,6 +412,7 @@ pub fn run() {
             take_opened_files,
             allow_document_assets,
             show_in_folder,
+            open_external_url,
             export_pdf
         ])
         .build(tauri::generate_context!())
@@ -390,6 +430,27 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn external_links_accept_only_web_and_email_urls() {
+        for value in [
+            "https://example.com/research?q=one%20two#section",
+            "http://example.com/",
+            "mailto:reader@example.com",
+        ] {
+            assert!(validated_external_url(value).is_ok(), "{value}");
+        }
+        for value in [
+            "javascript:alert(1)",
+            "data:text/html,hello",
+            "file:///private/note.md",
+            "ftp://example.com/file",
+            "../local.md",
+            "--help",
+        ] {
+            assert!(validated_external_url(value).is_err(), "{value}");
+        }
+    }
 
     #[test]
     fn companion_assets_use_only_the_documents_sibling_directory() {

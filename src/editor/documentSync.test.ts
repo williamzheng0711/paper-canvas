@@ -1,9 +1,19 @@
 import { Editor } from '@tiptap/core';
 import StarterKit from '@tiptap/starter-kit';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { documentsEqual, replaceDocumentPreservingSelection } from './documentSync';
 
 describe('document synchronization', () => {
+  it('compares a shared cached document without serializing it', () => {
+    const document = { type: 'doc', content: [{ type: 'paragraph' }] };
+    const stringify = vi.spyOn(JSON, 'stringify');
+    const equal = documentsEqual(document, document);
+    const calls = stringify.mock.calls.length;
+    stringify.mockRestore();
+    expect(equal).toBe(true);
+    expect(calls).toBe(0);
+  });
+
   it('does not treat a cloned saved document as changed', () => {
     const document = {
       type: 'doc',

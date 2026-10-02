@@ -1,15 +1,14 @@
 import CodeBlockLowlight from '@tiptap/extension-code-block-lowlight';
-import Link from '@tiptap/extension-link';
 import Placeholder from '@tiptap/extension-placeholder';
-import { Table, TableCell, TableHeader, TableRow } from '@tiptap/extension-table';
+import { Table, TableRow } from '@tiptap/extension-table';
 import TaskItem from '@tiptap/extension-task-item';
 import TaskList from '@tiptap/extension-task-list';
 import { EditorContent, useEditor } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
 import { common, createLowlight } from 'lowlight';
-import { forwardRef, memo, useEffect, useImperativeHandle, useLayoutEffect, useRef } from 'react';
+import { forwardRef, memo, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useRef } from 'react';
 import type { Editor, JSONContent } from '@tiptap/core';
-import { Selection, TextSelection } from '@tiptap/pm/state';
+import { Selection, TextSelection, type SelectionBookmark } from '@tiptap/pm/state';
 import type { EditorView } from '@tiptap/pm/view';
 import {
   commentContext,
@@ -33,6 +32,9 @@ import { replaceDocumentPreservingSelection } from '../editor/documentSync';
 import { documentToMarkdown } from '../editor/markdown';
 import { insertPastedFormula, insertPastedMarkdown, sanitizePastedHtml } from '../editor/paste';
 import { PaperImage } from '../editor/PaperImage';
+import { PaperCode, PaperLink } from '../editor/PaperLink';
+import { PaperTableCell, PaperTableHeader } from '../editor/PaperTable';
+import { activateDocumentLink, documentLinkTarget } from '../editor/linkNavigation';
 import { scrollToOutlineHeading } from '../editor/outline';
 import {
   markdownSelectionFromMarkedDocument,
@@ -63,6 +65,7 @@ type Props = {
   onEdit?: () => void;
   onCommentRequest?: (placement: CommentPlacement, coordinates: { x: number; y: number }) => void;
   onCommentClick?: (id: string) => void;
+  onLinkError?: (message: string) => void;
   canUndoComment?: boolean;
   canRedoComment?: boolean;
   onUndoComment?: () => void;
@@ -74,7 +77,7 @@ function readImage(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => resolve(String(reader.result));
-    reader.onerror = () => reject(reader.error);
+    reader.onerror = () => reject(reader.error ?? new Error(getMessages().imageReadFailed));
     reader.readAsDataURL(file);
   });
 }
@@ -267,6 +270,7 @@ function sameCanvasProps(previous: Props, next: Props): boolean {
     previous.outlineTarget === next.outlineTarget &&
     previous.onCommentRequest === next.onCommentRequest &&
     previous.onCommentClick === next.onCommentClick &&
+    previous.onLinkError === next.onLinkError &&
     previous.canUndoComment === next.canUndoComment &&
     previous.canRedoComment === next.canRedoComment &&
     previous.onUndoComment === next.onUndoComment &&
@@ -287,6 +291,7 @@ export const CanvasEditor = memo(
     onEdit,
     onCommentRequest,
     onCommentClick,
+    onLinkError,
     canUndoComment = false,
     canRedoComment = false,
     onUndoComment,
@@ -298,7 +303,14 @@ export const CanvasEditor = memo(
   const text = getMessages(language);
   // Keep the live immutable document across editor recreation. Parent snapshots
   // may lag behind typing while the debounced change notification is pending.
-  const documentSnapshot = useRef<{ id: number; initial: JSONContent; live?: Editor['state']['doc'] }>({
+  const documentSnapshot = useRef<{
+    id: number;
+    initial: JSONContent;
+    live?: Editor['state']['doc'];
+    selection?: SelectionBookmark;
+    commentPositions?: CanvasCommentPosition[];
+    commentSignature?: string;
+  }>({
     id: documentId,
     initial: initialDocument,
   });
@@ -311,6 +323,7 @@ export const CanvasEditor = memo(
   const onEditRef = useRef(onEdit);
   const onCommentRequestRef = useRef(onCommentRequest);
   const onCommentClickRef = useRef(onCommentClick);
+  const onLinkErrorRef = useRef(onLinkError);
   const canUndoCommentRef = useRef(canUndoComment);
   const canRedoCommentRef = useRef(canRedoComment);
   const onUndoCommentRef = useRef(onUndoComment);
@@ -320,6 +333,7 @@ export const CanvasEditor = memo(
   onEditRef.current = onEdit;
   onCommentRequestRef.current = onCommentRequest;
   onCommentClickRef.current = onCommentClick;
+  onLinkErrorRef.current = onLinkError;
   canUndoCommentRef.current = canUndoComment;
   canRedoCommentRef.current = canRedoComment;
   onUndoCommentRef.current = onUndoComment;
@@ -329,18 +343,21 @@ export const CanvasEditor = memo(
   const editorRef = useRef<Editor | null>(null);
   const contextSelectionRef = useRef<{ from: number; to: number } | undefined>(undefined);
   const commentSyncTimerRef = useRef<number | undefined>(undefined);
+  const componentMountedRef = useRef(false);
+  const pendingChangeRef = useRef(false);
   const lastMappedCommentsRef = useRef<readonly MarkdownComment[] | undefined>(undefined);
   const decorationSignatureRef = useRef<string | undefined>(undefined);
   const decorationDocumentIdRef = useRef<number | undefined>(undefined);
 
-  const flushCommentMapping = () => {
+  const flushCommentMapping = useCallback(() => {
     if (commentSyncTimerRef.current !== undefined) {
       window.clearTimeout(commentSyncTimerRef.current);
       commentSyncTimerRef.current = undefined;
     }
     const currentEditor = editorRef.current;
     const currentComments = commentsRef.current;
-    if (!currentEditor) return;
+    if (!currentEditor || !pendingChangeRef.current) return;
+    pendingChangeRef.current = false;
     const document = currentEditor.getJSON();
     if (currentComments.length === 0) {
       onChangeRef.current(document);
@@ -353,23 +370,39 @@ export const CanvasEditor = memo(
       document,
       commentsChanged ? mappedComments : undefined,
     );
-  };
+  }, []);
 
-  const scheduleCommentMapping = (currentEditor: Editor) => {
+  const scheduleCommentMapping = useCallback((currentEditor: Editor) => {
     if (commentSyncTimerRef.current !== undefined) window.clearTimeout(commentSyncTimerRef.current);
     commentSyncTimerRef.current = window.setTimeout(() => {
       commentSyncTimerRef.current = undefined;
       if (editorRef.current !== currentEditor) return;
       flushCommentMapping();
     }, 400);
-  };
+  }, [flushCommentMapping]);
+
+  const readAndInsertImage = useCallback((image: File, position?: number) => {
+    const originatingDocumentId = documentSnapshot.current.id;
+    const currentView = () => {
+      const currentEditor = editorRef.current;
+      return componentMountedRef.current && currentEditor && !currentEditor.isDestroyed && documentSnapshot.current.id === originatingDocumentId
+        ? currentEditor.view : undefined;
+    };
+    void readImage(image).then((src) => {
+      const view = currentView();
+      if (view) insertImage(view, src, image.name, position);
+    }).catch((error: unknown) => {
+      if (currentView()) onLinkErrorRef.current?.(error instanceof Error ? error.message : getMessages().imageReadFailed);
+    });
+  }, []);
 
   const editor = useEditor(
     {
       extensions: [
-        StarterKit.configure({ codeBlock: false, link: false }),
+        StarterKit.configure({ code: false, codeBlock: false, link: false }),
+        PaperCode,
         CodeBlockLowlight.configure({ lowlight }),
-        Link.configure({
+        PaperLink.configure({
           openOnClick: false,
           autolink: true,
           defaultProtocol: 'https',
@@ -388,8 +421,8 @@ export const CanvasEditor = memo(
         }),
         Table.configure({ resizable: true }),
         TableRow,
-        TableHeader,
-        TableCell,
+        PaperTableHeader,
+        PaperTableCell,
         TaskList,
         TaskItem.configure({ nested: true }),
         TaskListInput,
@@ -413,10 +446,27 @@ export const CanvasEditor = memo(
       editorProps: {
         attributes: { class: 'paper-editor ProseMirror', spellcheck: 'true' },
         transformPastedHTML: sanitizePastedHtml,
+        handleClick: (view, _position, event) => {
+          if (event.button !== 0 || event.shiftKey || event.altKey) return false;
+          const link = event.target instanceof Element ? event.target.closest<HTMLElement>('a[href], [data-image-link]') : null;
+          const href = link?.getAttribute('href') ?? link?.getAttribute('data-image-link');
+          if (!link || !view.dom.contains(link) || !href) return false;
+          event.preventDefault();
+          if (!documentLinkTarget(href)) {
+            onLinkErrorRef.current?.(getMessages().documentLinkUnavailable);
+            return true;
+          }
+          void activateDocumentLink(view.dom, href).then((activated) => {
+            if (!activated) onLinkErrorRef.current?.(getMessages(language).documentLinkUnavailable);
+          }).catch((error: unknown) => {
+            onLinkErrorRef.current?.(error instanceof Error ? error.message : String(error));
+          });
+          return true;
+        },
         handlePaste: (view, event) => {
           const image = Array.from(event.clipboardData?.files ?? []).find((file) => file.type.startsWith('image/'));
           if (image) {
-            void readImage(image).then((src) => insertImage(view, src, image.name));
+            readAndInsertImage(image);
             return true;
           }
           const plainText = event.clipboardData?.getData('text/plain') ?? '';
@@ -442,7 +492,7 @@ export const CanvasEditor = memo(
             left: event.clientX,
             top: event.clientY,
           })?.pos;
-          void readImage(image).then((src) => insertImage(view, src, image.name, position));
+          readAndInsertImage(image, position);
           return true;
         },
         handleDOMEvents: {
@@ -495,8 +545,15 @@ export const CanvasEditor = memo(
       },
       onUpdate: ({ editor: currentEditor }) => {
         documentSnapshot.current.live = currentEditor.state.doc;
+        documentSnapshot.current.selection = currentEditor.state.selection.getBookmark();
+        documentSnapshot.current.commentPositions = commentDecorationsPluginKey.getState(currentEditor.state)?.positions;
+        documentSnapshot.current.commentSignature = commentDecorationSignature(commentsRef.current);
+        pendingChangeRef.current = true;
         onEditRef.current?.();
         scheduleCommentMapping(currentEditor);
+      },
+      onSelectionUpdate: ({ editor: currentEditor }) => {
+        documentSnapshot.current.selection = currentEditor.state.selection.getBookmark();
       },
     },
     [language],
@@ -506,17 +563,44 @@ export const CanvasEditor = memo(
   useLayoutEffect(() => {
     if (!editor || (appliedDocument.current?.id === documentId && appliedDocument.current.editor === editor)) return;
     const snapshot = documentSnapshot.current;
-    replaceDocumentPreservingSelection(editor, snapshot.live?.toJSON() ?? snapshot.initial);
+    const preservedSelection = snapshot.selection;
+    const replacingDocument = appliedDocument.current?.id !== undefined && appliedDocument.current.id !== documentId;
+    if (commentSyncTimerRef.current !== undefined) {
+      window.clearTimeout(commentSyncTimerRef.current);
+      commentSyncTimerRef.current = undefined;
+    }
+    if (replacingDocument) pendingChangeRef.current = false;
+    decorationSignatureRef.current = undefined;
+    decorationDocumentIdRef.current = undefined;
+    lastMappedCommentsRef.current = undefined;
+    // useEditor already constructed its first document from the initial props.
+    // Replacing it again rebuilds every node view and layout during file open.
+    if (snapshot.live || appliedDocument.current || editor.options.content !== snapshot.initial) {
+      replaceDocumentPreservingSelection(editor, snapshot.live?.toJSON() ?? snapshot.initial);
+    }
+    if (preservedSelection) {
+      editor.view.dispatch(editor.state.tr.setSelection(preservedSelection.resolve(editor.state.doc)));
+    }
     snapshot.live = editor.state.doc;
+    snapshot.selection = editor.state.selection.getBookmark();
+    // A language change recreates the editor. Keep positions already mapped by
+    // pending typing rather than anchoring comments against the older snapshot.
+    if (snapshot.commentPositions && snapshot.commentSignature === commentDecorationSignature(commentsRef.current)) {
+      editor.view.dispatch(editor.state.tr.setMeta(commentDecorationsPluginKey, snapshot.commentPositions));
+      decorationSignatureRef.current = snapshot.commentSignature;
+      decorationDocumentIdRef.current = documentId;
+    }
     appliedDocument.current = { id: documentId, editor };
-  }, [documentId, editor]);
+    if (pendingChangeRef.current) scheduleCommentMapping(editor);
+  }, [documentId, editor, scheduleCommentMapping]);
 
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    componentMountedRef.current = true;
+    return () => {
+      componentMountedRef.current = false;
       if (commentSyncTimerRef.current !== undefined) window.clearTimeout(commentSyncTimerRef.current);
-    },
-    [],
-  );
+    };
+  }, []);
 
   useEffect(() => {
     if (!editor) return;
@@ -528,8 +612,9 @@ export const CanvasEditor = memo(
       return;
     }
     if (decorationSignatureRef.current === signature && decorationDocumentIdRef.current === documentId) return;
-    const markdown = documentToMarkdown(editor.getJSON());
-    const positions = canvasPositionsForComments(editor, markdown, commentsRef.current);
+    const positions = commentsRef.current.length > 0
+      ? canvasPositionsForComments(editor, documentToMarkdown(editor.getJSON()), commentsRef.current)
+      : [];
     const current = commentDecorationsPluginKey.getState(editor.state)?.positions ?? [];
     if (sameCanvasPositions(current, positions)) {
       decorationSignatureRef.current = signature;
@@ -649,7 +734,7 @@ export const CanvasEditor = memo(
       isFocused: () => editor ? editor.view.hasFocus() || Boolean(focusedFormulaSelection(editor.view)) : false,
       requestMeasure: () => undefined,
     }),
-    [editor],
+    [editor, flushCommentMapping],
   );
 
     return <EditorContent editor={editor} />;

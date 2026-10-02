@@ -187,7 +187,10 @@ unclosed`;
     const source = "Press <kbd>Command</kbd> while saving.";
     const document = markdownToDocument(source);
 
-    expect(nodesOfType(document, "inlineHtmlPreview")).toHaveLength(2);
+    expect(nodesOfType(document, "inlineHtmlPreview")).toHaveLength(1);
+    expect(nodesOfType(document, "inlineHtmlPreview")[0].attrs?.source).toBe(
+      "<kbd>Command</kbd>",
+    );
     expect(nodesOfType(document, "unsupportedMarkdown")).toHaveLength(0);
     expect(documentToMarkdown(document)).toContain(source);
   });
@@ -262,5 +265,132 @@ unclosed`;
 
     expect(serialized).toContain("docs/editor.png");
     expect(serialized).not.toContain("asset.localhost");
+  });
+
+  it("resolves reference links and images, including titles, without warning nodes", () => {
+    const source =
+      '# Guide\n\n[Read **the guide**][manual] and ![Logo][logo].\n\n[manual]: https://example.com/guide "Documentation"\n[logo]: https://example.com/logo.png "The logo"\n';
+    const document = markdownToDocument(source);
+    expect(nodesOfType(document, "unsupportedMarkdown")).toHaveLength(0);
+    expect(nodesOfType(document, "inlineHtmlPreview")).toHaveLength(0);
+    expect(nodesOfType(document, "image")[0].attrs).toMatchObject({
+      src: "https://example.com/logo.png",
+      title: "The logo",
+    });
+    const serialized = documentToMarkdown(document);
+    expect(serialized).toContain('https://example.com/guide "Documentation"');
+    expect(serialized).toContain('https://example.com/logo.png "The logo"');
+    const reopened = markdownToDocument(serialized);
+    expect(nodesOfType(reopened, "heading")[0].content?.[0]?.text).toBe(
+      "Guide",
+    );
+    expect(nodesOfType(reopened, "image")[0].attrs).toEqual(
+      nodesOfType(document, "image")[0].attrs,
+    );
+  });
+
+  it("retains unreferenced definitions instead of dropping their URLs", () => {
+    const source = "Visible text.\n\n[unused]: https://example.com/retained";
+    expect(documentToMarkdown(markdownToDocument(source))).toContain(
+      "[unused]: https://example.com/retained",
+    );
+  });
+
+  it("imports table headers and preserves GFM column alignment on repeated round trips", () => {
+    const source =
+      "| Name | Value | Note |\n| :--- | ---: | :---: |\n| x | 42 | center |";
+    const document = markdownToDocument(source);
+    expect(nodesOfType(document, "tableHeader")).toHaveLength(3);
+    expect(nodesOfType(document, "tableCell")).toHaveLength(3);
+    expect(
+      nodesOfType(document, "tableHeader").map((cell) => cell.attrs?.textAlign),
+    ).toEqual(["left", "right", "center"]);
+    expect(markdownToDocument(documentToMarkdown(document))).toEqual(document);
+  });
+
+  it("preserves links wrapped around inline code in a table of contents", () => {
+    const source = "[`Options`](#options) and [**bold**](https://example.com).";
+    const document = markdownToDocument(source);
+    const serialized = documentToMarkdown(document);
+    expect(serialized).toContain("[`Options`](#options)");
+    expect(markdownToDocument(serialized)).toEqual(document);
+  });
+
+  it("keeps fenced formula examples and significant blank lines inside code unchanged", () => {
+    const source = "```tex\n$$x^2$$\n\n\n\\(example\\)\n```\n";
+    const document = markdownToDocument(source);
+    expect(nodesOfType(document, "blockFormula")).toHaveLength(0);
+    expect(nodesOfType(document, "codeBlock")[0].content?.[0]?.text).toBe(
+      "$$x^2$$\n\n\n\\(example\\)",
+    );
+    expect(markdownToDocument(documentToMarkdown(document))).toEqual(document);
+  });
+
+  it("imports starred LaTeX display environments without absorbing following prose", () => {
+    const document = markdownToDocument(
+      "\\begin{align*}\nx &= y\n\\end{align*}\n\nFollowing prose.",
+    );
+    expect(nodesOfType(document, "blockFormula")[0].attrs?.latex).toBe(
+      "\\begin{align*}\nx &= y\n\\end{align*}",
+    );
+    expect(nodesOfType(document, "paragraph")[0].content?.[0]?.text).toBe(
+      "Following prose.",
+    );
+  });
+
+  it("keeps unsupported footnote references inline and their definitions recoverable", () => {
+    const source = "A note[^1].\n\n[^1]: Preserved note.";
+    const document = markdownToDocument(source);
+    expect(document.content?.[0]?.content?.map((node) => node.type)).toEqual([
+      "text",
+      "inlineHtmlPreview",
+      "text",
+    ]);
+    expect(documentToMarkdown(document)).toContain("[^1]");
+    expect(documentToMarkdown(document)).toContain("[^1]: Preserved note.");
+  });
+
+  it("keeps all items in mixed ordinary and task bullet lists in document order", () => {
+    const source =
+      "- Ordinary first\n- [x] Completed\n- [ ] Remaining\n- Ordinary last";
+    const document = markdownToDocument(source);
+    expect(document.content?.map((node) => node.type)).toEqual([
+      "bulletList",
+      "taskList",
+      "bulletList",
+    ]);
+    expect(nodesOfType(document, "listItem")).toHaveLength(2);
+    expect(nodesOfType(document, "taskItem")).toHaveLength(2);
+    const serialized = documentToMarkdown(document);
+    expect(serialized).toContain("Ordinary first");
+    expect(serialized).toContain("[x] Completed");
+    expect(serialized).toContain("[ ] Remaining");
+    expect(serialized).toContain("Ordinary last");
+    expect(
+      nodesOfType(markdownToDocument(serialized), "listItem"),
+    ).toHaveLength(2);
+  });
+
+  it("preserves ordered task lists as source instead of silently losing their numbering", () => {
+    const source = "3. [x] Third\n4. Plain fourth";
+    const serialized = documentToMarkdown(markdownToDocument(source));
+    expect(serialized).toContain("3. [x] Third");
+    expect(serialized).toContain("4. Plain fourth");
+  });
+
+  it("imports the official remark-gfm demo with working reference links and stable code samples", () => {
+    const source = readFileSync(
+      resolve(process.cwd(), "test-fixtures/reading-demo/remark-gfm-readme.md"),
+      "utf8",
+    );
+    const document = markdownToDocument(source);
+    const serialized = documentToMarkdown(document);
+    expect(
+      nodesOfType(document, "unsupportedMarkdown").map(
+        (node) => node.attrs?.source,
+      ),
+    ).toEqual([]);
+    expect(JSON.stringify(document)).toContain('"href":"#what-is-this"');
+    expect(markdownToDocument(serialized)).toEqual(document);
   });
 });

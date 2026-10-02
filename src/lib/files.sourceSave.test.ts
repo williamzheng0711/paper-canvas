@@ -71,4 +71,15 @@ describe('saving Markdown source', () => {
     expect(mocks.mkdir).not.toHaveBeenCalled();
     expect(source).toContain(dataUrl);
   });
+
+  it('keeps an unedited file source unchanged when saving from canvas', async () => {
+    const sourceMarkdown = '# Title\n\nA  [reference][site].\n\n[site]: https://example.com\n\n';
+    const file = {
+      path: '/notes/reading.md', name: 'reading.md', sourceMarkdown,
+      document: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'parsed content' }] }] },
+    };
+    const saved = await saveEditorFile(file);
+    expect(mocks.writeTextFile).toHaveBeenCalledWith(file.path, sourceMarkdown);
+    expect(saved.sourceMarkdown).toBe(sourceMarkdown);
+  });
 });

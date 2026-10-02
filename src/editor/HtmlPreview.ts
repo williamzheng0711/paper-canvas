@@ -1,25 +1,20 @@
-import { Node, mergeAttributes, type NodeViewRendererProps } from '@tiptap/core';
-import { convertFileSrc, isTauri } from '@tauri-apps/api/core';
-import DOMPurify from 'dompurify';
-import { isHtmlPreviewCandidate, previewHtmlAttributes, previewHtmlTags } from './htmlSafety';
+import {
+  Node,
+  mergeAttributes,
+  type NodeViewRendererProps,
+} from "@tiptap/core";
+import { convertFileSrc, isTauri } from "@tauri-apps/api/core";
+import DOMPurify from "dompurify";
+import { localAssetUrl } from "../lib/localAssets";
+import {
+  isHtmlCommentOnly,
+  isHtmlPreviewCandidate,
+  previewHtmlAttributes,
+  previewHtmlTags,
+} from "./htmlSafety";
 
-type PreviewKind = 'block' | 'inline';
+type PreviewKind = "block" | "inline";
 type LocalFileConverter = (path: string) => string;
-
-function pathSeparator(path: string): '/' | '\\' {
-  return path.includes('\\') ? '\\' : '/';
-}
-
-function joinLocalPath(basePath: string, relativePath: string): string {
-  const separator = pathSeparator(basePath);
-  const normalizedRelative = relativePath.replace(/[\\/]/g, separator);
-  return `${basePath.replace(/[\\/]$/, '')}${separator}${normalizedRelative}`;
-}
-
-function splitResourceSuffix(source: string): { path: string; suffix: string } {
-  const index = source.search(/[?#]/);
-  return index < 0 ? { path: source, suffix: '' } : { path: source.slice(0, index), suffix: source.slice(index) };
-}
 
 function isAllowedEmbeddedImage(source: string): boolean {
   return /^data:image\/(?:avif|gif|jpeg|png|webp);base64,/i.test(source);
@@ -35,7 +30,24 @@ function isAllowedRenderedImage(source: string): boolean {
 }
 
 function isRelativeResource(source: string): boolean {
-  return Boolean(source) && !/^(?:[A-Za-z][A-Za-z0-9+.-]*:|\/\/|[\\/]|#)/.test(source);
+  // Browsers ignore ASCII whitespace in URL schemes. Classify that normalized
+  // candidate, but preserve the original bytes when resolving local filenames.
+  const schemeCandidate = source.replace(/\s/g, "");
+  return (
+    Boolean(source) &&
+    !/^(?:[A-Za-z][A-Za-z0-9+.-]*:|\/\/|[\\/]|#)/.test(schemeCandidate)
+  );
+}
+
+function isAbsoluteLocalResource(source: string): boolean {
+  if (/^file:\/\//i.test(source)) {
+    try {
+      return new URL(source).protocol === "file:";
+    } catch {
+      return false;
+    }
+  }
+  return /^(?:\/(?!\/)|[A-Za-z]:[\\/]|\\)/.test(source);
 }
 
 function resolveImageSources(
@@ -43,19 +55,26 @@ function resolveImageSources(
   basePath?: string | null,
   convertLocalFile?: LocalFileConverter,
 ): void {
-  preview.querySelectorAll<HTMLImageElement>('img').forEach((image) => {
-    const source = image.getAttribute('src')?.trim() ?? '';
-    image.setAttribute('referrerpolicy', 'no-referrer');
+  preview.querySelectorAll<HTMLImageElement>("img").forEach((image) => {
+    const source = image.getAttribute("src")?.trim() ?? "";
+    image.setAttribute("referrerpolicy", "no-referrer");
 
     if (isAllowedRenderedImage(source)) return;
-    if (!isRelativeResource(source)) {
-      image.removeAttribute('src');
+    const absoluteLocal = isAbsoluteLocalResource(source);
+    const relativeLocal = isRelativeResource(source);
+    if (!absoluteLocal && !relativeLocal) {
+      image.removeAttribute("src");
       return;
     }
-    if (!basePath || !convertLocalFile) return;
+    if (!convertLocalFile || (!absoluteLocal && !basePath)) {
+      if (absoluteLocal) image.removeAttribute("src");
+      return;
+    }
 
-    const { path, suffix } = splitResourceSuffix(source);
-    image.src = `${convertLocalFile(joinLocalPath(basePath, path))}${suffix}`;
+    image.setAttribute(
+      "src",
+      localAssetUrl(basePath ?? "", source, convertLocalFile),
+    );
   });
 }
 
@@ -67,11 +86,14 @@ export function createHtmlPreview(
     convertLocalFile?: LocalFileConverter;
   },
 ): HTMLElement {
-  const preview = document.createElement(options.kind === 'block' ? 'div' : 'span');
+  const preview = document.createElement(
+    options.kind === "block" ? "div" : "span",
+  );
   preview.className = `html-preview html-preview--${options.kind}`;
+  preview.hidden = isHtmlCommentOnly(source);
 
   if (!isHtmlPreviewCandidate(source)) {
-    preview.classList.add('html-preview--blocked');
+    preview.classList.add("html-preview--blocked");
     preview.textContent = source;
     return preview;
   }
@@ -81,45 +103,126 @@ export function createHtmlPreview(
     ALLOWED_ATTR: [...previewHtmlAttributes],
     ALLOW_ARIA_ATTR: false,
     ALLOW_DATA_ATTR: false,
+    // Image URLs are validated and converted below before this detached
+    // fragment is rendered. Retain local file URLs for that explicit resolver;
+    // the ordinary DOMPurify URL policy still applies to links.
+    ADD_URI_SAFE_ATTR: ["src"],
   });
-  const template = document.createElement('template');
+  const template = document.createElement("template");
   template.innerHTML = String(sanitized);
-  resolveImageSources(template.content, options.basePath, options.convertLocalFile);
+  resolveImageSources(
+    template.content,
+    options.basePath,
+    options.convertLocalFile,
+  );
   preview.append(template.content.cloneNode(true));
-  preview.querySelectorAll<HTMLAnchorElement>('a').forEach((anchor) => {
-    anchor.removeAttribute('target');
-    anchor.rel = 'noopener noreferrer';
+  preview.querySelectorAll<HTMLAnchorElement>("a").forEach((anchor) => {
+    anchor.removeAttribute("target");
+    anchor.rel = "noopener noreferrer";
   });
   return preview;
 }
 
+const previewBlockTags = new Set([
+  "BLOCKQUOTE",
+  "CAPTION",
+  "DD",
+  "DETAILS",
+  "DIV",
+  "DL",
+  "DT",
+  "FIGCAPTION",
+  "FIGURE",
+  "H1",
+  "H2",
+  "H3",
+  "H4",
+  "H5",
+  "H6",
+  "HR",
+  "LI",
+  "OL",
+  "P",
+  "PRE",
+  "SUMMARY",
+  "TABLE",
+  "TBODY",
+  "TD",
+  "TFOOT",
+  "TH",
+  "THEAD",
+  "TR",
+  "UL",
+]);
+
+/** Read the displayed body without searching HTML tags, attributes, or comments. */
+export function htmlPreviewText(source: string, kind: PreviewKind): string {
+  const preview = createHtmlPreview(source, { kind });
+  if (preview.hidden) return "";
+  // Unsupported HTML is intentionally displayed as inert source text.
+  if (preview.classList.contains("html-preview--blocked"))
+    return preview.textContent ?? "";
+
+  const text: string[] = [];
+  function visit(node: globalThis.Node, preformatted = false): void {
+    if (node.nodeType === globalThis.Node.TEXT_NODE) {
+      let value = node.textContent ?? "";
+      if (!preformatted) {
+        value = value.replace(/\s+/g, " ");
+        if (text.at(-1)?.endsWith(" ") && value.startsWith(" "))
+          value = value.slice(1);
+      }
+      text.push(value);
+      return;
+    }
+    if (!(node instanceof HTMLElement) || node.hidden) return;
+    if (node.tagName === "BR") {
+      text.push("\n");
+      return;
+    }
+    const block = previewBlockTags.has(node.tagName);
+    if (block) text.push("\n");
+    node.childNodes.forEach((child) =>
+      visit(child, preformatted || node.tagName === "PRE"),
+    );
+    if (block) text.push("\n");
+  }
+  preview.childNodes.forEach((child) => visit(child));
+  return text
+    .join("")
+    .replace(/ *\n */g, "\n")
+    .replace(/\n+/g, "\n")
+    .trim();
+}
+
 class HtmlPreviewView {
   dom: HTMLElement;
-  private node: NodeViewRendererProps['node'];
+  private node: NodeViewRendererProps["node"];
   private readonly kind: PreviewKind;
 
   constructor(props: NodeViewRendererProps, kind: PreviewKind) {
     this.node = props.node;
     this.kind = kind;
-    this.dom = document.createElement(kind === 'block' ? 'div' : 'span');
-    this.dom.contentEditable = 'false';
-    this.dom.addEventListener('click', this.preventNavigation);
+    this.dom = document.createElement(kind === "block" ? "div" : "span");
+    this.dom.contentEditable = "false";
+    this.dom.addEventListener("click", this.preventNavigation);
     this.render();
   }
 
-  update(node: NodeViewRendererProps['node']): boolean {
+  update(node: NodeViewRendererProps["node"]): boolean {
     if (node.type !== this.node.type) return false;
+    if (node === this.node) return true;
     this.node = node;
     this.render();
     return true;
   }
 
   selectNode(): void {
-    this.dom.classList.add('is-selected');
+    this.dom.classList.add("is-selected");
   }
 
   deselectNode(): void {
-    this.dom.classList.remove('is-selected');
+    this.dom.classList.remove("is-selected");
   }
 
   ignoreMutation(): boolean {
@@ -127,16 +230,20 @@ class HtmlPreviewView {
   }
 
   destroy(): void {
-    this.dom.removeEventListener('click', this.preventNavigation);
+    this.dom.removeEventListener("click", this.preventNavigation);
   }
 
   private readonly preventNavigation = (event: Event): void => {
-    if (event.target instanceof Element && event.target.closest('a')) event.preventDefault();
+    if (event.target instanceof Element && event.target.closest("a"))
+      event.preventDefault();
   };
 
   private render(): void {
-    const source = String(this.node.attrs.source ?? '');
-    const basePath = typeof this.node.attrs.basePath === 'string' ? this.node.attrs.basePath : undefined;
+    const source = String(this.node.attrs.source ?? "");
+    const basePath =
+      typeof this.node.attrs.basePath === "string"
+        ? this.node.attrs.basePath
+        : undefined;
     const convertLocalFile = isTauri() ? convertFileSrc : undefined;
     const preview = createHtmlPreview(source, {
       kind: this.kind,
@@ -144,18 +251,19 @@ class HtmlPreviewView {
       convertLocalFile,
     });
     this.dom.className = preview.className;
+    this.dom.hidden = preview.hidden;
     this.dom.replaceChildren(...Array.from(preview.childNodes));
   }
 }
 
 const htmlPreviewAttributes = {
-  source: { default: '', rendered: false },
+  source: { default: "", rendered: false },
   basePath: { default: null, rendered: false },
 };
 
 export const HtmlPreview = Node.create({
-  name: 'htmlPreview',
-  group: 'block',
+  name: "htmlPreview",
+  group: "block",
   atom: true,
   selectable: true,
 
@@ -164,21 +272,24 @@ export const HtmlPreview = Node.create({
   },
 
   parseHTML() {
-    return [{ tag: 'div[data-html-preview]' }];
+    return [{ tag: "div[data-html-preview]" }];
   },
 
   renderHTML({ HTMLAttributes }) {
-    return ['div', mergeAttributes(HTMLAttributes, { 'data-html-preview': '' })];
+    return [
+      "div",
+      mergeAttributes(HTMLAttributes, { "data-html-preview": "" }),
+    ];
   },
 
   addNodeView() {
-    return (props) => new HtmlPreviewView(props, 'block');
+    return (props) => new HtmlPreviewView(props, "block");
   },
 });
 
 export const InlineHtmlPreview = Node.create({
-  name: 'inlineHtmlPreview',
-  group: 'inline',
+  name: "inlineHtmlPreview",
+  group: "inline",
   inline: true,
   atom: true,
   selectable: true,
@@ -188,14 +299,17 @@ export const InlineHtmlPreview = Node.create({
   },
 
   parseHTML() {
-    return [{ tag: 'span[data-inline-html-preview]' }];
+    return [{ tag: "span[data-inline-html-preview]" }];
   },
 
   renderHTML({ HTMLAttributes }) {
-    return ['span', mergeAttributes(HTMLAttributes, { 'data-inline-html-preview': '' })];
+    return [
+      "span",
+      mergeAttributes(HTMLAttributes, { "data-inline-html-preview": "" }),
+    ];
   },
 
   addNodeView() {
-    return (props) => new HtmlPreviewView(props, 'inline');
+    return (props) => new HtmlPreviewView(props, "inline");
   },
 });

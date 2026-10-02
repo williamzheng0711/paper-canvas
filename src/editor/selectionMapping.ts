@@ -1,6 +1,5 @@
 import type { JSONContent } from '@tiptap/core';
 import type { Node as ProseMirrorNode } from '@tiptap/pm/model';
-import { documentsEqual } from './documentSync';
 import { parseMarkdownComments } from './comments';
 import { documentToMarkdown, markdownToDocument } from './markdown';
 
@@ -201,20 +200,55 @@ function canonicalDocument(node: JSONContent): JSONContent {
   return canonical;
 }
 
-function documentsSemanticallyEqual(left: JSONContent, right: JSONContent): boolean {
-  return documentsEqual(canonicalDocument(left), canonicalDocument(right));
+function tableCellRanges(line: string): Array<{ from: number; to: number }> {
+  const ranges: Array<{ from: number; to: number }> = [];
+  let from = 0;
+  for (let index = 0; index < line.length; index += 1) {
+    if (line[index] !== '|') continue;
+    let backslashes = 0;
+    for (let before = index - 1; before >= 0 && line[before] === '\\'; before -= 1) backslashes += 1;
+    if (backslashes % 2 !== 0) continue;
+    ranges.push({ from, to: index });
+    from = index + 1;
+  }
+  ranges.push({ from, to: line.length });
+  if (ranges.length > 1 && !line.slice(ranges[0].from, ranges[0].to).trim()) ranges.shift();
+  if (ranges.length > 1 && !line.slice(ranges.at(-1)!.from, ranges.at(-1)!.to).trim()) ranges.pop();
+  return ranges;
+}
+
+function tableDelimiterOffsets(source: string, requested: number, lineStart: number, lineEnd: number): number[] {
+  const line = source.slice(lineStart, lineEnd);
+  // A delimiter row has no canvas text to receive a caret. Trying every dash
+  // reparses the entire file and cannot find a matching table. Snap to the
+  // corresponding header cell, then still validate the exact parsed document.
+  if (!line.includes('|') || lineStart === 0) return [];
+  const delimiters = tableCellRanges(line);
+  if (!delimiters.every(({ from, to }) => /^:?-+:?$/.test(line.slice(from, to).trim()))) return [];
+  const headerEnd = lineStart - 1;
+  const headerStart = source.lastIndexOf('\n', Math.max(0, headerEnd - 1)) + 1;
+  const header = source.slice(headerStart, headerEnd);
+  const cells = tableCellRanges(header);
+  if (cells.length !== delimiters.length) return [];
+  const relative = requested - lineStart;
+  const column = delimiters.findIndex(({ to }) => relative <= to);
+  const cell = cells[column < 0 ? cells.length - 1 : column];
+  const value = header.slice(cell.from, cell.to);
+  return [headerStart + cell.to - (value.length - value.trimEnd().length)];
 }
 
 function nearbyOffsets(markdown: string, requestedOffset: number): number[] {
   const requested = clampOffset(markdown.length, requestedOffset);
-  const candidates = [requested];
+  const lineStart = markdown.lastIndexOf('\n', Math.max(0, requested - 1)) + 1;
+  const lineBreak = markdown.indexOf('\n', requested);
+  const lineEnd = lineBreak < 0 ? markdown.length : lineBreak;
+  // Try the authored position first: table-like text inside a code block is
+  // real content and must retain its exact caret rather than snapping upward.
+  const candidates = [requested, ...tableDelimiterOffsets(markdown, requested, lineStart, lineEnd)];
   for (let distance = 1; distance <= 8; distance += 1) {
     candidates.push(requested - distance, requested + distance);
   }
 
-  const lineStart = markdown.lastIndexOf('\n', Math.max(0, requested - 1)) + 1;
-  const lineBreak = markdown.indexOf('\n', requested);
-  const lineEnd = lineBreak < 0 ? markdown.length : lineBreak;
   candidates.push(lineStart, lineEnd);
 
   return [...new Set(candidates.map((candidate) => clampOffset(markdown.length, candidate)))];
@@ -225,22 +259,43 @@ function nearbyOffsets(markdown: string, requestedOffset: number): number[] {
  * A caret on Markdown punctuation is snapped to the nearest source offset that
  * preserves the exact parsed document.
  */
-export function markdownToDocumentWithSelection(markdown: string, requestedOffset?: number): ParsedMarkdownSelection {
-  const source = parseMarkdownComments(markdown).body;
-  const document = markdownToDocument(source);
-  if (requestedOffset === undefined || source.includes(selectionMarker)) return { document };
-
+function selectionAnchorAtOffset(
+  source: string,
+  requestedOffset: number,
+  canonicalSignature: string,
+): DocumentSelectionAnchor | undefined {
   for (const offset of nearbyOffsets(source, requestedOffset)) {
     const markedMarkdown = `${source.slice(0, offset)}${selectionMarker}${source.slice(offset)}`;
     const markedDocument = markdownToDocument(markedMarkdown);
     const anchor = locateSelectionMarker(markedDocument);
     const strippedDocument = stripSelectionMarker(markedDocument);
-    if (anchor && strippedDocument && documentsSemanticallyEqual(strippedDocument, document)) {
-      return { document, anchor };
+    if (anchor && strippedDocument && JSON.stringify(canonicalDocument(strippedDocument)) === canonicalSignature) {
+      return anchor;
     }
   }
+  return undefined;
+}
+
+export function markdownToDocumentWithSelection(markdown: string, requestedOffset?: number): ParsedMarkdownSelection {
+  const source = parseMarkdownComments(markdown).body;
+  const document = markdownToDocument(source);
+  if (requestedOffset === undefined || source.includes(selectionMarker)) return { document };
+
+  const anchor = selectionAnchorAtOffset(source, requestedOffset, JSON.stringify(canonicalDocument(document)));
+  if (anchor) return { document, anchor };
   return { document };
 }
+
+type CachedMarkdownPositions = {
+  markdown: string;
+  source: string;
+  canonicalSignature: string;
+  positions: Map<number, { position: number; affinity: -1 | 1 } | undefined>;
+};
+
+// ProseMirror documents are immutable. Repeated comment navigation can reuse
+// its parsed baseline and resolved offsets until the live document changes.
+const markdownPositions = new WeakMap<ProseMirrorNode, CachedMarkdownPositions>();
 
 /** Resolve a UTF-16 Markdown offset to a live ProseMirror position. */
 export function positionFromMarkdownOffset(
@@ -248,9 +303,27 @@ export function positionFromMarkdownOffset(
   markdown: string,
   offset: number,
 ): { position: number; affinity: -1 | 1 } | undefined {
-  const mapped = markdownToDocumentWithSelection(markdown, offset);
-  if (!mapped.anchor) return undefined;
-  return positionFromDocumentAnchor(document, mapped.anchor);
+  let cached = markdownPositions.get(document);
+  if (!cached || cached.markdown !== markdown) {
+    const source = parseMarkdownComments(markdown).body;
+    cached = {
+      markdown,
+      source,
+      canonicalSignature: JSON.stringify(canonicalDocument(markdownToDocument(source))),
+      positions: new Map(),
+    };
+    markdownPositions.set(document, cached);
+  }
+  const bounded = clampOffset(cached.source.length, offset);
+  if (cached.positions.has(bounded)) return cached.positions.get(bounded);
+  const anchor = cached.source.includes(selectionMarker)
+    ? undefined
+    : selectionAnchorAtOffset(cached.source, bounded, cached.canonicalSignature);
+  const resolved = anchor ? positionFromDocumentAnchor(document, anchor) : undefined;
+  // Bound retained offsets for a long reading session with many comment clicks.
+  if (cached.positions.size >= 256) cached.positions.delete(cached.positions.keys().next().value!);
+  cached.positions.set(bounded, resolved);
+  return resolved;
 }
 
 /** Convert a non-dispatched ProseMirror marker transaction into a source caret. */

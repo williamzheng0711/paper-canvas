@@ -2,7 +2,7 @@ import type { Editor, JSONContent } from '@tiptap/core';
 import { Selection } from '@tiptap/pm/state';
 
 export function documentsEqual(left: JSONContent, right: JSONContent): boolean {
-  return JSON.stringify(left) === JSON.stringify(right);
+  return left === right || JSON.stringify(left) === JSON.stringify(right);
 }
 
 /** Replace an editor document without moving a valid existing selection. */
