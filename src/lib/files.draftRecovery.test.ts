@@ -1,4 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { getSchema } from "@tiptap/core";
+import { canvasNodesAndMarks } from "../editor/canvasSchema";
 import {
   createMarkdownComment,
   serializeMarkdownWithComments,
@@ -78,7 +80,46 @@ describe.each([false, true])("draft recovery (native=%s)", (native) => {
     expect(await loadDraft()).toEqual({ name: "Image.md", document });
   });
 
-  it.each([null, "legacy", [], { name: "Broken.md" }])(
+  it.each([
+    { type: "doc", content: "damaged" },
+    { type: "doc", content: [{ type: "paragraph", content: [null] }] },
+    { type: "doc", content: [{ type: "unknownFutureNode" }] },
+    { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: "stale cache" }] }] },
+  ])("rebuilds from exact source when a document cache is corrupt or stale: %j", async (document) => {
+    const sourceMarkdown = "# Exact recovery\r\n\r\nA *complete* draft.\r\n";
+    store({ name: "Recovered.md", document, sourceMarkdown, comments: { corrupt: true } });
+    const draft = await loadDraft();
+    expect(draft?.sourceMarkdown).toBe(sourceMarkdown);
+    expect(draft?.document).toEqual(markdownToDocument(sourceMarkdown));
+    expect(draft?.comments).toEqual([]);
+  });
+
+  it("never adopts a stored path when restoring an unsaved source draft", async () => {
+    const sourceMarkdown = "Recover without overwriting an earlier file.\n";
+    store({ name: "Recovered.md", path: "/notes/earlier.md", sourceMarkdown });
+    expect((await loadDraft())?.path).toBeUndefined();
+  });
+
+  it("restores a canvas-only cache accepted by the exact production schema", async () => {
+    const document = markdownToDocument("# Recovery\n\nA **bold** $x^2$ paragraph.\n\n- [x] Done\n\n| A | B |\n| - | - |\n| 1 | 2 |\n\nFootnote[^note].\n\n[^note]: Saved note.\n");
+    store({ name: "Canvas.md", document });
+    const draft = await loadDraft();
+    expect(draft?.document).toEqual(document);
+    const node = getSchema(canvasNodesAndMarks()).nodeFromJSON(draft!.document);
+    expect(() => node.check()).not.toThrow();
+  });
+
+  it.each([
+    null, "legacy", [], { name: "Broken.md" },
+    { document: { type: "doc", content: "damaged" } },
+    { document: { type: "doc", content: [{ type: "paragraph", content: [null] }] } },
+    { document: { type: "doc", content: [{ type: "unknownFutureNode" }] } },
+    { document: { type: "doc", content: [{ type: "paragraph", attrs: [], content: [{ type: "text", text: "Lost" }] }] } },
+    { document: { type: "doc", content: [{ type: "paragraph", content: [{ type: "table", content: [] }] }] } },
+    { document: { type: "doc", content: [{ type: "text", text: "Wrong position" }] } },
+    { document: { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: "", marks: [] }] }] } },
+    { document: { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: "Invalid mark", marks: [{ type: "unknownFutureMark" }] }] }] } },
+  ])(
     "ignores a recovery record with no recoverable content: %j",
     async (value) => {
       store(value);

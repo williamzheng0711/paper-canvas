@@ -17,7 +17,7 @@ import {
 const mocks = vi.hoisted(() => ({
   target: "/exports/copy.md",
   save: vi.fn(),
-  writeTextFile: vi.fn(),
+  writeMarkdown: vi.fn(),
   writeFile: vi.fn(),
   mkdir: vi.fn(),
   rename: vi.fn(),
@@ -26,7 +26,9 @@ const mocks = vi.hoisted(() => ({
 vi.mock("@tauri-apps/api/core", () => ({
   isTauri: () => true,
   convertFileSrc: (path: string) => `asset:${path}`,
-  invoke: vi.fn(),
+  invoke: async (command: string, args?: { path: string; contents: string }) => {
+    if (command === 'write_markdown_file') return mocks.writeMarkdown(args!.path, args!.contents);
+  },
 }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({
   open: vi.fn(),
@@ -36,7 +38,7 @@ vi.mock("@tauri-apps/plugin-fs", () => ({
   exists: vi.fn(),
   readTextFile: vi.fn(),
   rename: mocks.rename,
-  writeTextFile: mocks.writeTextFile,
+  writeTextFile: vi.fn(),
   writeFile: mocks.writeFile,
   mkdir: mocks.mkdir,
 }));
@@ -59,7 +61,7 @@ describe("Save As local images", () => {
     vi.resetAllMocks();
     mocks.target = "/exports/copy.md";
     mocks.save.mockImplementation(async () => mocks.target);
-    mocks.writeTextFile.mockResolvedValue(undefined);
+    mocks.writeMarkdown.mockResolvedValue(undefined);
   });
 
   it("keeps original physical images and unrelated source bytes when saving in another directory", async () => {
@@ -77,7 +79,7 @@ describe("Save As local images", () => {
       )
       .replace("<images/reference.png>", "<../notes/images/reference.png>")
       .replace('SRC="images/html.png', 'SRC="../notes/images/html.png');
-    expect(mocks.writeTextFile).toHaveBeenCalledWith(
+    expect(mocks.writeMarkdown).toHaveBeenCalledWith(
       "/exports/copy.md",
       expected,
     );
@@ -107,7 +109,7 @@ describe("Save As local images", () => {
         '# Title\r\n\r\n![Image][ref]\r\n\r\n[ref]: <./research%2Eassets/a%20b.png> "Title"\r\n\r\n';
       const saved = await saveEditorFile(sourceFile(source), forceSaveAs);
       expect(saved.sourceMarkdown).toBe(source);
-      expect(mocks.writeTextFile).toHaveBeenCalledWith(
+      expect(mocks.writeMarkdown).toHaveBeenCalledWith(
         forceSaveAs ? mocks.target : oldPath,
         source,
       );
@@ -126,7 +128,7 @@ describe("Save As local images", () => {
 
       const saved = await saveEditorFile(file, true);
 
-      expect(mocks.writeTextFile).toHaveBeenCalledWith(mocks.target, expected);
+      expect(mocks.writeMarkdown).toHaveBeenCalledWith(mocks.target, expected);
       expect(saved).toEqual(expect.objectContaining({
         path: mocks.target, name: "copy.md", sourceMarkdown: expected,
       }));
@@ -205,14 +207,14 @@ describe("Save As local images", () => {
   it("rebases the latest edits once before a retry at the new Save As path", async () => {
     const first = "# First\n\n![Image](research.assets/a.png)\n";
     let completeWrite!: () => void;
-    mocks.writeTextFile.mockImplementationOnce(
+    mocks.writeMarkdown.mockImplementationOnce(
       () =>
         new Promise<void>((resolve) => {
           completeWrite = resolve;
         }),
     );
     const saving = saveEditorFile(sourceFile(first), true);
-    await vi.waitFor(() => expect(mocks.writeTextFile).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(mocks.writeMarkdown).toHaveBeenCalledOnce());
     const latest =
       first.replace("# First", "# Latest") + "\n![Added](images/late.png)\n";
     completeWrite();
@@ -231,7 +233,7 @@ describe("Save As local images", () => {
       .replace("research.assets/a.png", "../notes/research.assets/a.png")
       .replace("images/late.png", "../notes/images/late.png");
     expect(retried.sourceMarkdown).toBe(expected);
-    expect(mocks.writeTextFile).toHaveBeenLastCalledWith(
+    expect(mocks.writeMarkdown).toHaveBeenLastCalledWith(
       "/exports/copy.md",
       expected,
     );

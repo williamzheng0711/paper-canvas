@@ -1,7 +1,7 @@
 import type { JSONContent } from '@tiptap/core';
 import { convertFileSrc, invoke, isTauri } from '@tauri-apps/api/core';
 import { confirm, open, save } from '@tauri-apps/plugin-dialog';
-import { exists, mkdir, readTextFile, rename, writeFile, writeTextFile } from '@tauri-apps/plugin-fs';
+import { exists, mkdir, readTextFile, rename, writeFile } from '@tauri-apps/plugin-fs';
 import { Store } from '@tauri-apps/plugin-store';
 import {
   parseMarkdownComments,
@@ -10,6 +10,7 @@ import {
   type MarkdownComment,
 } from '../editor/comments';
 import { documentToMarkdown, markdownToDocument } from '../editor/markdown';
+import { isValidCanvasDocument } from '../editor/canvasSchema';
 import { detectLanguage, getMessages, isLanguage, type Language } from '../i18n';
 import { normalizeLineSpacing } from './lineSpacing';
 import { normalizeFontSize } from './fontSize';
@@ -133,14 +134,15 @@ async function persistEmbeddedImages(document: JSONContent, path: string): Promi
     }
   });
   if (assets.length === 0) return prepared;
+  const batchId = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
   await invoke('allow_document_assets', { path });
   await mkdir(targetDirectory, { recursive: true });
   await Promise.all(
     assets.map(async ({ node, src }, index) => {
       const bytes = dataUrlBytes(src);
       if (!bytes) return;
-      const relative = `${fileName(path).replace(/\.md$/i, '')}.assets/image-${Date.now()}-${index}.${extensionForDataUrl(src)}`;
-      await writeFile(joinPath(parentPath(path), relative), bytes);
+      const relative = `${fileName(path).replace(/\.md$/i, '')}.assets/image-${batchId}-${index}.${extensionForDataUrl(src)}`;
+      await writeFile(joinPath(parentPath(path), relative), bytes, { createNew: true });
       node.attrs = { ...node.attrs, src: encodeLocalAssetPath(relative) };
     }),
   );
@@ -311,6 +313,16 @@ function downloadTextFile(contents: string, name: string): void {
   URL.revokeObjectURL(url);
 }
 
+/** Commit the complete source atomically so a failed write cannot truncate it. */
+function writeMarkdownFile(path: string, contents: string): Promise<void> {
+  return invoke('write_markdown_file', { path, contents });
+}
+
+/** Rename without replacing an entry created after the collision check. */
+function renameDocumentEntry(source: string, target: string): Promise<void> {
+  return isTauri() ? invoke('rename_document_entry', { source, target }) : rename(source, target);
+}
+
 /** Exports a Markdown copy without changing the active document path. */
 export async function exportMarkdownFile(markdown: string, defaultName: string, sourcePath?: string): Promise<string | null> {
   const text = getMessages();
@@ -327,7 +339,7 @@ export async function exportMarkdownFile(markdown: string, defaultName: string, 
   });
   if (!selected) return null;
   const exportedMarkdown = sourcePath ? rebaseMarkdownImageAssets(markdown, sourcePath, selected) : markdown;
-  await writeTextFile(selected, exportedMarkdown);
+  await writeMarkdownFile(selected, exportedMarkdown);
   return fileName(selected);
 }
 
@@ -375,7 +387,7 @@ export async function saveEditorFile(
   const portable = restoreRelativeImagePaths(prepared.document);
   const sourceMarkdown = prepared.sourceMarkdown;
   if (sourceMarkdown !== undefined) {
-    await writeTextFile(path, sourceMarkdown);
+    await writeMarkdownFile(path, sourceMarkdown);
     // The file is already committed. History failure must not prevent adopting
     // a Save As destination and leave subsequent saves targeting the old path.
     await rememberRecent({ path, name: fileName(path) }).catch(() => undefined);
@@ -392,7 +404,7 @@ export async function saveEditorFile(
   const markdown = documentToMarkdown(withAssets);
   const comments = relocateMarkdownComments(prepared.comments ?? [], markdownBeforeAssets, markdown);
   const savedMarkdown = serializeMarkdownWithComments(markdown, comments);
-  await writeTextFile(path, savedMarkdown);
+  await writeMarkdownFile(path, savedMarkdown);
   await rememberRecent({ path, name: fileName(path) }).catch(() => undefined);
   return {
     path,
@@ -424,29 +436,22 @@ export async function renameEditorFile(file: EditorFile, newName: string): Promi
     throw new Error(text.assetsDirectoryExists);
   }
 
-  let originalSource: string | undefined;
-  let rewriteAttempted = false;
-  await rename(file.path, target);
+  await renameDocumentEntry(file.path, target);
   try {
-    if (moveAssets) await rename(oldAssets, nextAssets);
-    originalSource = await readTextFile(target);
+    if (moveAssets) await renameDocumentEntry(oldAssets, nextAssets);
+    const originalSource = await readTextFile(target);
     const renamedSource = renameMarkdownImageAssets(originalSource, file.path, target);
     if (renamedSource !== originalSource) {
-      rewriteAttempted = true;
-      await writeTextFile(target, renamedSource);
+      await writeMarkdownFile(target, renamedSource);
     }
   } catch (error) {
-    // A failed write may already have truncated the file. Recover source bytes
-    // before restoring its name, as well as the companion directory.
-    if (rewriteAttempted && originalSource !== undefined) {
-      await writeTextFile(target, originalSource).catch(() => undefined);
-    }
-    // Recover the original pair when moving the companion directory fails.
+    // Atomic source commits retain the original bytes on failure. Restore the
+    // document and companion names without replacing newly created entries.
     if (moveAssets && (await exists(nextAssets)) && !(await exists(oldAssets))) {
-      await rename(nextAssets, oldAssets).catch(() => undefined);
+      await renameDocumentEntry(nextAssets, oldAssets).catch(() => undefined);
     }
     if ((await exists(target)) && !(await exists(file.path))) {
-      await rename(target, file.path).catch(() => undefined);
+      await renameDocumentEntry(target, file.path).catch(() => undefined);
     }
     throw error;
   }
@@ -576,11 +581,14 @@ function mergePreferences(stored: Partial<AppPreferences> | null | undefined): A
     ...preferences,
     theme: preferences.theme === 'light' || preferences.theme === 'dark' ? preferences.theme : defaultPreferences.theme,
     font: ['system', 'serif', 'mono'].includes(preferences.font) ? preferences.font : defaultPreferences.font,
-    fontSize: normalizeFontSize(String(preferences.fontSize), defaultPreferences.fontSize),
+    fontSize: normalizeFontSize(
+      typeof preferences.fontSize === 'number' || typeof preferences.fontSize === 'string' ? String(preferences.fontSize) : '',
+      defaultPreferences.fontSize,
+    ),
     sidebarOpen: typeof preferences.sidebarOpen === 'boolean' ? preferences.sidebarOpen : defaultPreferences.sidebarOpen,
     recentFilesExpanded: typeof preferences.recentFilesExpanded === 'boolean' ? preferences.recentFilesExpanded : defaultPreferences.recentFilesExpanded,
     lineSpacing: normalizeLineSpacing(
-      preferences.lineSpacing,
+      typeof preferences.lineSpacing === 'number' || typeof preferences.lineSpacing === 'string' ? preferences.lineSpacing : defaultPreferences.lineSpacing,
       defaultPreferences.lineSpacing,
     ),
     language: isLanguage(stored?.language) ? stored.language : defaultPreferences.language,
@@ -647,11 +655,20 @@ function restoredDraft(value: unknown): EditorFile | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const draft = value as Partial<EditorFile>;
   const name = typeof draft.name === 'string' && draft.name ? draft.name : getMessages().untitledFilename;
-  if (draft.document?.type === 'doc') return { ...draft, name } as EditorFile;
-  // Older or partially written recovery records may retain exact source without
-  // an editor document. Rebuild from that source instead of losing the draft.
-  if (typeof draft.sourceMarkdown !== 'string') return null;
-  return { ...draft, ...editorFileFromMarkdown(draft.sourceMarkdown, draft.path, name) };
+  // Exact source is authoritative. A stale or damaged cache must not turn a
+  // recoverable draft into an empty editor, or carry invalid comments into it.
+  if (typeof draft.sourceMarkdown === 'string') {
+    return editorFileFromMarkdown(draft.sourceMarkdown, undefined, name);
+  }
+  if (!isValidCanvasDocument(draft.document)) return null;
+  try {
+    // Validate cached comments through their persisted format as well.
+    const markdown = documentToPortableMarkdown(draft.document, draft.comments);
+    if (parseMarkdownComments(markdown).status === 'invalid') return null;
+  } catch {
+    return null;
+  }
+  return { ...draft, path: undefined, name } as EditorFile;
 }
 
 export async function loadDraft(): Promise<EditorFile | null> {
@@ -686,6 +703,15 @@ export function clearDraft(): Promise<void> {
       return;
     }
     localStorage.removeItem(draftKey);
+  });
+}
+
+/** Finish queued recovery/settings writes before a native window is destroyed. */
+export function flushSettings(): Promise<void> {
+  return queueSettingsMutation(async () => {
+    if (!isTauri()) return;
+    const store = await Store.load(settingsKey, { autoSave: 200 });
+    await store.save();
   });
 }
 

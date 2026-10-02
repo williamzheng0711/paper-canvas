@@ -1,8 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { clearDraft, loadDraft, saveDraft, type EditorFile } from "./files";
+import { clearDraft, flushSettings, loadDraft, saveDraft, type EditorFile } from "./files";
+import { markdownToDocument } from "../editor/markdown";
 
 const mocks = vi.hoisted(() => ({
   load: vi.fn(),
+  save: vi.fn(),
   entries: new Map<string, unknown>(),
 }));
 vi.mock("@tauri-apps/api/core", () => ({
@@ -22,6 +24,7 @@ vi.mock("@tauri-apps/plugin-fs", () => ({
 vi.mock("@tauri-apps/plugin-store", () => ({ Store: { load: mocks.load } }));
 
 const store = {
+  save: mocks.save,
   get: async (key: string) => mocks.entries.get(key),
   set: async (key: string, value: unknown) => {
     mocks.entries.set(key, value);
@@ -32,15 +35,8 @@ const store = {
 };
 const latest: EditorFile = {
   name: "Latest draft.md",
-  document: {
-    type: "doc",
-    content: [
-      {
-        type: "paragraph",
-        content: [{ type: "text", text: "Latest typed content" }],
-      },
-    ],
-  },
+  document: markdownToDocument("# Latest draft\n\nLiteral  unfinished * source.\n"),
+  comments: [],
   sourceMarkdown: "# Latest draft\n\nLiteral  unfinished * source.\n",
 };
 
@@ -96,5 +92,28 @@ describe("ordered draft persistence", () => {
     await expect(clearing).rejects.toThrow("Store unavailable");
     await saving;
     await expect(loadDraft()).resolves.toEqual(latest);
+  });
+
+  it("flushes the native store only after the queued recovery draft reaches it", async () => {
+    let releaseLoad!: (value: typeof store) => void;
+    mocks.load.mockImplementationOnce(() => new Promise((resolve) => { releaseLoad = resolve; }));
+    mocks.save.mockImplementation(async () => {
+      expect(mocks.entries.get("unsavedDraft")).toEqual(latest);
+    });
+    const saving = saveDraft(latest);
+    const flushing = flushSettings();
+    await flushAsyncLoading();
+    expect(mocks.save).not.toHaveBeenCalled();
+    releaseLoad(store);
+    await Promise.all([saving, flushing]);
+    expect(mocks.save).toHaveBeenCalledOnce();
+  });
+
+  it("reports native settings flush failures so closing can retain the recovery data", async () => {
+    mocks.save.mockRejectedValueOnce(new Error("Settings disk full"));
+    await expect(flushSettings()).rejects.toThrow("Settings disk full");
+    await saveDraft(latest);
+    await flushSettings();
+    expect(mocks.save).toHaveBeenCalledTimes(2);
   });
 });

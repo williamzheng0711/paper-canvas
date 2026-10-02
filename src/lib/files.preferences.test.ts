@@ -85,4 +85,9 @@ describe.each([
     writeStored({ compactLayoutVersion: 1, fontSize: null } as unknown as Partial<AppPreferences>);
     expect((await loadPreferences()).fontSize).toBe(15);
   });
+
+  it.each([null, false, true, {}, [], { toString: 'damaged' }].map((value) => ({ value })))('recovers malformed typography values without blocking startup: %j', async ({ value }) => {
+    writeStored({ compactLayoutVersion: 1, fontSize: value, lineSpacing: value } as unknown as Partial<AppPreferences>);
+    await expect(loadPreferences()).resolves.toEqual(expect.objectContaining({ fontSize: 15, lineSpacing: 1.62 }));
+  });
 });

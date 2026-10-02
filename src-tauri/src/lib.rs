@@ -1,4 +1,6 @@
 use std::{
+    fs::File,
+    io::Write,
     path::{Path, PathBuf},
     sync::Mutex,
 };
@@ -8,7 +10,6 @@ use std::process::Command;
 
 #[cfg(target_os = "macos")]
 use std::{
-    fs::File,
     io::{Read, Seek, SeekFrom},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -98,6 +99,92 @@ fn take_opened_files(app: AppHandle) -> Vec<String> {
     std::mem::take(&mut *paths)
 }
 
+fn validate_markdown_save_path(path: &Path) -> Result<(), String> {
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|part| matches!(part, std::path::Component::ParentDir))
+        || !path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| {
+                extension.eq_ignore_ascii_case("md") || extension.eq_ignore_ascii_case("markdown")
+            })
+    {
+        return Err("Saving requires an absolute Markdown path without parent traversal.".into());
+    }
+    Ok(())
+}
+
+fn replace_file_atomically(
+    path: &Path,
+    write: impl FnOnce(&mut File) -> std::io::Result<()>,
+) -> Result<(), String> {
+    // Follow an existing document symlink, as ordinary file writes do, rather
+    // than replacing the link itself with a different document.
+    let target = match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            path.canonicalize().map_err(|error| error.to_string())?
+        }
+        Ok(_) => path.to_path_buf(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => path.to_path_buf(),
+        Err(error) => return Err(error.to_string()),
+    };
+    let metadata = match std::fs::metadata(&target) {
+        Ok(metadata) if metadata.is_file() => {
+            // Check write access without truncating the destination. Atomic
+            // replacement must not bypass an existing read-only document.
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&target)
+                .map_err(|error| error.to_string())?;
+            Some(metadata)
+        }
+        Ok(_) => return Err("The document destination must be a regular file.".into()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.to_string()),
+    };
+    let parent = target
+        .parent()
+        .ok_or_else(|| "The document directory is invalid.".to_string())?;
+    // A short, unique sibling name also works for long document filenames.
+    // NamedTempFile removes incomplete writes and failed replacements on drop.
+    let mut temporary = tempfile::Builder::new()
+        .prefix(".papercanvas-")
+        .suffix(".tmp")
+        .tempfile_in(parent)
+        .map_err(|error| error.to_string())?;
+    write(temporary.as_file_mut()).map_err(|error| error.to_string())?;
+    if let Some(metadata) = metadata {
+        temporary
+            .as_file()
+            .set_permissions(metadata.permissions())
+            .map_err(|error| error.to_string())?;
+    }
+    temporary
+        .as_file()
+        .sync_all()
+        .map_err(|error| error.to_string())?;
+    temporary
+        .persist(&target)
+        .map_err(|error| error.error.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn write_markdown_file(app: AppHandle, path: String, contents: String) -> Result<(), String> {
+    let target = PathBuf::from(path);
+    validate_markdown_save_path(&target)?;
+    if !app.fs_scope().is_allowed(&target) {
+        return Err("The document path is outside the granted file scope.".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        replace_file_atomically(&target, |file| file.write_all(contents.as_bytes()))
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 fn document_asset_directory(path: &Path) -> Result<PathBuf, String> {
     if !path.is_absolute()
         || path
@@ -182,6 +269,84 @@ fn document_rename_asset_directories(
         document_asset_directory(source)?,
         document_asset_directory(target)?,
     ])
+}
+
+fn validate_rename_entries(source: &Path, target: &Path) -> Result<(), String> {
+    for path in [source, target] {
+        if !path.is_absolute()
+            || path
+                .components()
+                .any(|part| matches!(part, std::path::Component::ParentDir))
+        {
+            return Err("Rename requires absolute paths without parent traversal.".into());
+        }
+    }
+    if source.parent() != target.parent() {
+        return Err(
+            "A document or asset folder can only be renamed within its current directory.".into(),
+        );
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn rename_without_replacement(source: &Path, target: &Path) -> std::io::Result<()> {
+    rustix::fs::renameat_with(
+        rustix::fs::CWD,
+        source,
+        rustix::fs::CWD,
+        target,
+        rustix::fs::RenameFlags::NOREPLACE,
+    )
+    .map_err(Into::into)
+}
+
+#[cfg(windows)]
+fn rename_without_replacement(source: &Path, target: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_WRITE_THROUGH};
+    let source: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
+    let target: Vec<u16> = target.as_os_str().encode_wide().chain(Some(0)).collect();
+    if source[..source.len() - 1].contains(&0) || target[..target.len() - 1].contains(&0) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "A filename cannot contain NUL.",
+        ));
+    }
+    // SAFETY: Both paths are NUL-terminated UTF-16 buffers. Omitting
+    // MOVEFILE_REPLACE_EXISTING makes target creation races fail safely.
+    if unsafe { MoveFileExW(source.as_ptr(), target.as_ptr(), MOVEFILE_WRITE_THROUGH) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+fn rename_without_replacement(_source: &Path, _target: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "Safe rename is unavailable on this platform.",
+    ))
+}
+
+#[tauri::command]
+async fn rename_document_entry(
+    app: AppHandle,
+    source: String,
+    target: String,
+) -> Result<(), String> {
+    let source = PathBuf::from(source);
+    let target = PathBuf::from(target);
+    validate_rename_entries(&source, &target)?;
+    let scope = app.fs_scope();
+    if !scope.is_allowed(&source) || !scope.is_allowed(&target) {
+        return Err("The rename path is outside the granted file scope.".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        rename_without_replacement(&source, &target).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -480,8 +645,10 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             take_opened_files,
+            write_markdown_file,
             allow_document_assets,
             allow_document_rename,
+            rename_document_entry,
             show_in_folder,
             open_external_url,
             export_pdf
@@ -501,6 +668,203 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn markdown_saves_validate_absolute_supported_paths() {
+        let root = std::env::temp_dir();
+        for name in ["research.md", "研究.MD", "draft.markdown", "draft.MARKDOWN"] {
+            assert!(validate_markdown_save_path(&root.join(name)).is_ok());
+        }
+        for path in [
+            PathBuf::from("relative.md"),
+            root.join("../outside.md"),
+            root.join("image.png"),
+        ] {
+            assert!(validate_markdown_save_path(&path).is_err());
+        }
+    }
+
+    #[test]
+    fn native_rename_rejects_traversal_and_other_directories() {
+        let root = std::env::temp_dir();
+        let source = root.join("old.md");
+        assert!(validate_rename_entries(&source, &root.join("new.md")).is_ok());
+        assert!(
+            validate_rename_entries(&root.join("old.assets"), &root.join("new.assets")).is_ok()
+        );
+        for target in [
+            PathBuf::from("relative.md"),
+            root.join("../new.md"),
+            root.join("other/new.md"),
+        ] {
+            assert!(validate_rename_entries(&source, &target).is_err());
+        }
+    }
+
+    #[test]
+    fn native_rename_never_replaces_a_file_or_an_empty_asset_directory() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("old.md");
+        let target = directory.path().join("new.md");
+        std::fs::write(&source, "Original document").unwrap();
+        std::fs::write(&target, "Other document created during rename").unwrap();
+        assert!(rename_without_replacement(&source, &target).is_err());
+        assert_eq!(
+            std::fs::read_to_string(&source).unwrap(),
+            "Original document"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "Other document created during rename"
+        );
+        let source = directory.path().join("old.assets");
+        let target = directory.path().join("new.assets");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::create_dir(&target).unwrap();
+        std::fs::write(source.join("image.png"), b"retained asset").unwrap();
+        assert!(rename_without_replacement(&source, &target).is_err());
+        assert_eq!(
+            std::fs::read(source.join("image.png")).unwrap(),
+            b"retained asset"
+        );
+        assert_eq!(std::fs::read_dir(&target).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn racing_document_renames_have_one_winner_and_preserve_every_other_source() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("target.md");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(12));
+        let sources: Vec<_> = (0..12)
+            .map(|index| {
+                let source = directory.path().join(format!("source-{index}.md"));
+                std::fs::write(&source, format!("Document {index}")).unwrap();
+                source
+            })
+            .collect();
+        let renames: Vec<_> = sources
+            .iter()
+            .map(|source| {
+                let source = source.clone();
+                let target = target.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    rename_without_replacement(&source, &target).is_ok()
+                })
+            })
+            .collect();
+        assert_eq!(
+            renames
+                .into_iter()
+                .map(|rename| rename.join().unwrap())
+                .filter(|success| *success)
+                .count(),
+            1
+        );
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 12);
+        for (index, source) in sources.iter().enumerate() {
+            if source.exists() {
+                assert_eq!(
+                    std::fs::read_to_string(source).unwrap(),
+                    format!("Document {index}")
+                );
+            }
+        }
+        assert!((0..12)
+            .any(|index| std::fs::read_to_string(&target).unwrap() == format!("Document {index}")));
+    }
+
+    #[test]
+    fn interrupted_markdown_write_preserves_existing_bytes_and_cleans_up() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("research.md");
+        let original = "# 原稿\r\n\r\nContent 🧪\r\n";
+        std::fs::write(&target, original).unwrap();
+        let result = replace_file_atomically(&target, |file| {
+            file.write_all(b"partial replacement")?;
+            Err(std::io::Error::new(
+                std::io::ErrorKind::WriteZero,
+                "simulated interrupted write",
+            ))
+        });
+        assert!(result.is_err());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), original);
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn markdown_saves_replace_whole_documents_and_support_long_unicode_names() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join(format!("{}研究.md", "n".repeat(230)));
+        for contents in ["# Original\r\n", "", "# 研究 🧪\r\n\nMixed\rseparators\0"] {
+            replace_file_atomically(&target, |file| file.write_all(contents.as_bytes())).unwrap();
+            assert_eq!(std::fs::read(&target).unwrap(), contents.as_bytes());
+        }
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn failed_markdown_destination_keeps_directory_and_removes_temporary_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("research.md");
+        std::fs::create_dir(&target).unwrap();
+        assert!(replace_file_atomically(&target, |file| file.write_all(b"contents")).is_err());
+        assert!(target.is_dir());
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_markdown_saves_preserve_permissions_and_document_symlinks() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("research.md");
+        let link = directory.path().join("linked.md");
+        std::fs::write(&target, "old").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o640)).unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        replace_file_atomically(&link, |file| file.write_all(b"new")).unwrap();
+        assert!(std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "new");
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+    }
+
+    #[test]
+    fn overlapping_markdown_writes_leave_one_complete_document() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("research.md");
+        std::fs::write(&target, "old").unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(12));
+        let expected: Vec<String> = (0..12)
+            .map(|index| format!("# Revision {index}\n{}", "中文 🧪\n".repeat(10_000)))
+            .collect();
+        let writers: Vec<_> = expected
+            .iter()
+            .map(|contents| {
+                let target = target.clone();
+                let barrier = barrier.clone();
+                let contents = contents.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    replace_file_atomically(&target, |file| file.write_all(contents.as_bytes()))
+                        .unwrap();
+                })
+            })
+            .collect();
+        for writer in writers {
+            writer.join().unwrap();
+        }
+        let result = std::fs::read_to_string(&target).unwrap();
+        assert!(expected.contains(&result));
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
 
     #[test]
     fn external_links_accept_only_web_and_email_urls() {

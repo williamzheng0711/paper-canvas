@@ -8,13 +8,15 @@ import { exportMarkdownFile } from "./files";
 
 const mocks = vi.hoisted(() => ({
   save: vi.fn<() => Promise<string | null>>(),
-  writeTextFile: vi.fn(),
+  writeMarkdown: vi.fn(),
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({
   isTauri: () => true,
   convertFileSrc: (path: string) => path,
-  invoke: vi.fn(),
+  invoke: async (command: string, args?: { path: string; contents: string }) => {
+    if (command === 'write_markdown_file') return mocks.writeMarkdown(args!.path, args!.contents);
+  },
 }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({
   open: vi.fn(),
@@ -26,14 +28,14 @@ vi.mock("@tauri-apps/plugin-fs", () => ({
   readTextFile: vi.fn(),
   rename: vi.fn(),
   writeFile: vi.fn(),
-  writeTextFile: mocks.writeTextFile,
+  writeTextFile: vi.fn(),
 }));
 
 describe("Markdown export image paths", () => {
   beforeEach(() => {
     vi.resetAllMocks();
     mocks.save.mockResolvedValue("/exports/copy.md");
-    mocks.writeTextFile.mockResolvedValue(undefined);
+    mocks.writeMarkdown.mockResolvedValue(undefined);
   });
 
   it("keeps images at their original physical location when exporting to another folder", async () => {
@@ -46,7 +48,7 @@ describe("Markdown export image paths", () => {
       .replace("(notes.assets/", "(../notes/notes.assets/")
       .replace(": images/ref.png", ": ../notes/images/ref.png")
       .replace('src="images/html.png', 'src="../notes/images/html.png');
-    expect(mocks.writeTextFile).toHaveBeenCalledWith(
+    expect(mocks.writeMarkdown).toHaveBeenCalledWith(
       "/exports/copy.md",
       expected,
     );
@@ -62,7 +64,7 @@ describe("Markdown export image paths", () => {
     );
     const source = serializeMarkdownWithComments(body, [comment]);
     await exportMarkdownFile(source, "notes.md", "/notes/notes.md");
-    const written = mocks.writeTextFile.mock.calls[0]?.[1] as string;
+    const written = mocks.writeMarkdown.mock.calls[0]?.[1] as string;
     const parsed = parseMarkdownComments(written);
     expect(parsed.status).toBe("valid");
     expect(parsed.body).toContain("![Diagram](../notes/notes.assets/a.svg)");
@@ -81,7 +83,7 @@ describe("Markdown export image paths", () => {
       mocks.save.mockResolvedValue("/notes/copy.md");
       const source = "# Note\r\n\r\n![SVG](notes.assets/a.svg)\r\n";
       await exportMarkdownFile(source, "notes.md", path);
-      expect(mocks.writeTextFile).toHaveBeenCalledWith(
+      expect(mocks.writeMarkdown).toHaveBeenCalledWith(
         "/notes/copy.md",
         source,
       );
@@ -93,6 +95,6 @@ describe("Markdown export image paths", () => {
     await expect(
       exportMarkdownFile("![Image](a.png)\n", "notes.md", "/notes/notes.md"),
     ).resolves.toBeNull();
-    expect(mocks.writeTextFile).not.toHaveBeenCalled();
+    expect(mocks.writeMarkdown).not.toHaveBeenCalled();
   });
 });

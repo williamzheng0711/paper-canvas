@@ -62,6 +62,7 @@ const files = vi.hoisted(() => ({
     type: 'saved' as const,
     name: 'research.pdf',
   })),
+  flushSettings: vi.fn<() => Promise<void>>(async () => undefined),
   loadDraft: vi.fn(),
   loadPreferences: vi.fn(async () => ({
     theme: 'light' as const,
@@ -87,11 +88,19 @@ const files = vi.hoisted(() => ({
   savePreferences: vi.fn<(preferences: FileLibrary.AppPreferences) => Promise<void>>(async () => undefined),
 }));
 
+const native = vi.hoisted(() => ({
+  enabled: false,
+  onCloseRequested: vi.fn(),
+  destroy: vi.fn(async () => undefined),
+  setTitle: vi.fn(async () => undefined),
+}));
+
 vi.mock('@tauri-apps/api/core', () => ({
-  isTauri: () => false,
-  invoke: vi.fn(),
+  isTauri: () => native.enabled,
+  invoke: vi.fn(async () => []),
 }));
 vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn() }));
+vi.mock('@tauri-apps/api/webviewWindow', () => ({ getCurrentWebviewWindow: () => native }));
 vi.mock('./components/CanvasEditor', () => ({
   CanvasEditor: (
     props: CanvasProps & {
@@ -138,6 +147,7 @@ vi.mock('./lib/files', async (importOriginal) => {
   },
   exportMarkdownFile: files.exportMarkdownFile,
   exportPdfFile: files.exportPdfFile,
+  flushSettings: files.flushSettings,
   hideRecentFile: files.hideRecentFile,
   hydrateDocumentAssets: (document: JSONContent) => structuredClone(document),
   loadDraft: files.loadDraft,
@@ -198,6 +208,18 @@ describe('App autosave cursor stability', () => {
     return namedButton(name, navigation);
   }
 
+  async function startNative(draft?: EditorFile) {
+    await act(async () => root.unmount());
+    native.enabled = true;
+    if (draft) files.loadDraft.mockResolvedValueOnce(draft);
+    root = createRoot(host);
+    await act(async () => { root.render(<App />); await flushEffects(); });
+    const handler = native.onCloseRequested.mock.calls.at(-1)?.[0] as
+      ((event: { preventDefault: () => void }) => Promise<void>) | undefined;
+    if (!handler) throw new Error('Expected the native close handler');
+    return handler;
+  }
+
   async function submitRename(name = 'renamed.md'): Promise<void> {
     await act(async () => { documentAction(getMessages().rename).click(); await flushEffects(); });
     const input = host.querySelector<HTMLInputElement>('.rename-form input[name="filename"]');
@@ -252,6 +274,9 @@ describe('App autosave cursor stability', () => {
   beforeEach(async () => {
     vi.useFakeTimers();
     vi.clearAllMocks();
+    native.enabled = false;
+    native.onCloseRequested.mockResolvedValue(() => undefined);
+    files.flushSettings.mockReset().mockResolvedValue(undefined);
     harness.canvasProps = null;
     harness.sourceProps = null;
     harness.canvasMounts = 0;
@@ -310,6 +335,105 @@ describe('App autosave cursor stability', () => {
     expect(files.loadPreferences).toHaveBeenCalledOnce();
     expect(files.loadRecent).toHaveBeenCalledOnce();
     expect(harness.canvasProps?.initialDocument).toEqual(savedDocument);
+  });
+
+  it('saves typing before the autosave delay when the native window closes', async () => {
+    const close = await startNative();
+    const latest = markdownToDocument('# Last keystroke 中文 🧪');
+    await act(async () => { harness.canvasProps?.onChange(latest); });
+    expect(files.saveEditorFile).not.toHaveBeenCalled();
+    const preventDefault = vi.fn();
+    await act(async () => { await close({ preventDefault }); });
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(files.saveEditorFile).toHaveBeenCalledWith(expect.objectContaining({ document: latest }), false);
+    expect(files.flushSettings).toHaveBeenCalled();
+    expect(native.destroy).toHaveBeenCalledOnce();
+  });
+
+  it('writes the exact unnamed source draft and flushes disk settings before closing', async () => {
+    const close = await startNative({ name: 'Unnamed.md', document: markdownToDocument('old') });
+    await act(async () => { readingModeButton('source').click(); await flushEffects(); });
+    const markdown = '# 最後\r\n\r\n<!-- retained -->\r\n';
+    await act(async () => { harness.sourceProps?.onChange(markdown); });
+    let finishFlush!: () => void;
+    files.flushSettings.mockImplementationOnce(() => new Promise<void>((resolve) => { finishFlush = resolve; }));
+    let closing!: Promise<void>;
+    await act(async () => { closing = close({ preventDefault: vi.fn() }); await flushEffects(); });
+    expect(files.saveDraft).toHaveBeenCalledWith(expect.objectContaining({ sourceMarkdown: markdown }));
+    expect(native.destroy).not.toHaveBeenCalled();
+    await act(async () => { finishFlush(); await closing; });
+    expect(native.destroy).toHaveBeenCalledOnce();
+  });
+
+  it.each(['document', 'settings'] as const)('keeps the native window open after a failed %s close write', async (failure) => {
+    const close = await startNative();
+    await act(async () => { harness.canvasProps?.onChange(markdownToDocument('unsaved')); });
+    if (failure === 'document') files.saveEditorFile.mockRejectedValueOnce(new Error('Disk full'));
+    else files.flushSettings.mockRejectedValueOnce(new Error('Disk full'));
+    await act(async () => { await close({ preventDefault: vi.fn() }); });
+    expect(native.destroy).not.toHaveBeenCalled();
+    expect(host.querySelector('.save-status')?.textContent).toBe(getMessages().saveStatus.error);
+    expect(host.querySelector('.status-message')?.textContent).toContain('Disk full');
+  });
+
+  it('saves new typing that arrives while the native close flush is pending', async () => {
+    const close = await startNative();
+    let finishFlush!: () => void;
+    files.flushSettings.mockImplementationOnce(() => new Promise<void>((resolve) => { finishFlush = resolve; }));
+    let closing!: Promise<void>;
+    await act(async () => { closing = close({ preventDefault: vi.fn() }); await flushEffects(); });
+    const latest = markdownToDocument('Typed during close');
+    await act(async () => { harness.canvasProps?.onChange(latest); });
+    await act(async () => { finishFlush(); await closing; });
+    expect(files.saveEditorFile.mock.calls.at(-1)?.[0].document).toEqual(latest);
+    expect(native.destroy).toHaveBeenCalledOnce();
+  });
+
+  it('coalesces repeated native close requests while a save is pending', async () => {
+    const close = await startNative();
+    let finishSave!: (file: EditorFile) => void;
+    files.saveEditorFile.mockImplementationOnce(() => new Promise((resolve) => { finishSave = resolve; }));
+    let closing!: Promise<void>;
+    await act(async () => { closing = close({ preventDefault: vi.fn() }); await flushEffects(); });
+    await act(async () => { await close({ preventDefault: vi.fn() }); });
+    expect(files.saveEditorFile).toHaveBeenCalledOnce();
+    await act(async () => { finishSave(files.saveEditorFile.mock.calls[0][0]); await closing; });
+    expect(native.destroy).toHaveBeenCalledOnce();
+  });
+
+  it('does not close a replacement document while an older close save finishes', async () => {
+    const close = await startNative();
+    let finishFlush!: () => void;
+    files.flushSettings.mockImplementationOnce(() => new Promise<void>((resolve) => { finishFlush = resolve; }));
+    let closing!: Promise<void>;
+    await act(async () => { closing = close({ preventDefault: vi.fn() }); await flushEffects(); });
+    await act(async () => { documentAction(getMessages().new).click(); await flushEffects(); });
+    await act(async () => { finishFlush(); await closing; });
+    expect(native.destroy).not.toHaveBeenCalled();
+    expect(host.querySelector('.document-name')?.textContent).toBe('Untitled.md');
+  });
+
+  it('guards browser unload while edits are unsaved and releases it after saving', async () => {
+    const beforeSave = new Event('beforeunload', { cancelable: true });
+    window.dispatchEvent(beforeSave);
+    expect(beforeSave.defaultPrevented).toBe(true);
+    await act(async () => { documentAction(getMessages().save).click(); await flushEffects(); });
+    const afterSave = new Event('beforeunload', { cancelable: true });
+    window.dispatchEvent(afterSave);
+    expect(afterSave.defaultPrevented).toBe(false);
+  });
+
+  it.each([{ isComposing: true }, { keyCode: 229 }])('ignores document shortcuts during IME composition (%j)', async (composition) => {
+    await act(async () => {
+      for (const key of ['s', 'o', 'n', 'f']) {
+        window.dispatchEvent(new KeyboardEvent('keydown', { key, ctrlKey: true, bubbles: true, ...composition }));
+      }
+      await flushEffects();
+    });
+    expect(files.saveEditorFile).not.toHaveBeenCalled();
+    expect(files.chooseMarkdownFile).not.toHaveBeenCalled();
+    expect(host.querySelector('.document-search')).toBeNull();
+    expect(host.querySelector('.document-name')?.textContent).toContain('research.md');
   });
 
   it('keeps document actions, reading settings, and navigation usable without dirtying the file', async () => {

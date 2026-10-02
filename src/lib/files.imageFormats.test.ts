@@ -9,12 +9,14 @@ import { localAssetPath } from "./localAssets";
 
 const mocks = vi.hoisted(() => ({
   writeFile: vi.fn(),
-  writeTextFile: vi.fn(),
+  writeMarkdown: vi.fn(),
 }));
 vi.mock("@tauri-apps/api/core", () => ({
   isTauri: () => true,
   convertFileSrc: (path: string) => `asset:${path}`,
-  invoke: vi.fn(),
+  invoke: async (command: string, args?: { path: string; contents: string }) => {
+    if (command === 'write_markdown_file') return mocks.writeMarkdown(args!.path, args!.contents);
+  },
 }));
 vi.mock("@tauri-apps/plugin-fs", () => ({
   exists: vi.fn(),
@@ -22,7 +24,7 @@ vi.mock("@tauri-apps/plugin-fs", () => ({
   readTextFile: vi.fn(),
   rename: vi.fn(),
   writeFile: mocks.writeFile,
-  writeTextFile: mocks.writeTextFile,
+  writeTextFile: vi.fn(),
 }));
 vi.mock("@tauri-apps/plugin-store", () => ({
   Store: {
@@ -91,7 +93,7 @@ describe("saved embedded image formats", () => {
       expect(
         localAssetPath(parent, reopened.content?.[0].attrs?.originalSrc),
       ).toEqual({ path: physicalPath, suffix: "" });
-      expect(mocks.writeTextFile).toHaveBeenCalledWith(path, markdown);
+      expect(mocks.writeMarkdown).toHaveBeenCalledWith(path, markdown);
     },
   );
 
@@ -116,7 +118,7 @@ describe("saved embedded image formats", () => {
     const markdown = documentToPortableMarkdown(saved.document);
     expect(markdown).toContain(".svg)");
     expect(markdown).not.toContain("data:");
-    expect(mocks.writeTextFile).toHaveBeenCalledWith(path, markdown);
+    expect(mocks.writeMarkdown).toHaveBeenCalledWith(path, markdown);
     const reopened = hydrateDocumentAssets(markdownToDocument(markdown), path);
     expect(reopened.content?.[0].attrs?.src).toBe(`asset:${assetPath}`);
     expect(reopened.content?.[0].attrs?.originalSrc).toMatch(/\.svg$/);
@@ -148,7 +150,7 @@ describe("saved embedded image formats", () => {
       const [assetPath, bytes] = mocks.writeFile.mock.calls[0];
       expect(assetPath).toMatch(new RegExp(`\\.${extension}$`));
       expect(bytes).toEqual(new Uint8Array([0, 1, 2, 3]));
-      expect(mocks.writeTextFile.mock.calls[0][1]).toContain(`.${extension})`);
+      expect(mocks.writeMarkdown.mock.calls[0][1]).toContain(`.${extension})`);
     },
   );
 });

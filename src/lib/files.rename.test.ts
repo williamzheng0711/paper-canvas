@@ -10,8 +10,8 @@ import { documentToPortableMarkdown, renameEditorFile } from "./files";
 
 const mocks = vi.hoisted(() => ({
   entries: new Map<string, string | null>(),
-  rename: vi.fn(),
-  writeTextFile: vi.fn(),
+  renameEntry: vi.fn(),
+  writeMarkdown: vi.fn(),
   storeSet: vi.fn(),
   storeGet: vi.fn(),
   invoke: vi.fn(),
@@ -30,8 +30,8 @@ vi.mock("@tauri-apps/plugin-fs", () => ({
     if (typeof source !== "string") throw new Error(`File missing: ${path}`);
     return source;
   },
-  rename: mocks.rename,
-  writeTextFile: mocks.writeTextFile,
+  rename: vi.fn(),
+  writeTextFile: vi.fn(),
   mkdir: vi.fn(),
   writeFile: vi.fn(),
 }));
@@ -45,13 +45,18 @@ const target = "/notes/renamed.md";
 describe("native document rename", () => {
   beforeEach(() => {
     vi.resetAllMocks();
+    mocks.invoke.mockImplementation(async (command: string, args?: { path: string; contents: string; source: string; target: string }) => {
+      if (command === 'write_markdown_file') return mocks.writeMarkdown(args!.path, args!.contents);
+      if (command === 'rename_document_entry') return mocks.renameEntry(args!.source, args!.target);
+    });
     mocks.entries.clear();
     mocks.storeGet.mockResolvedValue([]);
     mocks.exists.mockImplementation(async (path: string) =>
       mocks.entries.has(path),
     );
-    mocks.rename.mockImplementation(async (from: string, to: string) => {
+    mocks.renameEntry.mockImplementation(async (from: string, to: string) => {
       if (!mocks.entries.has(from)) throw new Error(`Path missing: ${from}`);
+      if (mocks.entries.has(to)) throw new Error(`Path already exists: ${to}`);
       for (const [key, value] of [...mocks.entries]) {
         if (key === from || key.startsWith(from + "/")) {
           mocks.entries.delete(key);
@@ -59,7 +64,7 @@ describe("native document rename", () => {
         }
       }
     });
-    mocks.writeTextFile.mockImplementation(
+    mocks.writeMarkdown.mockImplementation(
       async (filePath: string, source: string) => {
         mocks.entries.set(filePath, source);
       },
@@ -84,7 +89,7 @@ describe("native document rename", () => {
       mocks.exists.mock.invocationCallOrder[0],
     );
     expect(mocks.exists.mock.invocationCallOrder[0]).toBeLessThan(
-      mocks.rename.mock.invocationCallOrder[0],
+      mocks.renameEntry.mock.invocationCallOrder[0],
     );
   });
 
@@ -102,7 +107,7 @@ describe("native document rename", () => {
       ),
     ).rejects.toThrow("Rename scope denied");
     expect(mocks.exists).not.toHaveBeenCalled();
-    expect(mocks.rename).not.toHaveBeenCalled();
+    expect(mocks.renameEntry).not.toHaveBeenCalled();
     expect(mocks.entries.get(path)).toBe("Original source\n");
     expect(mocks.entries.has(target)).toBe(false);
   });
@@ -125,7 +130,7 @@ describe("native document rename", () => {
       { path: target, name: "renamed.md" },
       unrelated,
     ]);
-    expect(mocks.rename.mock.invocationCallOrder[0]).toBeLessThan(
+    expect(mocks.renameEntry.mock.invocationCallOrder[0]).toBeLessThan(
       mocks.storeSet.mock.invocationCallOrder[0],
     );
   });
@@ -153,7 +158,7 @@ describe("native document rename", () => {
       );
       expect(renamed.path).toBe(targetPath);
       expect(renamed.sourceMarkdown).toBe(source);
-      expect(mocks.rename).toHaveBeenCalledExactlyOnceWith(
+      expect(mocks.renameEntry).toHaveBeenCalledExactlyOnceWith(
         sourcePath,
         targetPath,
       );
@@ -175,8 +180,8 @@ describe("native document rename", () => {
     };
     mocks.entries.set(file.path, "Original source\n");
     expect(await renameEditorFile(file, file.name)).toBe(file);
-    expect(mocks.rename).not.toHaveBeenCalled();
-    expect(mocks.writeTextFile).not.toHaveBeenCalled();
+    expect(mocks.renameEntry).not.toHaveBeenCalled();
+    expect(mocks.writeMarkdown).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -194,7 +199,7 @@ describe("native document rename", () => {
       const renamed = await renameEditorFile(file, requested);
       expect(renamed.name).toBe(expected);
       expect(renamed.document).toBe(file.document);
-      expect(mocks.rename).not.toHaveBeenCalled();
+      expect(mocks.renameEntry).not.toHaveBeenCalled();
     },
   );
 
@@ -290,7 +295,7 @@ describe("native document rename", () => {
     expect(JSON.stringify(renamed.document)).toContain(
       '<img src=\\"renamed.assets/html.png\\">',
     );
-    expect(mocks.writeTextFile).toHaveBeenCalledOnce();
+    expect(mocks.writeMarkdown).toHaveBeenCalledOnce();
   });
 
   it("does not rewrite disk bytes when only prose/code/remote URLs mention the old asset folder", async () => {
@@ -308,7 +313,7 @@ describe("native document rename", () => {
     );
     expect(mocks.entries.get(target)).toBe(sourceMarkdown);
     expect(renamed.sourceMarkdown).toBe(sourceMarkdown);
-    expect(mocks.writeTextFile).not.toHaveBeenCalled();
+    expect(mocks.writeMarkdown).not.toHaveBeenCalled();
   });
 
   it("returns the completed rename when persisting recent history fails", async () => {
@@ -356,16 +361,13 @@ describe("native document rename", () => {
     expect(mocks.storeSet).toHaveBeenCalledOnce();
   });
 
-  it("recovers original bytes and both paths when a rewrite partly truncates the file then rejects", async () => {
+  it("recovers original bytes and both paths when an atomic rewrite rejects", async () => {
     const sourceMarkdown =
       "# Original\n\n![Diagram](research.assets/diagram.png)\n";
     mocks.entries.set(path, sourceMarkdown);
     mocks.entries.set("/notes/research.assets", null);
     mocks.entries.set("/notes/research.assets/diagram.png", "image bytes");
-    mocks.writeTextFile.mockImplementationOnce(async (filePath: string) => {
-      mocks.entries.set(filePath, "# Partial");
-      throw new Error("Disk write failed");
-    });
+    mocks.writeMarkdown.mockRejectedValueOnce(new Error("Disk write failed"));
     await expect(
       renameEditorFile(
         {
@@ -383,11 +385,7 @@ describe("native document rename", () => {
     );
     expect(mocks.entries.has(target)).toBe(false);
     expect(mocks.entries.has("/notes/renamed.assets")).toBe(false);
-    expect(mocks.writeTextFile).toHaveBeenNthCalledWith(
-      2,
-      target,
-      sourceMarkdown,
-    );
+    expect(mocks.writeMarkdown).toHaveBeenCalledOnce();
     expect(mocks.storeSet).not.toHaveBeenCalled();
   });
 
@@ -395,7 +393,7 @@ describe("native document rename", () => {
     const sourceMarkdown = "![Diagram](research.assets/diagram.png)\n";
     mocks.entries.set(path, sourceMarkdown);
     mocks.entries.set("/notes/research.assets", null);
-    mocks.rename
+    mocks.renameEntry
       .mockImplementationOnce(async (from: string, to: string) => {
         mocks.entries.set(to, mocks.entries.get(from)!);
         mocks.entries.delete(from);
@@ -413,7 +411,7 @@ describe("native document rename", () => {
     ).rejects.toThrow("Directory move failed");
     expect(mocks.entries.get(path)).toBe(sourceMarkdown);
     expect(mocks.entries.has("/notes/research.assets")).toBe(true);
-    expect(mocks.writeTextFile).not.toHaveBeenCalled();
+    expect(mocks.writeMarkdown).not.toHaveBeenCalled();
   });
 
   it.each([target, "/notes/renamed.assets"])(
@@ -429,8 +427,34 @@ describe("native document rename", () => {
         ),
       ).rejects.toThrow();
       expect(mocks.entries.get(path)).toBe("Original source");
-      expect(mocks.rename).not.toHaveBeenCalled();
-      expect(mocks.writeTextFile).not.toHaveBeenCalled();
+      expect(mocks.renameEntry).not.toHaveBeenCalled();
+      expect(mocks.writeMarkdown).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([target, "/notes/renamed.assets"])(
+    "preserves an entry created after the collision check: %s",
+    async (collision) => {
+      const sourceMarkdown = "![Diagram](research.assets/diagram.png)\n";
+      mocks.entries.set(path, sourceMarkdown);
+      mocks.entries.set("/notes/research.assets", null);
+      mocks.entries.set("/notes/research.assets/diagram.png", "original image");
+      let collided = false;
+      mocks.exists.mockImplementation(async (checked: string) => {
+        const present = mocks.entries.has(checked);
+        if (checked === collision && !present && !collided) {
+          collided = true;
+          mocks.entries.set(collision, "new competing entry");
+        }
+        return present;
+      });
+      await expect(renameEditorFile({ path, name: "research.md", document: markdownToDocument(sourceMarkdown) }, "renamed.md")).rejects.toThrow("Path already exists");
+      expect(mocks.entries.get(collision)).toBe("new competing entry");
+      expect(mocks.entries.get(path)).toBe(sourceMarkdown);
+      expect(mocks.entries.get("/notes/research.assets/diagram.png")).toBe("original image");
+      expect(mocks.writeMarkdown).not.toHaveBeenCalled();
+      expect(mocks.storeSet).not.toHaveBeenCalled();
+      expect(mocks.invoke).toHaveBeenCalledWith("rename_document_entry", expect.any(Object));
     },
   );
 });

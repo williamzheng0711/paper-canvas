@@ -7,7 +7,7 @@ const mocks = vi.hoisted(() => ({
   save: vi.fn(),
   mkdir: vi.fn(),
   writeFile: vi.fn(),
-  writeTextFile: vi.fn(),
+  writeMarkdown: vi.fn(),
 }));
 vi.mock('@tauri-apps/api/core', () => ({
   isTauri: () => true,
@@ -21,7 +21,7 @@ vi.mock('@tauri-apps/plugin-fs', () => ({
   rename: vi.fn(),
   mkdir: mocks.mkdir,
   writeFile: mocks.writeFile,
-  writeTextFile: mocks.writeTextFile,
+  writeTextFile: vi.fn(),
 }));
 vi.mock('@tauri-apps/plugin-store', () => ({
   Store: { load: async () => ({ get: async () => [], set: async () => undefined }) },
@@ -30,6 +30,9 @@ vi.mock('@tauri-apps/plugin-store', () => ({
 describe('saving Markdown source', () => {
   beforeEach(() => {
     vi.resetAllMocks();
+    mocks.invoke.mockImplementation(async (command: string, args?: { path: string; contents: string }) => {
+      if (command === 'write_markdown_file') return mocks.writeMarkdown(args!.path, args!.contents);
+    });
   });
 
   it('writes the exact source, including comments metadata and user formatting', async () => {
@@ -45,8 +48,8 @@ describe('saving Markdown source', () => {
 
     await saveEditorFile(file, false, source);
 
-    expect(mocks.writeTextFile).toHaveBeenCalledWith(file.path, source);
-    expect(parseMarkdownComments(mocks.writeTextFile.mock.calls[0][1]).comments).toEqual([comment]);
+    expect(mocks.writeMarkdown).toHaveBeenCalledWith(file.path, source);
+    expect(parseMarkdownComments(mocks.writeMarkdown.mock.calls[0][1]).comments).toEqual([comment]);
   });
 
   it('keeps embedded image source intact without extracting assets on repeated saves', async () => {
@@ -64,9 +67,9 @@ describe('saving Markdown source', () => {
     await saveEditorFile(file, false, source);
     await saveEditorFile(file, false, source);
 
-    expect(mocks.writeTextFile).toHaveBeenNthCalledWith(1, file.path, source);
-    expect(mocks.writeTextFile).toHaveBeenNthCalledWith(2, file.path, source);
-    expect(mocks.invoke).not.toHaveBeenCalled();
+    expect(mocks.writeMarkdown).toHaveBeenNthCalledWith(1, file.path, source);
+    expect(mocks.writeMarkdown).toHaveBeenNthCalledWith(2, file.path, source);
+    expect(mocks.invoke.mock.calls.map(([command]) => command)).toEqual(['write_markdown_file', 'write_markdown_file']);
     expect(mocks.writeFile).not.toHaveBeenCalled();
     expect(mocks.mkdir).not.toHaveBeenCalled();
     expect(source).toContain(dataUrl);
@@ -79,7 +82,7 @@ describe('saving Markdown source', () => {
       document: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'parsed content' }] }] },
     };
     const saved = await saveEditorFile(file);
-    expect(mocks.writeTextFile).toHaveBeenCalledWith(file.path, sourceMarkdown);
+    expect(mocks.writeMarkdown).toHaveBeenCalledWith(file.path, sourceMarkdown);
     expect(saved.sourceMarkdown).toBe(sourceMarkdown);
   });
 });

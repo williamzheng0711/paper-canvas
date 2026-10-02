@@ -14,6 +14,11 @@ type TauriConfig = {
 };
 
 describe('Tauri desktop configuration', () => {
+  it('allows the native title and close operations used to protect pending saves', () => {
+    const capabilities = JSON.parse(readFileSync(resolve(process.cwd(), 'src-tauri/capabilities/default.json'), 'utf8')) as { permissions: string[] };
+    expect(capabilities.permissions).toContain('core:window:allow-destroy');
+    expect(capabilities.permissions).toContain('core:window:allow-set-title');
+  });
   it('lets HTML5 image drops reach the editor', () => {
     const config = JSON.parse(
       readFileSync(resolve(process.cwd(), 'src-tauri/tauri.conf.json'), 'utf8'),

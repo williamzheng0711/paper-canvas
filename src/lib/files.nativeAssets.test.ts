@@ -12,12 +12,15 @@ import { markdownToDocument } from "../editor/markdown";
 import { PaperImage } from "../editor/PaperImage";
 import { sanitizePastedHtml } from "../editor/paste";
 
-const mocks = vi.hoisted(() => ({ writeTextFile: vi.fn() }));
+const mocks = vi.hoisted(() => ({ writeMarkdown: vi.fn() }));
 
 vi.mock("@tauri-apps/api/core", async (importOriginal) => ({
   ...(await importOriginal<typeof TauriCore>()),
   isTauri: () => true,
   convertFileSrc: (path: string) => `asset://${encodeURIComponent(path)}`,
+  invoke: async (command: string, args?: { path: string; contents: string }) => {
+    if (command === 'write_markdown_file') return mocks.writeMarkdown(args!.path, args!.contents);
+  },
 }));
 vi.mock("@tauri-apps/plugin-fs", () => ({
   exists: vi.fn(),
@@ -25,7 +28,7 @@ vi.mock("@tauri-apps/plugin-fs", () => ({
   readTextFile: vi.fn(),
   rename: vi.fn(),
   writeFile: vi.fn(),
-  writeTextFile: mocks.writeTextFile,
+  writeTextFile: vi.fn(),
 }));
 vi.mock("@tauri-apps/plugin-store", () => ({
   Store: {
@@ -136,7 +139,7 @@ describe("native image hydration", () => {
         const portable = documentToPortableMarkdown(saved.document);
         expect(portable).not.toContain("asset:");
         expect(portable).toContain("?size=2#view");
-        expect(mocks.writeTextFile).toHaveBeenCalledWith(savePath, portable);
+        expect(mocks.writeMarkdown).toHaveBeenCalledWith(savePath, portable);
         const reopened = hydrateDocumentAssets(
           markdownToDocument(portable),
           savePath,

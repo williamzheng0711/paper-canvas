@@ -1,5 +1,6 @@
 import { invoke, isTauri } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
+import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import type { JSONContent } from '@tiptap/core';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { CanvasEditor } from './components/CanvasEditor';
@@ -33,6 +34,7 @@ import {
   documentToPortableMarkdown,
   exportMarkdownFile,
   exportPdfFile,
+  flushSettings,
   hideRecentFile,
   hydrateDocumentAssets,
   loadDraft,
@@ -559,9 +561,9 @@ export default function App() {
     const title = `${dirty ? '● ' : ''}${file.name} — PaperCanvas`;
     document.title = title;
     if (isTauri()) {
-      void import('@tauri-apps/api/webviewWindow').then(({ getCurrentWebviewWindow }) =>
-        getCurrentWebviewWindow().setTitle(title),
-      );
+      void getCurrentWebviewWindow().setTitle(title).catch((error: unknown) => {
+        setMessage(error instanceof Error ? error.message : getMessages().loadSettingsFailed);
+      });
     }
   }, [dirty, file.name]);
 
@@ -774,6 +776,67 @@ export default function App() {
     });
     return outcome;
   }, [clearSourceCommentSync, flushCanvasChanges, queueFileOperation, setExternalRawMarkdown]);
+
+  useEffect(() => {
+    const preventUnsavedUnload = (event: BeforeUnloadEvent) => {
+      if (!dirtyRef.current && !pendingSave.current) return;
+      event.preventDefault();
+      event.returnValue = '';
+    };
+    if (!isTauri()) {
+      window.addEventListener('beforeunload', preventUnsavedUnload);
+      return () => window.removeEventListener('beforeunload', preventUnsavedUnload);
+    }
+
+    let active = true;
+    let closing = false;
+    let unlisten: (() => void) | undefined;
+    void (async () => {
+      const nativeWindow = getCurrentWebviewWindow();
+      unlisten = await nativeWindow.onCloseRequested(async (event) => {
+        event.preventDefault();
+        if (closing || !active) return;
+        closing = true;
+        const session = documentSessionRef.current;
+        try {
+          // Finish the current document and recovery/settings writes before
+          // destroying the window, including typing inside the autosave delay.
+          while (active && documentSessionRef.current === session) {
+            const pendingImages = canvasSearch.current?.waitForPendingImages?.();
+            if (pendingImages) await pendingImages;
+            if (!active || documentSessionRef.current !== session) return;
+            if (!sourceModeRef.current) flushCanvasChanges();
+            const revision = editRevisionRef.current;
+            if (fileRef.current.path) {
+              if ((dirtyRef.current || pendingSave.current) && !(await saveCurrent())) return;
+            } else if (dirtyRef.current) {
+              clearSourceCommentSync();
+              const draft = sourceModeRef.current
+                ? { ...fileRef.current, ...documentStateFromMarkdown(rawMarkdownRef.current), sourceMarkdown: rawMarkdownRef.current }
+                : fileRef.current;
+              await saveDraft(draft);
+            }
+            await flushSettings();
+            if (!active || documentSessionRef.current !== session) return;
+            if (editRevisionRef.current !== revision) continue;
+            await nativeWindow.destroy();
+            return;
+          }
+        } catch (error) {
+          if (active && documentSessionRef.current === session) {
+            setSaveStatus('error');
+            setMessage(error instanceof Error ? error.message : getMessages().saveFailed);
+          }
+        } finally {
+          closing = false;
+        }
+      });
+      if (!active) unlisten();
+    })().catch((error: unknown) => {
+      if (active) setMessage(error instanceof Error ? error.message : getMessages().saveFailed);
+    });
+    return () => { active = false; unlisten?.(); };
+  }, [clearSourceCommentSync, flushCanvasChanges, saveCurrent]);
 
   useEffect(() => {
     if (!dirty) return;
@@ -1205,6 +1268,7 @@ export default function App() {
 
   useEffect(() => {
     const shortcuts = (event: KeyboardEvent) => {
+      if (event.isComposing || event.keyCode === 229) return;
       if (event.key === 'Escape' && searchOpen) {
         event.preventDefault();
         closeSearch();
@@ -1670,6 +1734,7 @@ export default function App() {
             spellCheck="false"
             onChange={(event) => setSearchQuery(event.currentTarget.value)}
             onKeyDown={(event) => {
+              if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return;
               if (event.key === 'Enter') {
                 event.preventDefault();
                 runSearch(searchQuery, event.shiftKey ? 'previous' : 'next');

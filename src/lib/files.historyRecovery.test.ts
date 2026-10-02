@@ -33,6 +33,7 @@ const older = { path: unnamed.path, name: "older.md" };
 const hidden = { path: "/notes/hidden.md", name: "hidden.md" };
 const draft: EditorFile = {
   name: "Unsaved writing.md",
+  comments: [],
   document: {
     type: "doc",
     content: [
