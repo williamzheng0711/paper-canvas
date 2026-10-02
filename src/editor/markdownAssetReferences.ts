@@ -414,9 +414,11 @@ function destinationRange(
 /** Keep the original offsets while hiding formula syntax from CommonMark. */
 function maskTyporaMath(source: string): string {
   if (!/\\(?:\(|\[|begin\{)/.test(source)) return source;
+  const sourceOffset = source.startsWith('\uFEFF') ? 1 : 0;
   let masked = source;
   let scan = source;
   const blank = (from: number, to: number) => {
+    if (from === 0) from = sourceOffset;
     const placeholder = masked
       .slice(from, to)
       .replace(/[^\r\n]/g, " ")
@@ -425,9 +427,11 @@ function maskTyporaMath(source: string): string {
   };
   const protectCodeAndMath = (node: SourceNode) => {
     if (["code", "inlineCode", "math", "inlineMath"].includes(node.type)) {
-      const from = node.position?.start.offset;
-      const to = node.position?.end.offset;
-      if (from !== undefined && to !== undefined) {
+      const start = node.position?.start.offset;
+      const end = node.position?.end.offset;
+      if (start !== undefined && end !== undefined) {
+        const from = start + sourceOffset;
+        const to = end + sourceOffset;
         scan =
           scan.slice(0, from) +
           scan.slice(from, to).replace(/[^\r\n]/g, " ") +
@@ -438,13 +442,15 @@ function maskTyporaMath(source: string): string {
   const rawRoot = parser.parse(source) as unknown as SourceNode;
   protectCodeAndMath(rawRoot);
   const protectDestinations = (node: SourceNode) => {
-    const from = node.position?.start.offset;
-    const to = node.position?.end.offset;
+    const start = node.position?.start.offset;
+    const end = node.position?.end.offset;
     if (
-      from !== undefined &&
-      to !== undefined &&
+      start !== undefined &&
+      end !== undefined &&
       ["image", "link", "definition"].includes(node.type)
     ) {
+      const from = start + sourceOffset;
+      const to = end + sourceOffset;
       const original = source.slice(from, to);
       const range = destinationRange(
         node.type === "link" ? "!" + original : original,
@@ -484,13 +490,15 @@ function maskTyporaMath(source: string): string {
   for (const match of scan.matchAll(
     /^[^\S\r\n]*\\\[[\s\S]*?\\\][^\S\r\n]*$/gm,
   )) {
-    if (normalizeLatexDelimiters(match[0]).startsWith("$$\n"))
+    const formula = match.index === 0 ? match[0].slice(sourceOffset) : match[0];
+    if (normalizeLatexDelimiters(formula).startsWith("$$\n"))
       blank(match.index, match.index + match[0].length);
   }
   for (const match of scan.matchAll(
     /^[^\S\r\n]*\\begin\{([A-Za-z][A-Za-z0-9_*-]*)\}[\s\S]*?\\end\{\1\}[^\S\r\n]*$/gm,
   )) {
-    if (normalizeLatexDelimiters(match[0]).startsWith("$$\n"))
+    const formula = match.index === 0 ? match[0].slice(sourceOffset) : match[0];
+    if (normalizeLatexDelimiters(formula).startsWith("$$\n"))
       blank(match.index, match.index + match[0].length);
   }
   return masked;
@@ -569,6 +577,9 @@ function markdownImageEdits(
   source: string,
   rewrite: DestinationRewrite,
 ): SourceEdit[] {
+  // remark removes a leading BOM before assigning offsets. Keep its syntax
+  // positions aligned with the original bytes when applying image-path edits.
+  const offset = source.startsWith('\uFEFF') ? 1 : 0;
   const root = parser.parse(maskTyporaMath(source)) as unknown as SourceNode;
   const nodes: SourceNode[] = [];
   const imageReferences = new Set<string>();
@@ -585,9 +596,11 @@ function markdownImageEdits(
   collect(root);
   const edits: SourceEdit[] = [];
   for (const node of nodes) {
-    const from = node.position?.start.offset;
-    const to = node.position?.end.offset;
-    if (from === undefined || to === undefined) continue;
+    const start = node.position?.start.offset;
+    const end = node.position?.end.offset;
+    if (start === undefined || end === undefined) continue;
+    const from = start + offset;
+    const to = end + offset;
     const original = source.slice(from, to);
     if (node.type === "html") {
       edits.push(

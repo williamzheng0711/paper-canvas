@@ -21,6 +21,39 @@ const newPath = "/notes/renamed.md";
 const rename = (source: string) =>
   renameMarkdownImageAssets(source, oldPath, newPath);
 
+describe("image edits in UTF-8 BOM documents", () => {
+  it("keeps offsets and all other source bytes when rebasing inline, reference, and HTML images", () => {
+    const source = '\uFEFF# Original 中文\r\n\r\n![Diagram](./research.assets/image.svg)\r\n\r\n![Reference][diagram]\r\n\r\n[diagram]: ./research.assets/ref.svg "Title"\r\n\r\n<div><img src="./research.assets/html.svg"></div>\r\n\r\n`![literal](./research.assets/literal.svg)`\r\nLatest writing 🧪';
+    const expected = source
+      .replace('./research.assets/image.svg', '../notes/./research.assets/image.svg')
+      .replace('./research.assets/ref.svg', '../notes/./research.assets/ref.svg')
+      .replace('./research.assets/html.svg', '../notes/./research.assets/html.svg');
+    expect(rebaseMarkdownImageAssets(source, oldPath, '/copies/copy.md')).toBe(expected);
+    expect(rename(source)).toBe(source
+      .replace('./research.assets/image.svg', './renamed.assets/image.svg')
+      .replace('./research.assets/ref.svg', './renamed.assets/ref.svg')
+      .replace('./research.assets/html.svg', './renamed.assets/html.svg'));
+  });
+
+  it.each([3, 4])("preserves Markdown indentation semantics after the BOM with %i spaces", (spaces) => {
+    const source = '\uFEFF' + ' '.repeat(spaces) + '![Diagram](./research.assets/image.svg)\r\n';
+    expect(rename(source)).toBe(spaces === 3
+      ? source.replace('./research.assets/image.svg', './renamed.assets/image.svg')
+      : source);
+  });
+
+  it.each([1, 2, 3])("accounts for exactly one stripped BOM with %i leading markers and masked Typora formulas", (count) => {
+    const source = '\uFEFF'.repeat(count) + '![Diagram](./research.assets/image.svg)\r\n\r\n`\\( ![literal](./research.assets/code.svg) \\)`\r\n\r\n\\(\\text{![formula](./research.assets/math.svg)}\\)\r\n';
+    expect(rename(source)).toBe(source.replace('./research.assets/image.svg', './renamed.assets/image.svg'));
+    expect(rebaseMarkdownImageAssets(source, oldPath, '/copies/copy.md')).toBe(source.replace('./research.assets/image.svg', '../notes/./research.assets/image.svg'));
+  });
+
+  it.each(['\\[\r\n![literal](./research.assets/math.svg)\r\n\\]', '\\begin{align}\r\n![literal](./research.assets/math.svg)\r\n\\end{align}'])("protects a Typora block formula immediately after the BOM: %s", (formula) => {
+    const source = '\uFEFF' + formula + '\r\n\r\n![Diagram](./research.assets/image.svg)\r\n';
+    expect(rename(source)).toBe(source.replace('./research.assets/image.svg', './renamed.assets/image.svg'));
+  });
+});
+
 describe("POSIX filenames containing literal backslashes", () => {
   it("renames the complete companion-folder name without interpreting its backslash as a separator", () => {
     const source = "![Image](research%5Cdraft.assets/image%5Cname.png)\n";

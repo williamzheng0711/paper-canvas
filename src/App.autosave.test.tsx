@@ -155,6 +155,7 @@ vi.mock('./lib/files', async (importOriginal) => {
   exportPdfFile: files.exportPdfFile,
   flushSettings: files.flushSettings,
   FileRenameRecoveryError: actual.FileRenameRecoveryError,
+  fileAssetSourcePath: actual.fileAssetSourcePath,
   hideRecentFile: files.hideRecentFile,
   hydrateDocumentAssets: (document: JSONContent) => structuredClone(document),
   loadDraft: files.loadDraft,
@@ -1770,21 +1771,23 @@ describe('App autosave cursor stability', () => {
     print.mockRestore();
   });
 
-  it('retains the current source when PDF export returns to canvas before autosave', async () => {
+  it.each(['saved', 'cancelled', 'failed'] as const)('retains the source view and current writing when PDF export is %s before autosave', async (outcome) => {
     await act(async () => {
       toggleReadingModeButton()?.click();
       await vi.advanceTimersByTimeAsync(50);
     });
     const source = '# Changed\n\nLiteral  *unfinished text\n\n';
     await act(async () => { harness.sourceProps?.onChange(source); });
+    const sourceMounts = harness.sourceMounts;
+    if (outcome === 'cancelled') files.exportPdfFile.mockResolvedValueOnce({ type: 'cancelled' });
+    else if (outcome === 'failed') files.exportPdfFile.mockRejectedValueOnce(new Error('Export failed'));
     await act(async () => {
       exportAction('PDF (.pdf)')?.click();
       await vi.advanceTimersByTimeAsync(50);
     });
-    await act(async () => {
-      toggleReadingModeButton()?.click();
-      await vi.advanceTimersByTimeAsync(50);
-    });
+    expect(readingModeButton('source').getAttribute('aria-pressed')).toBe('true');
+    expect(harness.sourceMounts).toBe(sourceMounts);
+    expect(harness.canvasProps?.initialDocument).toEqual(markdownToDocument(source));
     expect(harness.sourceProps?.value).toBe(source);
   });
 
@@ -2530,5 +2533,160 @@ describe('App autosave cursor stability', () => {
     expect(files.saveDraft).toHaveBeenCalledTimes(2);
     expect(files.saveDraft.mock.calls.at(-1)?.[0].document).toEqual(latest);
     expect(native.destroy).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    { source: false, saveAs: false },
+    { source: true, saveAs: false },
+    { source: false, saveAs: true },
+    { source: true, saveAs: true },
+  ])('adopts the committed disk baseline before saving typing that arrived mid-write ($source, $saveAs)', async ({ source, saveAs }) => {
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const original = '# Original\r\n';
+    const first = '# First revision\n';
+    const second = '# Second revision\n';
+    const destination = saveAs ? '/copies/shared.md' : '/tmp/recent.md';
+    files.openRecent.mockResolvedValueOnce({ path: '/tmp/recent.md', name: 'recent.md', sourceMarkdown: original, diskSourceMarkdown: original, document: markdownToDocument(original) });
+    try {
+      await act(async () => { (await recentFileButton()).click(); await flushEffects(); });
+      if (source) await act(async () => { readingModeButton('source').click(); await flushEffects(); });
+      await act(async () => {
+        if (source) harness.sourceProps?.onChange(first);
+        else harness.canvasProps?.onChange(markdownToDocument(first));
+      });
+      let finishSave!: () => void;
+      files.saveEditorFile.mockImplementationOnce((candidate: EditorFile) => new Promise<EditorFile>((resolve) => {
+        finishSave = () => resolve({ ...candidate, path: destination, name: 'shared.md', sourceMarkdown: first, diskSourceMarkdown: first });
+      }));
+      await act(async () => { documentAction(saveAs ? getMessages().saveAs : getMessages().save).click(); await flushEffects(); });
+      expect(files.saveEditorFile.mock.calls[0][0].diskSourceMarkdown).toBe(original);
+      await act(async () => {
+        if (source) harness.sourceProps?.onChange(second);
+        else harness.canvasProps?.onChange(markdownToDocument(second));
+      });
+      await act(async () => { finishSave(); await flushEffects(); });
+      const latest = files.saveEditorFile.mock.calls[1][0] as EditorFile;
+      expect(latest.path).toBe(destination);
+      expect(latest.diskSourceMarkdown).toBe(first);
+      expect(documentToMarkdown(latest.document)).toBe(second);
+      if (source) expect(latest.sourceMarkdown).toBe(second);
+    } finally {
+      confirm.mockRestore();
+    }
+  });
+
+  it.each(['source', 'canvas'] as const)('backs up failed named %s writing independently while retaining the close error and dirty state', async (mode) => {
+    const close = await startNative();
+    const latest = '\uFEFF# Latest 中文\r\n\r\n![Diagram](images/a.svg)\r\n';
+    if (mode === 'source') await act(async () => { readingModeButton('source').click(); await flushEffects(); });
+    await act(async () => {
+      if (mode === 'source') harness.sourceProps?.onChange(latest);
+      else harness.canvasProps?.onChange(markdownToDocument(latest));
+    });
+    files.saveEditorFile.mockRejectedValueOnce(new Error('Document changed on disk'));
+    await act(async () => { await close({ preventDefault: vi.fn() }); });
+    expect(files.saveDraft).toHaveBeenCalledOnce();
+    const backup = files.saveDraft.mock.calls[0][0];
+    expect(backup.path).toBe('/tmp/research.md');
+    if (mode === 'source') expect(backup.sourceMarkdown).toBe(latest);
+    else expect(backup.document).toEqual(markdownToDocument(latest));
+    expect(host.querySelector('.save-status')?.textContent).toBe(getMessages().saveStatus.error);
+    expect(host.querySelector('.status-message')?.textContent).toBe('Document changed on disk');
+    expect(host.querySelector('.dirty-dot')).not.toBeNull();
+    expect(native.destroy).not.toHaveBeenCalled();
+  });
+
+  it('does not replace recovery data when a Save As dialog is cancelled', async () => {
+    files.saveEditorFile.mockRejectedValueOnce(new DOMException('Cancelled', 'AbortError'));
+    await act(async () => { documentAction(getMessages().saveAs).click(); await flushEffects(); });
+    expect(files.saveDraft).not.toHaveBeenCalled();
+    expect(host.querySelector('.save-status')?.textContent).toBe(getMessages().saveStatus.unsaved);
+  });
+
+  it.each(['source', 'canvas'] as const)('resnapshots %s typing that arrives during a failed-save recovery write', async (mode) => {
+    if (mode === 'source') await act(async () => { readingModeButton('source').click(); await flushEffects(); });
+    files.saveEditorFile.mockRejectedValueOnce(new Error('Read-only file'));
+    let finishBackup!: () => void;
+    files.saveDraft.mockImplementationOnce(() => new Promise<void>((resolve) => { finishBackup = resolve; }));
+    await act(async () => {
+      if (mode === 'source') harness.sourceProps?.onChange('# First\r\n');
+      else harness.canvasProps?.onChange(markdownToDocument('# First\n'));
+      documentAction(getMessages().save).click();
+      await flushEffects();
+    });
+    expect(files.saveDraft).toHaveBeenCalledOnce();
+    const latest = '# Latest during backup\r\n\r\nExact  spaces\r\n';
+    await act(async () => {
+      if (mode === 'source') harness.sourceProps?.onChange(latest);
+      else harness.canvasProps?.onChange(markdownToDocument(latest));
+      finishBackup();
+      await flushEffects();
+    });
+    expect(files.saveDraft).toHaveBeenCalledTimes(2);
+    const backup = files.saveDraft.mock.calls[1][0];
+    if (mode === 'source') expect(backup.sourceMarkdown).toBe(latest);
+    else expect(backup.document).toEqual(markdownToDocument(latest));
+    expect(host.querySelector('.status-message')?.textContent).toBe('Read-only file');
+    expect(host.querySelector('.dirty-dot')).not.toBeNull();
+  });
+
+  it.each([false, true])('ignores a stale named-save backup completion after a new document replaces its session (rejected=%s)', async (rejected) => {
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    files.saveEditorFile.mockRejectedValueOnce(new Error('Old document failed'));
+    let finish!: () => void;
+    files.saveDraft.mockImplementationOnce(() => new Promise<void>((resolve, reject) => { finish = rejected ? () => reject(new Error('Old backup failed')) : resolve; }));
+    try {
+      await act(async () => { documentAction(getMessages().save).click(); await flushEffects(); });
+      expect(files.saveDraft).toHaveBeenCalledOnce();
+      await act(async () => { documentAction(getMessages().new).click(); await flushEffects(); });
+      const status = host.querySelector('.status-message')?.textContent;
+      await act(async () => { finish(); await flushEffects(); });
+      expect(host.querySelector('.status-message')?.textContent).toBe(status);
+      expect(host.querySelector('.document-name')?.textContent).toBe('Untitled.md');
+      expect(host.querySelector('.save-status')?.textContent).toBe(getMessages().saveStatus.saved);
+    } finally { confirm.mockRestore(); }
+  });
+
+  it('retains both the original save error and a recovery-write failure without closing', async () => {
+    const close = await startNative();
+    files.saveEditorFile.mockRejectedValueOnce(new Error('Original disk conflict'));
+    files.saveDraft.mockRejectedValueOnce(new Error('Recovery disk full'));
+    await act(async () => { await close({ preventDefault: vi.fn() }); });
+    expect(host.querySelector('.status-message')?.textContent).toContain('Original disk conflict');
+    expect(host.querySelector('.status-message')?.textContent).toContain('Recovery disk full');
+    expect(host.querySelector('.dirty-dot')).not.toBeNull();
+    expect(native.destroy).not.toHaveBeenCalled();
+  });
+
+  it.each(['source', 'canvas'] as const)('rebases recovered relative assets in latest %s typing during its first Save As', async (mode) => {
+    await act(async () => root.unmount());
+    const origin = '/tmp/origin/notes.md';
+    const destination = '/copies/notes.md';
+    const sourceMarkdown = '# Recovered\r\n\r\n![Diagram](images/a.svg)\r\n';
+    const recovered: EditorFile = { name: 'notes.md', recoverySourcePath: origin, sourceMarkdown, document: markdownToDocument(sourceMarkdown) };
+    files.loadDraft.mockResolvedValueOnce(recovered);
+    root = createRoot(host);
+    await act(async () => { root.render(<App />); await flushEffects(); });
+    if (mode === 'source') await act(async () => { readingModeButton('source').click(); await flushEffects(); });
+    let finishSave!: () => void;
+    files.saveEditorFile.mockImplementationOnce((candidate: EditorFile) => new Promise<EditorFile>((resolve) => {
+      finishSave = () => {
+        const saved = rebaseEditorFileAssets(candidate, origin, destination);
+        resolve({ ...saved, diskSourceMarkdown: saved.sourceMarkdown });
+      };
+    }));
+    await act(async () => { documentAction(getMessages().saveAs).click(); await flushEffects(); });
+    const latest = sourceMarkdown + '\r\n![Late image](images/b.svg)\r\n';
+    await act(async () => {
+      if (mode === 'source') harness.sourceProps?.onChange(latest);
+      else harness.canvasProps?.onChange(markdownToDocument(latest));
+      finishSave();
+      await flushEffects();
+    });
+    const candidate = files.saveEditorFile.mock.calls[1][0] as EditorFile;
+    expect(candidate.path).toBe(destination);
+    expect(documentToMarkdown(candidate.document)).toContain('../tmp/origin/images/b.svg');
+    expect(documentToMarkdown(candidate.document)).not.toContain('../tmp/origin/../tmp/origin');
+    if (mode === 'source') expect(candidate.sourceMarkdown).toBe(latest.replaceAll('(images/', '(../tmp/origin/images/'));
   });
 });

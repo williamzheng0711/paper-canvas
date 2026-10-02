@@ -1598,6 +1598,12 @@ button {
   .editor-mode-pane {
     min-height: 0;
   }
+  .app-shell .editor-mode-pane--canvas {
+    display: block !important;
+  }
+  .app-shell .editor-mode-pane--source {
+    display: none !important;
+  }
   .paper-editor > :last-child {
     margin-bottom: 0;
   }

@@ -1143,10 +1143,15 @@ export function markdownToDocument(markdown: string): JSONContent {
   // CommonMark replaces literal NULs with U+FFFD; a lossless source atom keeps
   // those bytes recoverable instead of silently modifying the opened file.
   if (source.includes("\0")) return preservedSourceDocument(source);
+  // remark strips a leading BOM without accounting for it in source offsets.
+  // Remove the file marker before any position-sensitive normalization. Keep
+  // repeated markers as exact source, since remark would strip another one.
+  if (source.startsWith("\uFEFF\uFEFF")) return preservedSourceDocument(source);
+  const parseSource = source.startsWith("\uFEFF") ? source.slice(1) : source;
   let normalized: string;
   let root: MdRoot;
   try {
-    normalized = normalizeLatexDelimiters(source);
+    normalized = normalizeLatexDelimiters(parseSource);
     root = processor.parse(normalized) as unknown as MdRoot;
   } catch {
     // A malformed construct can trip a parser dependency assertion. Keeping

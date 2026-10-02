@@ -36,6 +36,7 @@ import {
   exportMarkdownFile,
   exportPdfFile,
   flushSettings,
+  fileAssetSourcePath,
   FileRenameRecoveryError,
   hideRecentFile,
   hydrateDocumentAssets,
@@ -323,7 +324,7 @@ export default function App() {
     const parsed = parseMarkdownComments(markdown);
     if (parsed.status !== 'valid' && parsed.status !== 'none') return;
     const nextComments =
-      parsed.status === 'valid' ? documentStateFromMarkdown(markdown, fileRef.current.path).comments : [];
+      parsed.status === 'valid' ? documentStateFromMarkdown(markdown, fileAssetSourcePath(fileRef.current)).comments : [];
     if (JSON.stringify(fileRef.current.comments ?? []) === JSON.stringify(nextComments)) return;
     const nextFile = {
       ...fileRef.current,
@@ -344,7 +345,7 @@ export default function App() {
     (nextComments: readonly MarkdownComment[], options: { recordHistory?: boolean; markEdited?: boolean } = {}) => {
       const currentRawComments = sourceModeRef.current ? parseMarkdownComments(rawMarkdownRef.current) : undefined;
       const sourceState = sourceModeRef.current
-        ? documentStateFromMarkdown(rawMarkdownRef.current, fileRef.current.path)
+        ? documentStateFromMarkdown(rawMarkdownRef.current, fileAssetSourcePath(fileRef.current))
         : undefined;
       const currentComments = sourceState?.comments ?? fileRef.current.comments ?? [];
       const next = cloneComments(nextComments.map((comment) => {
@@ -711,7 +712,7 @@ export default function App() {
           const revision = editRevisionRef.current;
           const editingSource = sourceModeRef.current;
           const sourceState = editingSource
-            ? documentStateFromMarkdown(rawMarkdownRef.current, fileRef.current.path)
+            ? documentStateFromMarkdown(rawMarkdownRef.current, fileAssetSourcePath(fileRef.current))
             : undefined;
           const candidate = editingSource
             ? {
@@ -721,6 +722,7 @@ export default function App() {
                 sourceMarkdown: rawMarkdownRef.current,
               }
             : fileRef.current;
+          const assetSourcePath = fileAssetSourcePath(candidate);
           const saved = editingSource
             ? await saveEditorFile(candidate, shouldSaveAs, rawMarkdownRef.current)
             : await saveEditorFile(candidate, shouldSaveAs);
@@ -737,16 +739,17 @@ export default function App() {
               path: saved.path,
               name: saved.name,
             };
-            if (candidate.path && saved.path && candidate.path !== saved.path) {
+            if (assetSourcePath && saved.path && assetSourcePath !== saved.path) {
               const current = sourceModeRef.current
-                ? { ...liveFile, ...documentStateFromMarkdown(rawMarkdownRef.current, candidate.path), sourceMarkdown: rawMarkdownRef.current }
+                ? { ...liveFile, ...documentStateFromMarkdown(rawMarkdownRef.current, assetSourcePath), sourceMarkdown: rawMarkdownRef.current }
                 : liveFile;
-              latest = rebaseEditorFileAssets(current, candidate.path, saved.path);
+              latest = rebaseEditorFileAssets(current, assetSourcePath, saved.path);
               if (sourceModeRef.current && latest.sourceMarkdown !== undefined && latest.sourceMarkdown !== rawMarkdownRef.current) {
-                setExternalRawMarkdown(latest.sourceMarkdown, { oldPath: candidate.path, newPath: saved.path });
+                setExternalRawMarkdown(latest.sourceMarkdown, { oldPath: assetSourcePath, newPath: saved.path });
               }
               if (!documentsEqual(liveFile.document, latest.document)) setDocumentId((id) => id + 1);
             }
+            latest.diskSourceMarkdown = saved.diskSourceMarkdown;
             fileRef.current = latest;
             setFile(latest);
             setSaveStatus('saving');
@@ -765,9 +768,9 @@ export default function App() {
           }
           // Save As rebases relative image paths. Publish that exact saved source
           // through the editor's external update without creating a user edit.
-          if (candidate.path !== saved.path && sourceModeRef.current && saved.sourceMarkdown !== undefined && saved.sourceMarkdown !== rawMarkdownRef.current) {
-            setExternalRawMarkdown(saved.sourceMarkdown, candidate.path && saved.path
-              ? { oldPath: candidate.path, newPath: saved.path }
+          if (assetSourcePath !== saved.path && sourceModeRef.current && saved.sourceMarkdown !== undefined && saved.sourceMarkdown !== rawMarkdownRef.current) {
+            setExternalRawMarkdown(saved.sourceMarkdown, assetSourcePath && saved.path
+              ? { oldPath: assetSourcePath, newPath: saved.path }
               : undefined);
           }
           dirtyRef.current = false;
@@ -797,8 +800,34 @@ export default function App() {
       } catch (error) {
         if (documentSessionRef.current === saveSession) {
           const cancelled = error instanceof DOMException && error.name === 'AbortError';
+          let failure = error instanceof Error ? error.message : getMessages().saveFailed;
+          if (!cancelled && dirtyRef.current) {
+            try {
+              // A failed document write still needs independent recovery. Keep
+              // taking snapshots if typing continues during the recovery write.
+              while (documentSessionRef.current === saveSession) {
+                if (!sourceModeRef.current) {
+                  await canvasSearch.current?.waitForPendingImages?.();
+                  if (documentSessionRef.current !== saveSession) return;
+                  flushCanvasChanges();
+                }
+                const revision = editRevisionRef.current;
+                const draft = sourceModeRef.current
+                  ? { ...fileRef.current, sourceMarkdown: rawMarkdownRef.current }
+                  : fileRef.current;
+                await saveDraft(draft);
+                if (documentSessionRef.current !== saveSession) return;
+                if (editRevisionRef.current !== revision) continue;
+                persistedDraft.current = { session: saveSession, revision };
+                break;
+              }
+            } catch (recoveryError) {
+              failure += `\n${recoveryError instanceof Error ? recoveryError.message : getMessages().autosaveFailed}`;
+            }
+          }
+          if (documentSessionRef.current !== saveSession) return;
           setSaveStatus(cancelled ? (dirtyRef.current ? 'unsaved' : 'saved') : 'error');
-          setMessage(cancelled ? getMessages().saveCancelled : error instanceof Error ? error.message : getMessages().saveFailed);
+          setMessage(cancelled ? getMessages().saveCancelled : failure);
         }
       }
     });
@@ -849,7 +878,7 @@ export default function App() {
             } else if (dirtyRef.current && (persistedDraft.current?.session !== session || persistedDraft.current.revision !== revision)) {
               clearSourceCommentSync();
               const draft = sourceModeRef.current
-                ? { ...fileRef.current, ...documentStateFromMarkdown(rawMarkdownRef.current), sourceMarkdown: rawMarkdownRef.current }
+                ? { ...fileRef.current, ...documentStateFromMarkdown(rawMarkdownRef.current, fileAssetSourcePath(fileRef.current)), sourceMarkdown: rawMarkdownRef.current }
                 : fileRef.current;
               await saveDraft(draft);
               if (documentSessionRef.current === session && editRevisionRef.current === revision) {
@@ -895,7 +924,7 @@ export default function App() {
       const draft = sourceModeRef.current
         ? {
             ...fileRef.current,
-            ...documentStateFromMarkdown(rawMarkdownRef.current, fileRef.current.path),
+            ...documentStateFromMarkdown(rawMarkdownRef.current, fileAssetSourcePath(fileRef.current)),
             sourceMarkdown: rawMarkdownRef.current,
           }
         : fileRef.current;
@@ -1037,7 +1066,7 @@ export default function App() {
         else flushCanvasChanges();
         const currentFile = fileRef.current;
         const candidate = sourceModeRef.current
-          ? { ...currentFile, ...documentStateFromMarkdown(rawMarkdownRef.current, currentFile.path), sourceMarkdown: rawMarkdownRef.current }
+          ? { ...currentFile, ...documentStateFromMarkdown(rawMarkdownRef.current, fileAssetSourcePath(currentFile)), sourceMarkdown: rawMarkdownRef.current }
           : currentFile;
         const renamed = await renameEditorFile(candidate, nextName);
         if (documentSessionRef.current !== session) return;
@@ -1065,6 +1094,7 @@ export default function App() {
           ...liveFile,
           path: renamed.path,
           name: renamed.name,
+          diskSourceMarkdown: renamed.diskSourceMarkdown,
           document,
           comments,
           sourceMarkdown,
@@ -1090,7 +1120,7 @@ export default function App() {
           else flushCanvasChanges();
           const liveFile = fileRef.current;
           const latest = sourceModeRef.current
-            ? { ...liveFile, ...documentStateFromMarkdown(rawMarkdownRef.current, liveFile.path), sourceMarkdown: rawMarkdownRef.current }
+            ? { ...liveFile, ...documentStateFromMarkdown(rawMarkdownRef.current, fileAssetSourcePath(liveFile)), sourceMarkdown: rawMarkdownRef.current }
             : liveFile;
           const recovered = error.recover(latest);
           if (sourceModeRef.current && recovered.sourceMarkdown !== rawMarkdownRef.current) {
@@ -1301,7 +1331,7 @@ export default function App() {
       const currentFile = fileRef.current;
       const unselectedState = currentFile.sourceMarkdown === rawMarkdownRef.current
         ? { document: currentFile.document, comments: currentFile.comments ?? [], warning: currentFile.commentWarning }
-        : documentStateFromMarkdown(rawMarkdownRef.current, currentFile.path);
+        : documentStateFromMarkdown(rawMarkdownRef.current, fileAssetSourcePath(currentFile));
       if (!canvasDocumentSupported(unselectedState.document)) {
         setMessage(getMessages().canvasViewLimited);
         return;
@@ -1310,7 +1340,7 @@ export default function App() {
         ? markdownToDocumentWithSelection(rawMarkdownRef.current, markdownSearch.current?.getMarkdownOffset?.())
         : undefined;
       const sourceState = parsedSelection?.document
-        ? documentStateFromMarkdown(rawMarkdownRef.current, currentFile.path, parsedSelection.document)
+        ? documentStateFromMarkdown(rawMarkdownRef.current, fileAssetSourcePath(currentFile), parsedSelection.document)
         : unselectedState;
       const nextDocument = sourceState.document;
       const nextComments = sourceState.comments;
@@ -1437,7 +1467,7 @@ export default function App() {
         const currentFile = fileRef.current;
         const sourceState = currentFile.sourceMarkdown === rawMarkdownRef.current
           ? { document: currentFile.document, comments: currentFile.comments ?? [], warning: currentFile.commentWarning }
-          : documentStateFromMarkdown(rawMarkdownRef.current, currentFile.path);
+          : documentStateFromMarkdown(rawMarkdownRef.current, fileAssetSourcePath(currentFile));
         if (!canvasDocumentSupported(sourceState.document)) {
           setMessage(getMessages().canvasViewLimited);
           return;
@@ -1478,7 +1508,7 @@ export default function App() {
       const markdown = sourceModeRef.current
         ? rawMarkdownRef.current
         : fileRef.current.sourceMarkdown ?? documentToPortableMarkdown(fileRef.current.document, fileRef.current.comments ?? []);
-      const exportedName = await exportMarkdownFile(markdown, fileRef.current.name, fileRef.current.path);
+      const exportedName = await exportMarkdownFile(markdown, fileRef.current.name, fileAssetSourcePath(fileRef.current));
       if (exportedName && documentSessionRef.current === exportSession) setMessage(getMessages().exportedFile(exportedName));
     } catch (error) {
       if (documentSessionRef.current === exportSession) setMessage(error instanceof Error ? error.message : getMessages().markdownExportFailed);
@@ -1505,10 +1535,10 @@ export default function App() {
         }
       }
       if (documentSessionRef.current !== exportSession) return;
-      // PDF should always contain the rendered document, even if the author is
-      // currently editing its Markdown source.
+      // Refresh the hidden rendered document for print CSS while keeping the
+      // author's source view, selection and undo history in place.
       if (sourceModeRef.current) {
-        const sourceState = documentStateFromMarkdown(rawMarkdownRef.current, fileRef.current.path);
+        const sourceState = documentStateFromMarkdown(rawMarkdownRef.current, fileAssetSourcePath(fileRef.current));
         if (!canvasDocumentSupported(sourceState.document)) throw new Error(getMessages().canvasViewLimited);
         const nextFile = {
           ...fileRef.current,
@@ -1521,8 +1551,6 @@ export default function App() {
         setFile(nextFile);
         setDocumentId((id) => id + 1);
         resetCommentHistory();
-        sourceModeRef.current = false;
-        setSourceMode(false);
         await waitForCanvasRender();
       }
       if (documentSessionRef.current !== exportSession) return;

@@ -120,6 +120,14 @@ fn replace_file_atomically(
     path: &Path,
     write: impl FnOnce(&mut File) -> std::io::Result<()>,
 ) -> Result<(), String> {
+    replace_file_atomically_checked(path, None, write)
+}
+
+fn replace_file_atomically_checked(
+    path: &Path,
+    expected_contents: Option<&[u8]>,
+    write: impl FnOnce(&mut File) -> std::io::Result<()>,
+) -> Result<(), String> {
     // Follow an existing document symlink, as ordinary file writes do, rather
     // than replacing the link itself with a different document.
     let target = match std::fs::symlink_metadata(path) {
@@ -129,6 +137,17 @@ fn replace_file_atomically(
         Ok(_) => path.to_path_buf(),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => path.to_path_buf(),
         Err(error) => return Err(error.to_string()),
+    };
+    let expected_target = if expected_contents.is_some() {
+        Some(target.canonicalize().map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                "DOCUMENT_CHANGED_ON_DISK".into()
+            } else {
+                error.to_string()
+            }
+        })?)
+    } else {
+        None
     };
     let metadata = match std::fs::metadata(&target) {
         Ok(metadata) if metadata.is_file() => {
@@ -165,6 +184,21 @@ fn replace_file_atomically(
         .as_file()
         .sync_all()
         .map_err(|error| error.to_string())?;
+    if let Some(expected) = expected_contents {
+        if path.canonicalize().ok().as_ref() != expected_target.as_ref() {
+            return Err("DOCUMENT_CHANGED_ON_DISK".into());
+        }
+        let actual = match std::fs::read(&target) {
+            Ok(contents) => contents,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err("DOCUMENT_CHANGED_ON_DISK".into());
+            }
+            Err(error) => return Err(error.to_string()),
+        };
+        if actual != expected {
+            return Err("DOCUMENT_CHANGED_ON_DISK".into());
+        }
+    }
     temporary
         .persist(&target)
         .map_err(|error| error.error.to_string())?;
@@ -172,14 +206,23 @@ fn replace_file_atomically(
 }
 
 #[tauri::command]
-async fn write_markdown_file(app: AppHandle, path: String, contents: String) -> Result<(), String> {
+async fn write_markdown_file(
+    app: AppHandle,
+    path: String,
+    contents: String,
+    expected_contents: Option<String>,
+) -> Result<(), String> {
     let target = PathBuf::from(path);
     validate_markdown_save_path(&target)?;
     if !app.fs_scope().is_allowed(&target) {
         return Err("The document path is outside the granted file scope.".into());
     }
     tauri::async_runtime::spawn_blocking(move || {
-        replace_file_atomically(&target, |file| file.write_all(contents.as_bytes()))
+        replace_file_atomically_checked(
+            &target,
+            expected_contents.as_deref().map(str::as_bytes),
+            |file| file.write_all(contents.as_bytes()),
+        )
     })
     .await
     .map_err(|error| error.to_string())?
@@ -302,6 +345,70 @@ fn allow_document_assets(app: AppHandle, path: String) -> Result<(), String> {
         .allow_directory(&directory, false)
         .map_err(|error| error.to_string())?;
     Ok(())
+}
+
+fn document_image_files(
+    path: &Path,
+    images: Vec<PathBuf>,
+    document_allowed: bool,
+) -> Result<Vec<PathBuf>, String> {
+    validate_markdown_save_path(path)?;
+    if !document_allowed {
+        return Err("The document path is outside the granted file scope.".into());
+    }
+    Ok(images
+        .into_iter()
+        .filter(|image| {
+            image.is_absolute()
+                && image.is_file()
+                && image
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(|extension| {
+                        matches!(
+                            extension.to_ascii_lowercase().as_str(),
+                            "png"
+                                | "apng"
+                                | "jpg"
+                                | "jpeg"
+                                | "gif"
+                                | "webp"
+                                | "svg"
+                                | "avif"
+                                | "bmp"
+                                | "tif"
+                                | "tiff"
+                                | "ico"
+                                | "heic"
+                                | "heif"
+                        )
+                    })
+        })
+        .collect())
+}
+
+#[tauri::command]
+async fn allow_document_image_files(
+    app: AppHandle,
+    path: String,
+    images: Vec<String>,
+) -> Result<(), String> {
+    let path = PathBuf::from(path);
+    let document_allowed = app.fs_scope().is_allowed(&path);
+    tauri::async_runtime::spawn_blocking(move || {
+        for image in document_image_files(
+            &path,
+            images.into_iter().map(PathBuf::from).collect(),
+            document_allowed,
+        )? {
+            app.asset_protocol_scope()
+                .allow_file(image)
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 fn document_rename_asset_directories(
@@ -600,10 +707,12 @@ fn begin_webview_pdf_export(
             .window()
             .ok_or_else(|| "The PaperCanvas window is not available for PDF export.".to_string())?;
         let print_info = NSPrintInfo::sharedPrintInfo().copy();
-        print_info.setTopMargin(0.0);
-        print_info.setRightMargin(0.0);
-        print_info.setBottomMargin(0.0);
-        print_info.setLeftMargin(0.0);
+        // WebKit calculates its initial page aspect ratio before activating
+        // print CSS. Match @page here so later CSS margins keep that ratio.
+        print_info.setTopMargin(18.0 * 72.0 / 25.4);
+        print_info.setRightMargin(20.0 * 72.0 / 25.4);
+        print_info.setBottomMargin(20.0 * 72.0 / 25.4);
+        print_info.setLeftMargin(20.0 * 72.0 / 25.4);
         print_info.setHorizontallyCentered(false);
         print_info.setVerticallyCentered(false);
         print_info.setHorizontalPagination(NSPrintingPaginationMode::Fit);
@@ -767,6 +876,7 @@ pub fn run() {
             clear_recovery_draft,
             validate_settings_file,
             allow_document_assets,
+            allow_document_image_files,
             allow_document_rename,
             rename_document_entry,
             show_in_folder,
@@ -955,6 +1065,145 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(std::fs::read_to_string(&target).unwrap(), original);
         assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn checked_markdown_saves_use_exact_last_committed_bytes() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("research.md");
+        let mut previous = "\u{feff}# 原稿\r\n";
+        std::fs::write(&target, previous).unwrap();
+        for contents in [previous, "", "# Latest 中文 🧪\r\n", "Next revision\n"] {
+            replace_file_atomically_checked(&target, Some(previous.as_bytes()), |file| {
+                file.write_all(contents.as_bytes())
+            })
+            .unwrap();
+            assert_eq!(std::fs::read(&target).unwrap(), contents.as_bytes());
+            previous = contents;
+        }
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn checked_markdown_saves_preserve_external_changes_including_non_utf8_bytes() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("research.md");
+        let original = "Opened source\r\n";
+        for external in [
+            b"External editor writing\n".as_slice(),
+            &[0xff, 0xfe, 0x41, 0x00],
+        ] {
+            std::fs::write(&target, original).unwrap();
+            let result =
+                replace_file_atomically_checked(&target, Some(original.as_bytes()), |file| {
+                    file.write_all(b"Our later edit")?;
+                    // Model an external modification while the temporary save is prepared.
+                    std::fs::write(&target, external)
+                });
+            assert_eq!(result.unwrap_err(), "DOCUMENT_CHANGED_ON_DISK");
+            assert_eq!(std::fs::read(&target).unwrap(), external);
+            assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+        }
+    }
+
+    #[test]
+    fn checked_markdown_saves_never_recreate_a_deleted_baseline_destination() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("research.md");
+        let original = "Opened source\n";
+        for deleted_before_save in [false, true] {
+            std::fs::write(&target, original).unwrap();
+            if deleted_before_save {
+                std::fs::remove_file(&target).unwrap();
+            }
+            let result =
+                replace_file_atomically_checked(&target, Some(original.as_bytes()), |file| {
+                    file.write_all(b"Our later edit")?;
+                    if !deleted_before_save {
+                        std::fs::remove_file(&target)?;
+                    }
+                    Ok(())
+                });
+            assert_eq!(result.unwrap_err(), "DOCUMENT_CHANGED_ON_DISK");
+            assert!(!target.exists());
+            assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn checked_markdown_saves_reject_document_symlink_retargeting_during_preparation() {
+        let directory = tempfile::tempdir().unwrap();
+        let original_target = directory.path().join("original.md");
+        let other_target = directory.path().join("other.md");
+        let link = directory.path().join("document.md");
+        std::fs::write(&original_target, "Opened source").unwrap();
+        std::fs::write(&other_target, "Other writing").unwrap();
+        std::os::unix::fs::symlink(&original_target, &link).unwrap();
+        let result = replace_file_atomically_checked(&link, Some(b"Opened source"), |file| {
+            file.write_all(b"Our later edit")?;
+            std::fs::remove_file(&link)?;
+            std::os::unix::fs::symlink(&other_target, &link)
+        });
+        assert_eq!(result.unwrap_err(), "DOCUMENT_CHANGED_ON_DISK");
+        assert_eq!(
+            std::fs::read_to_string(&original_target).unwrap(),
+            "Opened source"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&other_target).unwrap(),
+            "Other writing"
+        );
+        assert_eq!(
+            link.canonicalize().unwrap(),
+            other_target.canonicalize().unwrap()
+        );
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 3);
+    }
+
+    #[test]
+    fn referenced_images_authorize_only_existing_supported_files_for_a_granted_document() {
+        let directory = tempfile::tempdir().unwrap();
+        let document = directory.path().join("notes.md");
+        let image = directory.path().join("My figure.SVG");
+        let missing = directory.path().join("missing.png");
+        let credentials = directory.path().join("credentials.txt");
+        let folder = directory.path().join("folder.png");
+        std::fs::write(&image, "<svg xmlns='http://www.w3.org/2000/svg'></svg>").unwrap();
+        std::fs::write(&credentials, "private text").unwrap();
+        std::fs::create_dir(&folder).unwrap();
+        assert_eq!(
+            document_image_files(
+                &document,
+                vec![
+                    image.clone(),
+                    missing,
+                    credentials,
+                    folder,
+                    PathBuf::from("relative.png")
+                ],
+                true
+            )
+            .unwrap(),
+            vec![image.clone()]
+        );
+        assert!(document_image_files(&document, vec![image], false).is_err());
+        assert!(document_image_files(Path::new("relative.md"), vec![], true).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn referenced_images_support_existing_image_symlinks_without_granting_a_directory() {
+        let directory = tempfile::tempdir().unwrap();
+        let image = directory.path().join("image.svg");
+        let link = directory.path().join("alias.svg");
+        std::fs::write(&image, "<svg xmlns='http://www.w3.org/2000/svg'></svg>").unwrap();
+        std::os::unix::fs::symlink(&image, &link).unwrap();
+        assert_eq!(
+            document_image_files(&directory.path().join("notes.md"), vec![link.clone()], true)
+                .unwrap(),
+            vec![link]
+        );
     }
 
     #[test]

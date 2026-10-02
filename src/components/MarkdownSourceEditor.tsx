@@ -19,6 +19,7 @@ import {
   StateEffect,
   StateField,
   Transaction,
+  Text,
 } from "@codemirror/state";
 import {
   Decoration,
@@ -44,6 +45,7 @@ import {
 } from "../editor/search";
 import { getMessages, type Language } from "../i18n";
 import type { MarkdownSourceChanges } from "../editor/markdownAssetReferences";
+import { boundedSourceSyntax } from "../editor/sourceSyntax";
 
 type Props = {
   language: Language;
@@ -348,9 +350,10 @@ export const MarkdownSourceEditor = memo(
 
     useLayoutEffect(() => {
       if (!host.current) return;
-      createSourceState.current = (snapshot, selection) =>
-        EditorState.create({
-          doc: snapshot.normalized,
+      createSourceState.current = (snapshot, selection) => {
+        const document = Text.of(snapshot.normalized.split("\n"));
+        return EditorState.create({
+          doc: document,
           selection,
           extensions: [
             lineNumbers(),
@@ -360,8 +363,10 @@ export const MarkdownSourceEditor = memo(
             bracketMatching(),
             highlightActiveLine(),
             keymap.of([...defaultKeymap, ...historyKeymap, indentWithTab]),
-            markdown(),
-            syntaxHighlighting(markdownHighlightStyle),
+            boundedSourceSyntax(document, [
+              markdown(),
+              syntaxHighlighting(markdownHighlightStyle),
+            ]),
             searchDecorations,
             EditorView.lineWrapping,
             contentAttributes.of(
@@ -385,6 +390,7 @@ export const MarkdownSourceEditor = memo(
             }),
           ],
         });
+      };
       const editor = new EditorView({
         state: createSourceState.current(rawSource.current),
         parent: host.current,

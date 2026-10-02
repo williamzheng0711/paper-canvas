@@ -107,6 +107,14 @@ failure injection. Keep original bytes for comparison.
   formulas, search, undo/redo, and save. An untouched save must preserve all
   original bytes. Invalid UTF-8 and UTF-16 files must report an error without
   replacing their bytes with decoding substitutions.
+- Externally replace, delete, or retarget the symlink of an opened document,
+  then save local edits. Saving must report the conflict without overwriting or
+  recreating the disk version. Unsaved writing must have an independent recovery
+  copy even when its named file cannot be saved. Restart after an abrupt stop,
+  save the recovered copy elsewhere, and reopen it; relative image origins and
+  BOM/line-ending bytes must survive. Repeat with BOM-prefixed first-line
+  inline HTML, formulas, image references, and repeated leading BOM markers;
+  Canvas parsing and image path rewriting must not shift source offsets. Explicit Save As remains available.
 - Type immediately before native Quit or window close. The latest writing must
   be durable before the window disappears. Inject a failed save/settings flush;
   the document must stay open with a visible error. Repeat while images are
@@ -139,6 +147,15 @@ failure injection. Keep original bytes for comparison.
   Canvas/outline requests and PDF export must not mount the oversized preview.
   An oversized Canvas insertion reports the limit and leaves the document and
   history intact; reducing source content permits Canvas again.
+- Source syntax styling pauses above 250,000 characters or a 20,000-character
+  line. The complete text, selections, mixed line endings and undo/redo remain
+  available; reducing content or undoing the oversized insertion resumes styling.
+- Open Markdown with supported local images outside the home directory. Existing
+  referenced files must render without granting an entire directory. Repeat with
+  HTML image references, symlinks, missing images, and Save As in another folder.
+- Export PDF from Source and confirm it stays active with its selection and undo
+  history. Verify all rendered pages, local images, formulas and intended margins;
+  native printing must start pagination with the same margins as print CSS.
 - Resolve Windows drive-root and UNC image paths, including repeated parent
   traversal. A relative path must retain its drive or server/share root. Hiding
   a recent file must not consume a visible Recent slot when it is saved again.
@@ -146,6 +163,15 @@ failure injection. Keep original bytes for comparison.
 During the October 2026 stress campaign, native checks confirmed exact-byte
 BOM/CRLF saves, safe immediate Quit, independent recovery with damaged settings,
 and responsive source access plus byte-preserving undo/save for a 2 MB,
-40,000-paragraph document. Composition and delayed-operation regressions are
+40,000-paragraph document. Further native checks confirmed a responsive
+750,000-character wrapped paragraph, independent recovery after a disk conflict
+and abrupt app termination, exact recovered BOM/CRLF Save As with rebased images,
+and complete multi-page PDF export while Source stayed active. The seeded
+Canvas history probe exercised 70,000 actions; a browser probe accepted 4,000
+nested HTML blockquotes without a parser or traversal error. Native oversized
+paste followed by Undo/Redo/Undo and Save preserved mixed CRLF/LF/CR bytes.
+The final automated run passed 1,243 tests across 70 frontend test files and
+31 native tests, along with lint, type checking, and production/native builds.
+Composition and delayed-operation regressions are
 also exercised by the automated editor and application suites. Real IME
 behavior and Windows-native dialogs still require their platform manual checks.

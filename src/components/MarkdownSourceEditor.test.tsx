@@ -8,6 +8,7 @@ import {
   undoDepth,
 } from "@codemirror/commands";
 import { EditorView } from "@codemirror/view";
+import { syntaxTree } from "@codemirror/language";
 import { createRoot, type Root } from "react-dom/client";
 import {
   afterAll,
@@ -22,6 +23,10 @@ import {
 import type { SwitchableEditorHandle } from "../editor/search";
 import { MarkdownSourceEditor } from "./MarkdownSourceEditor";
 import * as documentSearch from "../editor/search";
+import {
+  maximumHighlightedSourceCharacters,
+  maximumHighlightedSourceLineLength,
+} from "../editor/sourceSyntax";
 import {
   imagePathSourceChanges,
   rebaseMarkdownImageAssets,
@@ -173,6 +178,95 @@ describe("MarkdownSourceEditor search", () => {
       expect(undo(editor)).toBe(true);
     });
     expect(value).toBe("\nnew\n");
+  });
+
+  it.each(["long line", "total length"] as const)(
+    "bounds source parsing for %s in the original edit and restores highlighting through undo",
+    async (limit) => {
+      const original = "# Header\r\n\r\n**bold**\nTail\r";
+      let value = original;
+      const onChange = vi.fn((next: string) => {
+        value = next;
+      });
+      await act(async () =>
+        root.render(
+          <MarkdownSourceEditor
+            language="en"
+            value={value}
+            valueRevision={0}
+            onChange={onChange}
+          />,
+        ),
+      );
+      const editor = EditorView.findFromDOM(host.querySelector(".cm-editor")!)!;
+      expect(syntaxTree(editor.state).length).toBeGreaterThan(0);
+      const from = editor.state.doc.line(3).from;
+      const inserted =
+        limit === "long line"
+          ? "x".repeat(maximumHighlightedSourceLineLength + 1)
+          : ("x".repeat(500) + "\n").repeat(
+              Math.ceil(maximumHighlightedSourceCharacters / 501),
+            );
+      await act(async () => {
+        editor.dispatch({ selection: { anchor: from } });
+        editor.dispatch({
+          changes: { from, insert: inserted },
+          selection: { anchor: from + inserted.length },
+          annotations: isolateHistory.of("full"),
+        });
+      });
+      expect(syntaxTree(editor.state).length).toBe(0);
+      expect(editor.state.selection.main.head).toBe(from + inserted.length);
+      const rawInserted = inserted.replaceAll("\n", "\r\n");
+      const changed = "# Header\r\n\r\n" + rawInserted + "**bold**\nTail\r";
+      expect(value).toBe(changed);
+      await act(async () => {
+        expect(undo(editor)).toBe(true);
+      });
+      expect(value).toBe(original);
+      expect(editor.state.selection.main.head).toBe(from);
+      expect(syntaxTree(editor.state).length).toBeGreaterThan(0);
+      await act(async () => {
+        expect(redo(editor)).toBe(true);
+      });
+      expect(value).toBe(changed);
+      expect(syntaxTree(editor.state).length).toBe(0);
+      expect(EditorView.findFromDOM(host.querySelector(".cm-editor")!)).toBe(
+        editor,
+      );
+    },
+  );
+
+  it("initializes a huge flat HTML source without token DOM expansion and keeps its exact raw bytes undoable", async () => {
+    const original = "# Header\r\n<div>" + "<br>".repeat(40_000) + "</div>\r\n";
+    let value = original;
+    await act(async () =>
+      root.render(
+        <MarkdownSourceEditor
+          language="en"
+          value={value}
+          valueRevision={0}
+          onChange={(next) => {
+            value = next;
+          }}
+        />,
+      ),
+    );
+    const editor = EditorView.findFromDOM(host.querySelector(".cm-editor")!)!;
+    expect(syntaxTree(editor.state).length).toBe(0);
+    expect(host.querySelectorAll(".cm-content span").length).toBeLessThan(10);
+    await act(async () =>
+      editor.dispatch({ changes: { from: 1, insert: "z" } }),
+    );
+    expect(value).toBe(original.slice(0, 1) + "z" + original.slice(1));
+    await act(async () => {
+      expect(undo(editor)).toBe(true);
+    });
+    expect(value).toBe(original);
+    await act(async () => {
+      expect(redo(editor)).toBe(true);
+    });
+    expect(value).toBe(original.slice(0, 1) + "z" + original.slice(1));
   });
 
   it("highlights, selects, navigates, clears, and restores focus", async () => {

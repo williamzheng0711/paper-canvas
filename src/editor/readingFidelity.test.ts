@@ -45,6 +45,57 @@ function allText(node: JSONContent): string {
 }
 
 describe("reading fixtures in the real editor schema", () => {
+  it.each([
+    "before <span>HTML 中文</span> after\n",
+    "\\[\nx + y\n\\]\n\nAfter\n",
+    "\\begin{align}\nx &= y\n\\end{align}\n\nAfter\n",
+    "`\\(literal\\)` before <kbd>\\(HTML literal\\)</kbd> after\n",
+  ])("keeps BOM parsing and ordinary canvas edits faithful: %j", (body) => {
+    const imported = ProseMirrorNode.fromJSON(
+      schema,
+      markdownToDocument("\uFEFF" + body),
+    );
+    imported.check();
+    expect(imported.toJSON()).toEqual(
+      ProseMirrorNode.fromJSON(schema, markdownToDocument(body)).toJSON(),
+    );
+    const state = EditorState.create({ schema, doc: imported });
+    const edited = state.apply(
+      state.tr.insertText(" edited", imported.content.size - 1),
+    );
+    edited.doc.check();
+    const saved = documentToMarkdown(edited.doc.toJSON());
+    const reopened = ProseMirrorNode.fromJSON(
+      schema,
+      markdownToDocument(saved),
+    );
+    reopened.check();
+    expect(reopened.toJSON(), saved).toEqual(edited.doc.toJSON());
+    expect(allText(reopened.toJSON())).toContain(" edited");
+    if (body.includes("<span>")) {
+      expect(imported.toJSON().content?.[0].content?.[1]).toMatchObject({
+        type: "inlineHtmlPreview",
+        attrs: { source: "<span>HTML 中文</span>" },
+      });
+    }
+    if (body.startsWith("\\["))
+      expect(imported.toJSON().content?.[0]).toMatchObject({
+        type: "blockFormula",
+        attrs: { latex: "x + y" },
+      });
+  });
+
+  it.each([2, 3])(
+    "preserves %i leading BOM markers without consuming content",
+    (count) => {
+      const source =
+        "\uFEFF".repeat(count) + "before <span>HTML</span> after\r\n";
+      const document = markdownToDocument(source);
+      expect(document.content?.[0].type).toBe("unsupportedMarkdown");
+      expect(documentToMarkdown(document)).toBe(source);
+    },
+  );
+
   it.each(["- [x] <d>", "- [x] <!-->", "- [x] <u>", "- [x] <d>![]()"])(
     "retains a task marker when its first paragraph contains incomplete HTML: %j",
     (source) => {

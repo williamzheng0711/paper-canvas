@@ -115,7 +115,7 @@ describe("atomic native draft recovery", () => {
     await saveDraft(original);
     expect(harness.recovery).toContain("\\ud800");
     expect(harness.recovery).toContain("\\udfff");
-    expect(JSON.parse(harness.recovery!)).toEqual({ ...draft, sourceMarkdown });
+    expect(JSON.parse(harness.recovery!)).toEqual({ ...draft, sourceMarkdown, recoverySourcePath: "/notes/saved.md" });
     expect(harness.load).not.toHaveBeenCalled();
     expect(harness.set).not.toHaveBeenCalled();
     await expect(loadDraft()).resolves.toEqual(expect.objectContaining({ sourceMarkdown, path: undefined }));
