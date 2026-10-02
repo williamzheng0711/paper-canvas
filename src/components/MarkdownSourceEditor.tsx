@@ -3,6 +3,8 @@ import {
   history,
   historyKeymap,
   indentWithTab,
+  invertedEffects,
+  isolateHistory,
 } from "@codemirror/commands";
 import { markdown } from "@codemirror/lang-markdown";
 import {
@@ -14,6 +16,7 @@ import {
   ChangeSet,
   Compartment,
   EditorState,
+  MapMode,
   StateEffect,
   StateField,
   Transaction,
@@ -64,7 +67,11 @@ function sourceSnapshot(value: string): SourceSnapshot {
     if (value[index] === "\r" && value[index + 1] === "\n")
       crlfOffsets.push(index);
   }
-  return { value, normalized: value.replace(/\r\n?/g, "\n"), crlfOffsets };
+  return {
+    value,
+    normalized: value.replace(/\r\n?/g, "\n"),
+    crlfOffsets,
+  };
 }
 
 function boundedOffset(length: number, offset: number): number {
@@ -98,6 +105,133 @@ function editorOffset(snapshot: SourceSnapshot, sourceOffset: number): number {
 function rawOffset(snapshot: SourceSnapshot, normalizedOffset: number): number {
   const offset = boundedOffset(snapshot.normalized.length, normalizedOffset);
   return offset + lineEndingCount(snapshot, offset, true);
+}
+
+type SeparatorRecord = { anchor: number; offset: number; value: string };
+type SeparatorMetadata = {
+  lineEnding: string;
+  separators: ReadonlyMap<number, string>;
+};
+
+function sourceSeparators(snapshot: SourceSnapshot): SeparatorMetadata {
+  const separators = new Map<number, string>();
+  let extra = 0;
+  for (const match of snapshot.value.matchAll(/\r\n|\r|\n/g)) {
+    separators.set(match.index - extra, match[0]);
+    if (match[0] === "\r\n") extra += 1;
+  }
+  return {
+    lineEnding: separators.values().next().value ?? "\n",
+    separators,
+  };
+}
+
+const replaceSeparators = StateEffect.define<SeparatorMetadata>();
+const restoreSeparators = StateEffect.define<readonly SeparatorRecord[]>({
+  map: (records, changes) =>
+    records.map((record) => ({
+      ...record,
+      anchor: changes.mapPos(record.anchor, -1),
+    })),
+});
+
+const separatorMetadata = StateField.define<SeparatorMetadata>({
+  create: (state) => sourceSeparators(sourceSnapshot(state.doc.toString())),
+  update: (current, transaction) => {
+    if (!transaction.docChanged && transaction.effects.length === 0)
+      return current;
+    let next = current;
+    if (transaction.docChanged) {
+      const separators = new Map<number, string>();
+      for (const [previous, value] of current.separators) {
+        const position = transaction.changes.mapPos(
+          previous,
+          1,
+          MapMode.TrackAfter,
+        );
+        if (position !== null) separators.set(position, value);
+      }
+      transaction.changes.iterChanges((_from, _to, fromB, _toB, inserted) => {
+        const text = inserted.toString();
+        for (
+          let index = text.indexOf("\n");
+          index >= 0;
+          index = text.indexOf("\n", index + 1)
+        )
+          separators.set(fromB + index, current.lineEnding);
+      });
+      next = { ...current, separators };
+    }
+    for (const effect of transaction.effects) {
+      if (effect.is(replaceSeparators)) next = effect.value;
+      if (effect.is(restoreSeparators)) {
+        const separators = new Map(next.separators);
+        for (const record of effect.value) {
+          const position =
+            transaction.changes.mapPos(record.anchor, -1) + record.offset;
+          if (transaction.newDoc.sliceString(position, position + 1) === "\n")
+            separators.set(position, record.value);
+        }
+        next = { ...next, separators };
+      }
+    }
+    return next;
+  },
+});
+
+function deletedSeparators(transaction: Transaction): SeparatorRecord[] {
+  if (!transaction.docChanged) return [];
+  const records: SeparatorRecord[] = [];
+  const previous = transaction.startState.field(separatorMetadata);
+  transaction.changes.iterChangedRanges((from, to, anchor) => {
+    for (const [position, value] of previous.separators) {
+      if (position >= from && position < to && value !== previous.lineEnding)
+        records.push({ anchor, offset: position - from, value });
+    }
+  });
+  return records;
+}
+
+// Native history maps each live deletion anchor through external edits. Relative
+// offsets restore only exceptional separator bytes, never old source or URLs.
+const separatorHistory = [
+  invertedEffects.of((transaction) => {
+    const records = deletedSeparators(transaction);
+    return records.length ? [restoreSeparators.of(records)] : [];
+  }),
+  // Keep each restoration anchor tied to one native change set. Ordinary typing
+  // and deletions of the established separator retain normal history grouping.
+  EditorState.transactionExtender.of((transaction) =>
+    deletedSeparators(transaction).length
+      ? { annotations: isolateHistory.of("full") }
+      : null,
+  ),
+];
+
+function applySourceChanges(
+  snapshot: SourceSnapshot,
+  changes: ChangeSet,
+  metadata: SeparatorMetadata,
+): SourceSnapshot {
+  const parts: string[] = [];
+  let cursor = 0;
+  changes.iterChanges((from, to, fromB, _toB, inserted) => {
+    const rawFrom = rawOffset(snapshot, from);
+    const rawTo = rawOffset(snapshot, to);
+    parts.push(
+      snapshot.value.slice(cursor, rawFrom),
+      inserted
+        .toString()
+        .replace(
+          /\n/g,
+          (_newline, index: number) =>
+            metadata.separators.get(fromB + index) ?? metadata.lineEnding,
+        ),
+    );
+    cursor = rawTo;
+  });
+  parts.push(snapshot.value.slice(cursor));
+  return sourceSnapshot(parts.join(""));
 }
 
 const markdownHighlightStyle = HighlightStyle.define([
@@ -197,6 +331,8 @@ export const MarkdownSourceEditor = memo(
           extensions: [
             lineNumbers(),
             history(),
+            separatorMetadata.init(() => sourceSeparators(rawSource.current)),
+            separatorHistory,
             bracketMatching(),
             highlightActiveLine(),
             keymap.of([...defaultKeymap, ...historyKeymap, indentWithTab]),
@@ -212,9 +348,15 @@ export const MarkdownSourceEditor = memo(
             ),
             EditorView.updateListener.of((update) => {
               if (update.docChanged && !applyingExternalValue.current) {
-                const nextValue = update.state.doc.toString();
-                rawSource.current = sourceSnapshot(nextValue);
-                onChangeRef.current(nextValue);
+                // CodeMirror normalizes its line separators. Apply only edited
+                // ranges to the raw file so untouched CRLF/LF/CR bytes survive.
+                const next = applySourceChanges(
+                  rawSource.current,
+                  update.changes,
+                  update.state.field(separatorMetadata),
+                );
+                rawSource.current = next;
+                onChangeRef.current(next.value);
               }
             }),
           ],
@@ -248,6 +390,11 @@ export const MarkdownSourceEditor = memo(
       const current = editor.state.doc.toString();
       const nextSnapshot = sourceSnapshot(value);
       if (current === nextSnapshot.normalized) {
+        if (value !== rawSource.current.value)
+          editor.dispatch({
+            effects: replaceSeparators.of(sourceSeparators(nextSnapshot)),
+            annotations: Transaction.addToHistory.of(false),
+          });
         rawSource.current = nextSnapshot;
         return;
       }
@@ -287,9 +434,15 @@ export const MarkdownSourceEditor = memo(
           // Invalid ranges fall back to the existing complete snapshot update.
         }
       }
+      const metadata = sourceSeparators(nextSnapshot);
+      if (changes)
+        // A path rebase belongs to the same document, even when its original
+        // first separator was deleted and the remaining first style differs.
+        metadata.lineEnding = editor.state.field(separatorMetadata).lineEnding;
       applyingExternalValue.current = true;
       try {
         editor.dispatch({
+          effects: replaceSeparators.of(metadata),
           changes: changes ?? {
             from: 0,
             to: current.length,

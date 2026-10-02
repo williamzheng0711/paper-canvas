@@ -1,5 +1,8 @@
 import { Editor, getSchema, type JSONContent } from "@tiptap/core";
-import { DOMParser as ProseMirrorDOMParser } from "@tiptap/pm/model";
+import {
+  DOMParser as ProseMirrorDOMParser,
+  DOMSerializer,
+} from "@tiptap/pm/model";
 import StarterKit from "@tiptap/starter-kit";
 import { Table, TableRow } from "@tiptap/extension-table";
 import TaskList from "@tiptap/extension-task-list";
@@ -408,5 +411,106 @@ describe("rich table HTML source preservation", () => {
       "https://example.com/guide",
     );
     expect(image?.closest("a")?.getAttribute("title")).toBe("Guide");
+  });
+
+  it("retains resized column widths through Markdown save, safe preview and native copy", () => {
+    const table = markdownToDocument(
+      "| A | B |\n| --- | --- |\n| First | Second |",
+    ).content![0];
+    for (const row of table.content!) {
+      row.content!.forEach((cell, index) => {
+        cell.attrs = { ...cell.attrs, colwidth: [index === 0 ? 140 : 260] };
+      });
+    }
+    expect(requiresHtmlTable(table)).toBe(true);
+    const markdown = documentToMarkdown({ type: "doc", content: [table] });
+    const reopened = markdownToDocument(markdown);
+    expect(reopened.content?.map((node) => node.type)).toEqual(["htmlPreview"]);
+    expect(documentToMarkdown(reopened)).toBe(markdown);
+    const preview = createHtmlPreview(markdown, { kind: "block" });
+    expect(
+      [...preview.querySelectorAll("col")].map((column) =>
+        column.getAttribute("width"),
+      ),
+    ).toEqual(["140", "260"]);
+    const expected = [140, 260, 140, 260];
+    const widths = (document: JSONContent) =>
+      [
+        ...nodesOfType(document, "tableHeader"),
+        ...nodesOfType(document, "tableCell"),
+      ].flatMap((cell) => cell.attrs?.colwidth ?? []);
+    expect(widths(copiedHtml(table))).toEqual(expected);
+
+    // Copying an editable native table follows the real schema DOM serializer,
+    // a different path from copying the noneditable fallback table above.
+    const editable = schema.nodeFromJSON({ type: "doc", content: [table] });
+    const clipboard = document.createElement("div");
+    clipboard.append(
+      DOMSerializer.fromSchema(schema).serializeFragment(editable.content),
+    );
+    const pasted = document.createElement("div");
+    pasted.innerHTML = sanitizePastedHtml(clipboard.innerHTML);
+    expect(
+      widths(ProseMirrorDOMParser.fromSchema(schema).parse(pasted).toJSON()),
+    ).toEqual(expected);
+  });
+
+  it("keeps merged-cell width arrays and column positions under rowspans", () => {
+    const table = richTable([{ type: "paragraph" }]);
+    table.content![0].content![0].attrs = { colspan: 2, colwidth: [100, 240] };
+    table.content![1].content![0].attrs = { rowspan: 2, colwidth: [100] };
+    table.content![1].content![1].attrs = { colwidth: [240] };
+    table.content!.push({
+      type: "tableRow",
+      content: [
+        {
+          type: "tableCell",
+          attrs: { colwidth: [240] },
+          content: [{ type: "paragraph" }],
+        },
+      ],
+    });
+    const preview = createHtmlPreview(tableToHtml(table), { kind: "block" });
+    expect(
+      [...preview.querySelectorAll("col")].map((column) =>
+        column.getAttribute("width"),
+      ),
+    ).toEqual(["100", "240"]);
+    const copied = copiedHtml(table);
+    expect(nodesOfType(copied, "tableHeader")[0].attrs?.colwidth).toEqual([
+      100, 240,
+    ]);
+    expect(
+      nodesOfType(copied, "tableCell").map((cell) => cell.attrs?.colwidth),
+    ).toEqual([[100], [240], [240]]);
+  });
+
+  it("preserves underline marks on rich table text and inline formulas", () => {
+    const table = richTable([
+      {
+        type: "paragraph",
+        content: [
+          { type: "text", text: "Underlined ", marks: [{ type: "underline" }] },
+          {
+            type: "inlineFormula",
+            attrs: { latex: "a|b" },
+            marks: [{ type: "underline" }],
+          },
+        ],
+      },
+    ]);
+    const copied = copiedHtml(table);
+    expect(
+      nodesOfType(copied, "text").find((node) => node.text === "Underlined ")
+        ?.marks,
+    ).toEqual([{ type: "underline" }]);
+    expect(nodesOfType(copied, "inlineFormula")[0].marks).toEqual([
+      { type: "underline" },
+    ]);
+    expect(
+      createHtmlPreview(tableToHtml(table), { kind: "block" }).querySelectorAll(
+        "u",
+      ),
+    ).toHaveLength(2);
   });
 });

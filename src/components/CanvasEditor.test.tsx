@@ -24,6 +24,42 @@ vi.mock('@tiptap/react', async (importOriginal) => {
   };
 });
 
+it('uses the current document path for image paste without recreating the editor after Save As', async () => {
+  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+  const host = document.createElement('div');
+  document.body.append(host);
+  const root = createRoot(host);
+  const onChange = vi.fn();
+  const initialDocument = markdownConversion.markdownToDocument('Original text.');
+  const copied = '<img src="https://example.com/a.png" data-image-original-src="/notes/images/a.png" alt="Diagram">';
+  try {
+    await act(async () => root.render(
+      <CanvasEditor language="en" documentId={1} documentPath="/notes/source.md" initialDocument={initialDocument} onChange={onChange} />,
+    ));
+    const editor = harness.editor!;
+    await act(async () => {
+      editor.commands.selectAll();
+      editor.view.pasteHTML(copied, new Event('paste') as ClipboardEvent);
+    });
+    expect(editor.getJSON().content?.[0].attrs?.originalSrc).toBe('images/a.png');
+    const beforePathChange = editor.getJSON();
+    await act(async () => root.render(
+      <CanvasEditor language="en" documentId={1} documentPath="/exports/copy.md" initialDocument={initialDocument} onChange={onChange} />,
+    ));
+    expect(harness.editor).toBe(editor);
+    expect(editor.getJSON()).toEqual(beforePathChange);
+    await act(async () => {
+      editor.commands.selectAll();
+      editor.view.pasteHTML(copied, new Event('paste') as ClipboardEvent);
+    });
+    expect(editor.getJSON().content?.[0].attrs?.originalSrc).toBe('../notes/images/a.png');
+  } finally {
+    await act(async () => root.unmount());
+    host.remove();
+    Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: false });
+  }
+});
+
 it('does not publish an unchanged document when reading tools flush the canvas', async () => {
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
   const host = document.createElement('div');

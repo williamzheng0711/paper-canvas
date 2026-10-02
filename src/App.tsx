@@ -15,6 +15,7 @@ import {
   type MarkdownComment,
 } from './editor/comments';
 import { documentsEqual } from './editor/documentSync';
+import { htmlPreviewText } from './editor/HtmlPreview';
 import { markdownToDocument } from './editor/markdown';
 import { collectOutline } from './editor/outline';
 import { imagePathSourceChanges, mapImagePathComments, renameMarkdownImageAssets } from './editor/markdownAssetReferences';
@@ -90,14 +91,22 @@ function documentMetrics(document: JSONContent): {
   characters: number;
   words: number;
 } {
-  const walk = (node: JSONContent, separateBlocks = false): string => {
-    const content = `${node.text ?? ''}${(node.content ?? []).map((child) => walk(child, separateBlocks)).join('')}`;
-    return separateBlocks && ['paragraph', 'heading', 'codeBlock', 'hardBreak'].includes(node.type ?? '')
-      ? `${content}\n`
-      : content;
+  const characterParts: string[] = [];
+  const wordParts: string[] = [];
+  const walk = (node: JSONContent): void => {
+    const html = node.type === 'htmlPreview' || node.type === 'inlineHtmlPreview';
+    const inline = node.type === 'inlineHtmlPreview';
+    const content = html
+      ? htmlPreviewText(String(node.attrs?.source ?? ''), inline ? 'inline' : 'block', { preserveEdges: inline })
+      : node.text ?? '';
+    characterParts.push(html ? content.replace(/\n/g, '') : content);
+    wordParts.push(content);
+    node.content?.forEach(walk);
+    if (['paragraph', 'heading', 'codeBlock', 'hardBreak', 'htmlPreview'].includes(node.type ?? '')) wordParts.push('\n');
   };
-  const characters = [...walk(document).trim()].length;
-  const text = walk(document, true).trim();
+  walk(document);
+  const characters = [...characterParts.join('').trim()].length;
+  const text = wordParts.join('').trim();
   const cjk = (text.match(/[\u3400-\u9fff\uf900-\ufaff]/g) ?? []).length;
   const nonCjkWords = text
     .replace(/[\u3400-\u9fff\uf900-\ufaff]/g, ' ')
@@ -487,7 +496,11 @@ export default function App() {
 
   useEffect(() => {
     if (!preferencesLoaded.current) return;
-    void savePreferences(preferences);
+    let active = true;
+    void savePreferences(preferences).catch((error: unknown) => {
+      if (active) setMessage(error instanceof Error ? error.message : getMessages().loadSettingsFailed);
+    });
+    return () => { active = false; };
   }, [preferences]);
 
   useEffect(() => {
@@ -548,7 +561,6 @@ export default function App() {
       modeTransitionFrame.current = undefined;
       setModeTransitioning(false);
       clearSourceCommentSync();
-      if (nextFile.path) void clearDraft();
       const normalizedFile = { ...nextFile, comments: nextFile.comments ?? [] };
       fileRef.current = normalizedFile;
       setFile(normalizedFile);
@@ -560,6 +572,10 @@ export default function App() {
       closeToolbarMenus();
       setDocumentId((id) => id + 1);
       documentSessionRef.current += 1;
+      const session = documentSessionRef.current;
+      void clearDraft().catch((error: unknown) => {
+        if (documentSessionRef.current === session) setMessage(error instanceof Error ? error.message : getMessages().loadSettingsFailed);
+      });
       advanceRevision();
       resetCommentHistory();
       dirtyRef.current = false;
@@ -705,10 +721,17 @@ export default function App() {
           setDirty(false);
           setSaveStatus('saved');
           setMessage(getMessages().savedFile(saved.name));
-          await clearDraft();
-          const recentFiles = await loadRecent();
+          try {
+            await clearDraft();
+            const recentFiles = await loadRecent();
+            if (documentSessionRef.current !== saveSession) return;
+            setRecent(recentFiles);
+          } catch (error) {
+            // The document write has committed. Settings failure must not
+            // misreport that write or skip newer typing waiting to be saved.
+            if (documentSessionRef.current === saveSession) setMessage(error instanceof Error ? error.message : getMessages().loadSettingsFailed);
+          }
           if (documentSessionRef.current !== saveSession) return;
-          setRecent(recentFiles);
           // Edits can arrive while updating recovery/recent-file metadata too.
           // A coalesced autosave must still write that newer revision.
           if (editRevisionRef.current !== revision) {
@@ -869,7 +892,6 @@ export default function App() {
   const newFile = useCallback(() => {
     if (dirty && !window.confirm(getMessages().confirmDiscardAndNew)) return;
     openRequest.current += 1;
-    void clearDraft();
     loadFile(newEditorFile());
   }, [dirty, loadFile]);
 
@@ -1348,7 +1370,7 @@ export default function App() {
       }
       if (documentSessionRef.current !== exportSession) return;
       if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
-      const result = await exportPdfFile(fileRef.current.name);
+      const result = await exportPdfFile(fileRef.current.name, () => documentSessionRef.current === exportSession);
       if (documentSessionRef.current !== exportSession) return;
       if (result.type === 'saved') {
         setMessage(getMessages().exportedFile(result.name));
@@ -1565,7 +1587,6 @@ export default function App() {
             onToggle={(event) => {
               if (event.currentTarget.open && readingSettingsMenu.current) readingSettingsMenu.current.open = false;
               if (!event.currentTarget.open && exportMenu.current) exportMenu.current.open = false;
-              if (!event.currentTarget.open && exportMenu.current) exportMenu.current.open = false;
             }}
           >
             <summary className="icon-button" role="button" aria-label={text.fileActions} title={text.fileActions}><ToolbarIcon name="more" /></summary>
@@ -1730,6 +1751,7 @@ export default function App() {
               ref={canvasSearch}
               language={preferences.language}
               documentId={documentId}
+              documentPath={file.path}
               initialDocument={file.document}
               comments={comments}
               outlineTarget={outlineTarget}

@@ -31,7 +31,10 @@ Use a temporary copy for intentional edits.
 
 - Open each file, navigate links and the outline in both modes, search forward
   and backward, inspect formulas, switch modes repeatedly, and save without edits.
-  Compare bytes with the original; also repeat with CRLF line endings.
+  Compare bytes with the original; also repeat with CRLF line endings. Edit one
+  character in source mode and confirm untouched CRLF, LF, and CR separators
+  retain their original bytes. Delete across mixed separators and undo/redo;
+  undo must restore their exact bytes. Newly inserted lines should use the file's separator.
 - Rename a copy with a companion image folder, then Save As into another directory.
   Confirm images still display, only actual local image destinations change, and
   literal paths in prose/code/titles remain intact. Selections and comment anchors
@@ -54,18 +57,27 @@ Use a temporary copy for intentional edits.
   return with backlinks; every note must return to its own last reference.
 - Copy and paste numbered tasks, footnotes with math, merged table cells, and
   resized images between documents; numbering, checked states, note bodies,
-  alignment, cell spans, and dimensions must survive.
+  alignment, cell spans, column widths, and dimensions must survive. Copy a local
+  image into another directory, save/reopen, then copy it again; its relative
+  reference must still resolve to the same physical image. Save SVG diagrams
+  under names containing literal `%20`, `#`, or `?`; their formats and paths
+  must remain valid after reopening.
 - Copy a linked image with separate image and link titles; its link and both
   titles must survive. Save or export immediately after pasting an image;
   the completed image must be included. Switching documents while waiting
-  must cancel that document's delayed save or export.
+  must cancel that document's delayed save or export, including PDF capture
+  after a pending native save dialog.
 - Save and reopen a rich table containing footnotes, numbered tasks, code with
   blank lines, and formulas. The table must remain one block. Copy its HTML
   back into Canvas; note IDs, checkbox states, formula sources, and code
   languages must survive without duplicate checkbox labels.
 - Search a visible phrase crossing inline HTML such as `Press <kbd>Command</kbd>`
   or an HTML comment. Selecting that phrase before Command-F must prefill its
-  visible text; selected hard breaks must retain their line boundaries.
+  visible text; selected hard breaks must retain their line boundaries. Search
+  backward from the end of a document; the last occurrence must be selected first.
+- Apply underline to formatted text and formulas; source switching, copying,
+  editing, and save/reopen must retain it. Empty links and links whose labels
+  contain only a break must retain their destination and title after a Canvas edit.
 - Import display TeX inside list or footnote continuation paragraphs. The formula
   and following text must remain within the same item or note; indented code
   examples must remain literal.

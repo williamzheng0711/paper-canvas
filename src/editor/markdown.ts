@@ -24,6 +24,7 @@ type MdNode = {
   lang?: string | null;
   identifier?: string;
   label?: string;
+  originalSource?: string;
   position?: { start: { offset?: number }; end: { offset?: number } };
   align?: Array<"left" | "right" | "center" | null>;
 };
@@ -36,6 +37,20 @@ const processor = unified()
   .use(remarkMath)
   .use(remarkStringify);
 const imageSizeTitle = /^papercanvas-size:(\d+)x(\d+)(?:\s+\|\s+([\s\S]*))?$/i;
+const inlineMarkTypes = new Set([
+  "text",
+  "inlineFormula",
+  "inlineHtmlPreview",
+  "footnoteReference",
+]);
+
+function carriesLink(nodes: JSONContent[]): boolean {
+  return nodes.some((node) =>
+    node.type === "text"
+      ? Boolean(node.text)
+      : node.type === "image" || inlineMarkTypes.has(node.type ?? ""),
+  );
+}
 
 function isEscaped(text: string, index: number): boolean {
   let slashes = 0;
@@ -281,10 +296,17 @@ function definitionKey(identifier: string): string {
 }
 
 /** Resolve CommonMark references before converting to the editor schema. */
-function resolveReferences(root: MdRoot): void {
+function resolveReferences(root: MdRoot, source: string): void {
   const definitions = new Map<string, MdNode>();
   const used = new Set<string>();
+  const retained = new Set<string>();
   const collect = (node: MdNode) => {
+    if (["link", "linkReference", "definition"].includes(node.type)) {
+      const start = node.position?.start.offset;
+      const end = node.position?.end.offset;
+      if (start !== undefined && end !== undefined)
+        node.originalSource = source.slice(start, end);
+    }
     if (node.type === "definition" && node.identifier) {
       const key = definitionKey(node.identifier);
       if (!definitions.has(key)) definitions.set(key, node);
@@ -293,17 +315,22 @@ function resolveReferences(root: MdRoot): void {
   };
   collect(root);
   const resolve = (node: MdNode) => {
+    node.children?.forEach(resolve);
     if (node.type === "linkReference" || node.type === "imageReference") {
       const key = definitionKey(node.identifier ?? "");
       const definition = definitions.get(key);
       if (definition) {
-        used.add(key);
         node.type = node.type === "linkReference" ? "link" : "image";
         node.url = definition.url;
         node.title = definition.title;
+        if (
+          node.type === "image" ||
+          carriesLink(content(node.children, "inline"))
+        )
+          used.add(key);
+        else retained.add(key);
       }
     }
-    node.children?.forEach(resolve);
   };
   resolve(root);
   const removeConsumedDefinitions = (node: MdNode) => {
@@ -311,7 +338,8 @@ function resolveReferences(root: MdRoot): void {
     node.children = node.children.filter(
       (child) =>
         child.type !== "definition" ||
-        !used.has(definitionKey(child.identifier ?? "")),
+        !used.has(definitionKey(child.identifier ?? "")) ||
+        retained.has(definitionKey(child.identifier ?? "")),
     );
     node.children.forEach(removeConsumedDefinitions);
   };
@@ -323,7 +351,17 @@ function groupInlineHtml(node: MdNode, source: string): void {
   node.children?.forEach((child) => groupInlineHtml(child, source));
   if (
     !node.children ||
-    !["paragraph", "heading", "tableCell"].includes(node.type)
+    ![
+      "paragraph",
+      "heading",
+      "tableCell",
+      "underline",
+      "strong",
+      "emphasis",
+      "delete",
+      "link",
+      "linkReference",
+    ].includes(node.type)
   )
     return;
   const children: MdNode[] = [];
@@ -357,11 +395,27 @@ function groupInlineHtml(node: MdNode, source: string): void {
     const start = child.position?.start.offset;
     const end = node.children[closingIndex]?.position?.end.offset;
     if (depth === 0 && start !== undefined && end !== undefined) {
-      children.push({
-        type: "html",
-        value: source.slice(start, end),
-        position: { start: { offset: start }, end: { offset: end } },
-      });
+      if (
+        tag === "u" &&
+        /^<u\s*>$/i.test(child.value ?? "") &&
+        /^<\/u\s*>$/i.test(node.children[closingIndex].value ?? "")
+      ) {
+        // Underline is an editable editor mark with no Markdown delimiter.
+        // Keep its parsed phrasing children so formulas and other marks remain
+        // native nodes, while attributed HTML retains its lossless preview.
+        const underlined: MdNode = {
+          type: "underline",
+          children: node.children.slice(index + 1, closingIndex),
+        };
+        groupInlineHtml(underlined, source);
+        children.push(underlined);
+      } else {
+        children.push({
+          type: "html",
+          value: source.slice(start, end),
+          position: { start: { offset: start }, end: { offset: end } },
+        });
+      }
       index = closingIndex;
     } else {
       children.push(child);
@@ -380,15 +434,19 @@ function unsupported(
   reason?: string,
   context: MarkdownContext = "block",
 ): JSONContent {
-  const source = processor
-    .stringify({
-      type: "root",
-      children:
-        context === "inline"
-          ? [{ type: "paragraph", children: [node] }]
-          : [node],
-    } as never)
-    .trimEnd();
+  const source =
+    node.originalSource ??
+    processor
+      .stringify(
+        expandUnderline({
+          type: "root",
+          children:
+            context === "inline"
+              ? [{ type: "paragraph", children: [node] }]
+              : [node],
+        }) as never,
+      )
+      .trimEnd();
   // Unsupported phrasing content must remain inline. Block atoms inside a
   // paragraph are discarded by ProseMirror when the document is loaded.
   if (context === "inline")
@@ -457,17 +515,13 @@ function applyMark(
           }
         : node;
     }
-    return [
-      "text",
-      "inlineFormula",
-      "inlineHtmlPreview",
-      "footnoteReference",
-    ].includes(node.type ?? "")
+    return inlineMarkTypes.has(node.type ?? "")
       ? {
           ...node,
-          marks: [...(node.marks ?? []), mark].sort((left, right) =>
-            left.type.localeCompare(right.type),
-          ),
+          marks: [
+            ...(node.marks ?? []).filter((item) => item.type !== mark.type),
+            mark,
+          ].sort((left, right) => left.type.localeCompare(right.type)),
         }
       : node;
   });
@@ -497,7 +551,7 @@ function tableCellContent(node: MdNode): JSONContent[] {
       const source = `| cell |\n| --- |\n| ${prefix}${paragraph![1]}${suffix} |`;
       const root = processor.parse(source) as unknown as MdRoot;
       groupInlineHtml(root, source);
-      resolveReferences(root);
+      resolveReferences(root, source);
       const cell = root.children[0]?.children?.[1]?.children?.[0];
       if (!cell)
         return [{ type: "paragraph", content: content(children, "inline") }];
@@ -531,18 +585,24 @@ function fromMdast(
       return applyMark(content(node.children, "inline"), { type: "bold" });
     case "delete":
       return applyMark(content(node.children, "inline"), { type: "strike" });
+    case "underline":
+      return applyMark(content(node.children, "inline"), { type: "underline" });
     case "inlineCode":
       return [
         { type: "text", text: node.value ?? "", marks: [{ type: "code" }] },
       ];
-    case "link":
-      return applyMark(content(node.children, "inline"), {
+    case "link": {
+      const children = content(node.children, "inline");
+      if (!carriesLink(children))
+        return [unsupported(node, undefined, "inline")];
+      return applyMark(children, {
         type: "link",
         attrs: {
           href: node.url ?? "",
           ...(node.title ? { title: node.title } : {}),
         },
       });
+    }
     case "image":
       return [{ type: "image", attrs: imageAttributes(node) }];
     case "inlineMath":
@@ -725,7 +785,7 @@ export function markdownToDocument(markdown: string): JSONContent {
   const normalized = normalizeLatexDelimiters(source);
   const root = processor.parse(normalized) as unknown as MdRoot;
   groupInlineHtml(root, normalized);
-  resolveReferences(root);
+  resolveReferences(root, normalized);
   const converted = content(root.children);
   return {
     type: "doc",
@@ -737,6 +797,9 @@ function wrapInlineMarks(node: JSONContent, bare: MdNode): MdNode {
   const marks = node.marks ?? [];
   const mark = (type: string) => marks.find((item) => item.type === type);
   let wrapped = bare;
+  // Native Markdown marks stay outside the HTML underline wrapper so shared
+  // runs still merge, including whitespace that cannot end a ~~strike~~ span.
+  if (mark("underline")) wrapped = { type: "underline", children: [wrapped] };
   if (mark("link"))
     wrapped = {
       type: "link",
@@ -756,7 +819,9 @@ function mergeInlineMarks(nodes: MdNode[]): MdNode[] {
     const previous = target[target.length - 1];
     const sameMark =
       previous?.type === current.type &&
-      ["strong", "emphasis", "delete", "link"].includes(current.type) &&
+      ["strong", "emphasis", "delete", "link", "underline"].includes(
+        current.type,
+      ) &&
       (current.type !== "link" ||
         (previous.url === current.url && previous.title === current.title));
     if (!sameMark) {
@@ -952,6 +1017,24 @@ function flattenText(node: JSONContent): string {
     .join("");
 }
 
+/** Expand semantic underline after merging shared mark runs for remark. */
+function expandUnderline(node: MdNode): MdNode {
+  if (!node.children) return node;
+  return {
+    ...node,
+    children: node.children.flatMap((child) => {
+      const converted = expandUnderline(child);
+      return converted.type === "underline"
+        ? [
+            { type: "html", value: "<u>" },
+            ...(converted.children ?? []),
+            { type: "html", value: "</u>" },
+          ]
+        : [converted];
+    }),
+  };
+}
+
 export function documentToMarkdown(
   document: JSONContent,
   stringLength?: (value: string) => number,
@@ -974,7 +1057,7 @@ export function documentToMarkdown(
   const serializer = stringLength
     ? processor().use(remarkGfm, { stringLength })
     : processor;
-  return serializer.stringify(root as unknown as never);
+  return serializer.stringify(expandUnderline(root) as unknown as never);
 }
 
 export { collectOutline } from "./outline";

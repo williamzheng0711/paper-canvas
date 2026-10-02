@@ -71,4 +71,18 @@ describe.each([
     }));
     expect(readStored().compactLayoutVersion).toBe(1);
   });
+
+  it('recovers invalid stored reading options while clamping a valid numeric font size', async () => {
+    writeStored({
+      compactLayoutVersion: 1,
+      theme: 'unknown', font: 'unknown', fontSize: 999,
+      sidebarOpen: 'false', recentFilesExpanded: null,
+    } as unknown as Partial<AppPreferences>);
+    expect(await loadPreferences()).toEqual(expect.objectContaining({
+      theme: 'light', font: 'system', fontSize: 30,
+      sidebarOpen: true, recentFilesExpanded: true,
+    }));
+    writeStored({ compactLayoutVersion: 1, fontSize: null } as unknown as Partial<AppPreferences>);
+    expect((await loadPreferences()).fontSize).toBe(15);
+  });
 });

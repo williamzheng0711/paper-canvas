@@ -1,5 +1,5 @@
 import { act, createRef } from "react";
-import { undo } from "@codemirror/commands";
+import { redo, undo, undoDepth } from "@codemirror/commands";
 import { EditorView } from "@codemirror/view";
 import { createRoot, type Root } from "react-dom/client";
 import {
@@ -365,10 +365,335 @@ describe("MarkdownSourceEditor search", () => {
     editor.dispatch({
       changes: { from: editor.state.doc.length, insert: " typed" },
     });
-    expect(onChange).toHaveBeenLastCalledWith(normalize(after) + " typed");
+    expect(onChange).toHaveBeenLastCalledWith(after + " typed");
     expect(handle.current?.getMarkdownOffset?.()).toBe(
-      editor.state.selection.main.head,
+      after.indexOf(label) + label.length,
     );
+  });
+
+  it("preserves untouched mixed line endings through actual source edits, undo and redo", async () => {
+    const before = "First\r\nSecond\nThird\rLast";
+    const onChange = vi.fn();
+    const handle = createRef<SwitchableEditorHandle>();
+    await act(async () =>
+      root.render(
+        <MarkdownSourceEditor
+          ref={handle}
+          language="en"
+          value={before}
+          valueRevision={0}
+          onChange={onChange}
+        />,
+      ),
+    );
+    const editor = EditorView.findFromDOM(
+      host.querySelector<HTMLElement>(".cm-editor")!,
+    )!;
+    const from = editor.state.doc.toString().indexOf("Second");
+    editor.dispatch({
+      changes: {
+        from,
+        to: from + "Second".length,
+        insert: "Changed\nInserted",
+      },
+    });
+    const edited = "First\r\nChanged\r\nInserted\nThird\rLast";
+    expect(onChange).toHaveBeenLastCalledWith(edited);
+    handle.current?.setMarkdownOffset?.(edited.indexOf("Last") + 2);
+    expect(handle.current?.getMarkdownOffset?.()).toBe(
+      edited.indexOf("Last") + 2,
+    );
+    expect(undo(editor)).toBe(true);
+    expect(onChange).toHaveBeenLastCalledWith(before);
+    expect(redo(editor)).toBe(true);
+    expect(onChange).toHaveBeenLastCalledWith(edited);
+  });
+
+  it("maps external image edits and later undo to raw CRLF bytes after local typing", async () => {
+    const before = "![Image](images/a.png)\r\n\r\nText\nLast\r";
+    const onChange = vi.fn();
+    const handle = createRef<SwitchableEditorHandle>();
+    const render = (value: string, valueRevision: number, previous?: string) =>
+      root.render(
+        <MarkdownSourceEditor
+          ref={handle}
+          language="en"
+          value={value}
+          valueRevision={valueRevision}
+          externalChanges={
+            previous
+              ? imagePathSourceChanges(
+                  previous,
+                  value,
+                  "/notes/research.md",
+                  "/exports/copy.md",
+                )
+              : undefined
+          }
+          onChange={onChange}
+        />,
+      );
+    await act(async () => render(before, 0));
+    const editor = EditorView.findFromDOM(
+      host.querySelector<HTMLElement>(".cm-editor")!,
+    )!;
+    editor.dispatch({
+      changes: { from: editor.state.doc.length, insert: " typed" },
+    });
+    const edited = before + " typed";
+    expect(onChange).toHaveBeenLastCalledWith(edited);
+    const after = rebaseMarkdownImageAssets(
+      edited,
+      "/notes/research.md",
+      "/exports/copy.md",
+    );
+    handle.current?.setMarkdownSelection?.({
+      from: edited.indexOf("Last"),
+      to: edited.indexOf("Last") + 4,
+    });
+    await act(async () => render(after, 1, edited));
+    expect(handle.current?.getSelectedText()).toBe("Last");
+    expect(handle.current?.getMarkdownOffset?.()).toBe(
+      after.indexOf("Last") + 4,
+    );
+    expect(undo(editor)).toBe(true);
+    expect(onChange).toHaveBeenLastCalledWith(after.slice(0, -" typed".length));
+    expect(redo(editor)).toBe(true);
+    expect(onChange).toHaveBeenLastCalledWith(after);
+  });
+
+  it.each(["\r\n", "\n", "\r"])(
+    "applies multiple source ranges using the established %j separator",
+    async (separator) => {
+      const before = `First${separator}Second\nThird\rLast`;
+      const onChange = vi.fn();
+      await act(async () =>
+        root.render(
+          <MarkdownSourceEditor
+            language="en"
+            value={before}
+            valueRevision={0}
+            onChange={onChange}
+          />,
+        ),
+      );
+      const editor = EditorView.findFromDOM(
+        host.querySelector<HTMLElement>(".cm-editor")!,
+      )!;
+      const third = editor.state.doc.toString().indexOf("Third");
+      editor.dispatch({
+        changes: [
+          { from: 0, to: "First".length, insert: "Start" },
+          { from: third, to: third + "Third".length, insert: "New\nLine" },
+        ],
+      });
+      const edited = `Start${separator}Second\nNew${separator}Line\rLast`;
+      expect(onChange).toHaveBeenLastCalledWith(edited);
+      expect(undo(editor)).toBe(true);
+      expect(onChange).toHaveBeenLastCalledWith(before);
+    },
+  );
+
+  it("restores deleted mixed line separators exactly through native undo and redo", async () => {
+    const before = "First\nSecond\r\nThird\rLast";
+    const onChange = vi.fn();
+    await act(async () =>
+      root.render(
+        <MarkdownSourceEditor
+          language="en"
+          value={before}
+          valueRevision={0}
+          onChange={onChange}
+        />,
+      ),
+    );
+    const editor = EditorView.findFromDOM(
+      host.querySelector<HTMLElement>(".cm-editor")!,
+    )!;
+    editor.dispatch({ changes: { from: 12, to: 19, insert: "" } });
+    const deleted = "First\nSecondLast";
+    expect(onChange).toHaveBeenLastCalledWith(deleted);
+    expect(undo(editor)).toBe(true);
+    expect(onChange).toHaveBeenLastCalledWith(before);
+    expect(redo(editor)).toBe(true);
+    expect(onChange).toHaveBeenLastCalledWith(deleted);
+  });
+
+  it("retains ordinary edit grouping around isolated mixed-separator deletions", async () => {
+    const before = "A\nB\r\nC\rD";
+    const onChange = vi.fn();
+    await act(async () =>
+      root.render(
+        <MarkdownSourceEditor
+          language="en"
+          value={before}
+          valueRevision={0}
+          onChange={onChange}
+        />,
+      ),
+    );
+    const editor = EditorView.findFromDOM(
+      host.querySelector<HTMLElement>(".cm-editor")!,
+    )!;
+    editor.dispatch({ changes: { from: 0, to: 1, insert: "Start" } });
+    editor.dispatch({ changes: { from: 5, insert: "!" } });
+    expect(undoDepth(editor.state)).toBe(1);
+    editor.dispatch({ changes: { from: 8, to: 10, insert: "" } });
+    editor.dispatch({ changes: { from: 8, to: 9, insert: "" } });
+    expect(undoDepth(editor.state)).toBe(3);
+    expect(onChange).toHaveBeenLastCalledWith("Start!\nBD");
+    expect(undo(editor)).toBe(true);
+    expect(onChange).toHaveBeenLastCalledWith("Start!\nB\rD");
+    expect(undo(editor)).toBe(true);
+    expect(onChange).toHaveBeenLastCalledWith("Start!\nB\r\nC\rD");
+    expect(undo(editor)).toBe(true);
+    expect(onChange).toHaveBeenLastCalledWith(before);
+    expect(redo(editor)).toBe(true);
+    expect(onChange).toHaveBeenLastCalledWith("Start!\nB\r\nC\rD");
+    expect(redo(editor)).toBe(true);
+    expect(redo(editor)).toBe(true);
+    expect(onChange).toHaveBeenLastCalledWith("Start!\nBD");
+  });
+
+  it.each([
+    "![Image](images/a.png)\nSecond\r\nThird\rLast",
+    "First\nSecond\r\nA long deleted line\r![Image](images/a.png)",
+  ])(
+    "retains an external image rebase before restoring deleted separators in %j",
+    async (before) => {
+      const onChange = vi.fn();
+      const render = (
+        value: string,
+        valueRevision: number,
+        previous?: string,
+      ) =>
+        root.render(
+          <MarkdownSourceEditor
+            language="en"
+            value={value}
+            valueRevision={valueRevision}
+            externalChanges={
+              previous
+                ? imagePathSourceChanges(
+                    previous,
+                    value,
+                    "/notes/research.md",
+                    "/exports/copy.md",
+                  )
+                : undefined
+            }
+            onChange={onChange}
+          />,
+        );
+      await act(async () => render(before, 0));
+      const editor = EditorView.findFromDOM(
+        host.querySelector<HTMLElement>(".cm-editor")!,
+      )!;
+      const normalized = editor.state.doc.toString();
+      const from = normalized.indexOf("\n", normalized.indexOf("Second"));
+      const to = normalized.indexOf("\n", from + 1) + 1;
+      editor.dispatch({ changes: { from, to, insert: "" } });
+      const deleted = before.replace(/\r\n[^\r]+\r/, "");
+      expect(onChange).toHaveBeenLastCalledWith(deleted);
+      const after = rebaseMarkdownImageAssets(
+        deleted,
+        "/notes/research.md",
+        "/exports/copy.md",
+      );
+      await act(async () => render(after, 1, deleted));
+      expect(undo(editor)).toBe(true);
+      expect(onChange).toHaveBeenLastCalledWith(
+        rebaseMarkdownImageAssets(
+          before,
+          "/notes/research.md",
+          "/exports/copy.md",
+        ),
+      );
+      expect(redo(editor)).toBe(true);
+      expect(onChange).toHaveBeenLastCalledWith(after);
+    },
+  );
+
+  it("retains the established insertion style when the first separator is deleted before an image rebase", async () => {
+    const before = "First\nSecond\r\n![Image](images/a.png)";
+    const onChange = vi.fn();
+    const render = (value: string, valueRevision: number, previous?: string) =>
+      root.render(
+        <MarkdownSourceEditor
+          language="en"
+          value={value}
+          valueRevision={valueRevision}
+          externalChanges={
+            previous
+              ? imagePathSourceChanges(
+                  previous,
+                  value,
+                  "/notes/research.md",
+                  "/exports/copy.md",
+                )
+              : undefined
+          }
+          onChange={onChange}
+        />,
+      );
+    await act(async () => render(before, 0));
+    const editor = EditorView.findFromDOM(
+      host.querySelector<HTMLElement>(".cm-editor")!,
+    )!;
+    editor.dispatch({ changes: { from: 5, to: 6, insert: "" } });
+    const deleted = before.replace("\n", "");
+    const after = rebaseMarkdownImageAssets(
+      deleted,
+      "/notes/research.md",
+      "/exports/copy.md",
+    );
+    await act(async () => render(after, 1, deleted));
+    expect(undo(editor)).toBe(true);
+    expect(onChange).toHaveBeenLastCalledWith(
+      rebaseMarkdownImageAssets(
+        before,
+        "/notes/research.md",
+        "/exports/copy.md",
+      ),
+    );
+    expect(redo(editor)).toBe(true);
+    expect(onChange).toHaveBeenLastCalledWith(after);
+  });
+
+  it("uses final separator positions when a view update contains multiple transactions", async () => {
+    const before = "First\nSecond\r\nThird\rLast";
+    const onChange = vi.fn();
+    await act(async () =>
+      root.render(
+        <MarkdownSourceEditor
+          language="en"
+          value={before}
+          valueRevision={0}
+          onChange={onChange}
+        />,
+      ),
+    );
+    const editor = EditorView.findFromDOM(
+      host.querySelector<HTMLElement>(".cm-editor")!,
+    )!;
+    const deletion = editor.state.update({
+      changes: [
+        { from: 5, to: 6, insert: "" },
+        { from: 18, to: 19, insert: "" },
+      ],
+    });
+    const insertion = deletion.state.update({
+      changes: { from: 0, insert: "New\n" },
+    });
+    editor.update([deletion, insertion]);
+    expect(onChange).toHaveBeenLastCalledWith("New\nFirstSecond\r\nThirdLast");
+    expect(undo(editor)).toBe(true);
+    expect(onChange).toHaveBeenLastCalledWith("FirstSecond\r\nThirdLast");
+    expect(undo(editor)).toBe(true);
+    expect(onChange).toHaveBeenLastCalledWith(before);
+    expect(redo(editor)).toBe(true);
+    expect(redo(editor)).toBe(true);
+    expect(onChange).toHaveBeenLastCalledWith("New\nFirstSecond\r\nThirdLast");
   });
 
   it("reuses source search matches for navigation and refreshes them after typing", async () => {

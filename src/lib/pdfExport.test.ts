@@ -67,6 +67,18 @@ describe('PDF export', () => {
     expect(tauri.invoke).not.toHaveBeenCalled();
   });
 
+  it('cancels capture when another document opens while the native save dialog is pending', async () => {
+    let finishDialog!: (path: string) => void;
+    dialog.save.mockImplementationOnce(() => new Promise((resolve) => { finishDialog = resolve; }));
+    let currentDocument = true;
+    const exporting = exportPdfFile('Research.md', () => currentDocument);
+    expect(dialog.save).toHaveBeenCalledOnce();
+    currentDocument = false;
+    finishDialog('/tmp/Research.pdf');
+    await expect(exporting).resolves.toEqual({ type: 'cancelled' });
+    expect(tauri.invoke).not.toHaveBeenCalled();
+  });
+
   it('retains the system print fallback outside the macOS desktop app', async () => {
     tauri.isTauri.mockReturnValue(false);
     const print = vi.spyOn(window, 'print').mockImplementation(() => undefined);

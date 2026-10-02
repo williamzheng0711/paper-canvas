@@ -19,6 +19,132 @@ function nodesOfType(document: JSONContent, type: string): JSONContent[] {
 }
 
 describe("PaperCanvas Markdown subset", () => {
+  it.each([
+    "[]( <https://example.com/a> 'Keep title')",
+    '[<br>](https://example.com/a "Keep title")',
+    '[<u></u>](https://example.com/a "Keep title")',
+    '[\\\n](https://example.com/a "Keep title")',
+  ])(
+    "preserves the exact source of a link with no representable linked content: %s",
+    (link) => {
+      const document = markdownToDocument(`Before ${link} after.`);
+      expect(nodesOfType(document, "inlineHtmlPreview")).toContainEqual({
+        type: "inlineHtmlPreview",
+        attrs: { source: link },
+      });
+      const saved = documentToMarkdown(document);
+      expect(saved).toContain(link);
+      expect(markdownToDocument(saved)).toEqual(document);
+    },
+  );
+
+  it("keeps empty links recoverable inside underline, headings and ordinary table cells", () => {
+    const link = '[](https://example.com/a "Keep title")';
+    const source = `# Heading ${link}\n\nBefore <u>${link}</u> after.\n\n| Value |\n| --- |\n| ${link} |`;
+    const document = markdownToDocument(source);
+    const atoms = nodesOfType(document, "inlineHtmlPreview");
+    expect(atoms).toHaveLength(3);
+    expect(atoms.every((node) => node.attrs?.source === link)).toBe(true);
+    expect(atoms[1].marks).toEqual([{ type: "underline" }]);
+    const saved = documentToMarkdown(document);
+    expect(saved.match(/Keep title/g)).toHaveLength(3);
+    expect(markdownToDocument(saved)).toEqual(document);
+  });
+
+  it("retains a definition needed by an unrepresentable reference even when a normal link uses it", () => {
+    const definition = "[TARGET]: <https://example.com/a> 'Keep title'";
+    const source = `Empty [][target] and [<u></u>][TARGET], plus [visible][target].\n\n${definition}`;
+    const document = markdownToDocument(source);
+    expect(
+      nodesOfType(document, "inlineHtmlPreview").map(
+        (node) => node.attrs?.source,
+      ),
+    ).toEqual(["[][target]", "[<u></u>][TARGET]"]);
+    expect(nodesOfType(document, "unsupportedMarkdown")[0].attrs?.source).toBe(
+      definition,
+    );
+    expect(
+      nodesOfType(document, "text").find((node) => node.text === "visible")
+        ?.marks,
+    ).toEqual([
+      {
+        type: "link",
+        attrs: { href: "https://example.com/a", title: "Keep title" },
+      },
+    ]);
+    const saved = documentToMarkdown(document);
+    expect(saved).toContain(definition);
+    expect(saved).toContain("[][target]");
+    expect(saved).toContain("[<u></u>][TARGET]");
+    expect(markdownToDocument(saved)).toEqual(document);
+  });
+
+  it("imports semantic underline as editable marks around formatted text and inline formulas", () => {
+    const source =
+      "Before <u>**bold** and $x$ and [a link](https://example.com)</u> after.";
+    const document = markdownToDocument(source);
+    expect(nodesOfType(document, "inlineHtmlPreview")).toHaveLength(0);
+    expect(nodesOfType(document, "inlineFormula")[0]).toMatchObject({
+      attrs: { latex: "x" },
+      marks: [{ type: "underline" }],
+    });
+    expect(
+      nodesOfType(document, "text").find((node) => node.text === "bold")?.marks,
+    ).toEqual([{ type: "bold" }, { type: "underline" }]);
+    expect(
+      nodesOfType(document, "text").find((node) => node.text === "a link")
+        ?.marks,
+    ).toEqual([
+      { type: "link", attrs: { href: "https://example.com" } },
+      { type: "underline" },
+    ]);
+    expect(markdownToDocument(documentToMarkdown(document))).toEqual(document);
+  });
+
+  it("keeps underline editable in headings, nested underline and simple table cells", () => {
+    const source =
+      "# <U>Underlined heading</U>\n\nA <u>nested <u>underline</u> end</u>.\n\n| Value |\n| --- |\n| <u>cell</u> |";
+    const document = markdownToDocument(source);
+    expect(nodesOfType(document, "inlineHtmlPreview")).toHaveLength(0);
+    expect(
+      nodesOfType(document, "text")
+        .filter((node) => node.marks?.some((mark) => mark.type === "underline"))
+        .map((node) => node.text),
+    ).toEqual(["Underlined heading", "nested ", "underline", " end", "cell"]);
+    expect(documentToMarkdown(document)).toContain(
+      "<u>nested underline end</u>",
+    );
+  });
+
+  it("retains attributed underline HTML as source rather than discarding its metadata", () => {
+    const source = 'A <u title="Note">word</u>.';
+    const document = markdownToDocument(source);
+    expect(nodesOfType(document, "inlineHtmlPreview")[0]).toMatchObject({
+      attrs: { source: '<u title="Note">word</u>' },
+    });
+    expect(documentToMarkdown(document)).toContain('<u title="Note">word</u>');
+  });
+
+  it.each([
+    "**bold <u>underlined</u>**",
+    "*italic <u>underlined</u>*",
+    "~~deleted <u>underlined</u>~~",
+    "[linked <u>underlined</u>](https://example.com)",
+  ])(
+    "imports underline nested inside other inline formatting: %s",
+    (source) => {
+      const document = markdownToDocument(source);
+      expect(nodesOfType(document, "inlineHtmlPreview")).toHaveLength(0);
+      expect(
+        nodesOfType(document, "text").find((node) => node.text === "underlined")
+          ?.marks,
+      ).toContainEqual({ type: "underline" });
+      expect(markdownToDocument(documentToMarkdown(document))).toEqual(
+        document,
+      );
+    },
+  );
+
   it("round-trips supported research-note constructs without exposing formula syntax in the document model", () => {
     const source = `# 研究筆記
 

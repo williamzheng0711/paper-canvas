@@ -11,6 +11,7 @@ import {
   findDocumentMatches,
   findTextMatches,
   getSelectedDocumentText,
+  resolveActiveMatch,
   searchDocument,
 } from "./search";
 
@@ -249,6 +250,34 @@ describe("document search", () => {
       { from: 0, to: 3 },
       { from: 4, to: 7 },
     ]);
+  });
+
+  it("searches backward from the caret at EOF, before the first match, and inside a match", () => {
+    const matches = findTextMatches("one two one", "one");
+    expect(resolveActiveMatch(matches, "one", "previous", "", -1, 11)).toBe(1);
+    expect(resolveActiveMatch(matches, "one", "previous", "", -1, 0)).toBe(1);
+    expect(resolveActiveMatch(matches, "one", "previous", "", -1, 2)).toBe(0);
+    // Existing navigation still moves from the active occurrence, even if
+    // another editor action has moved the caret since that selection.
+    expect(resolveActiveMatch(matches, "one", "previous", "one", 0, 11)).toBe(
+      1,
+    );
+    expect(resolveActiveMatch(matches, "one", "previous", "one", 1, 0)).toBe(0);
+  });
+
+  it("selects the final canvas occurrence when backward search begins at the end of the document", () => {
+    const editor = new Editor({
+      extensions: [StarterKit, DocumentSearch],
+      content: "<p>one</p><p>two one</p><p>last one</p>",
+    });
+    editors.push(editor);
+    editor.commands.setTextSelection(editor.state.doc.content.size - 1);
+    expect(searchDocument(editor, "one", "previous")).toEqual({
+      current: 3,
+      total: 3,
+    });
+    expect(getSelectedDocumentText(editor)).toBe("one");
+    expect(editor.state.selection.$from.parent.textContent).toBe("last one");
   });
 
   it("searches across formatting marks but not across block boundaries", () => {

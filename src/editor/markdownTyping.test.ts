@@ -2,6 +2,12 @@ import { Editor } from "@tiptap/core";
 import StarterKit from "@tiptap/starter-kit";
 import { afterEach, expect, it } from "vitest";
 import { MarkdownTyping } from "./markdownTyping";
+import { documentToMarkdown, markdownToDocument } from "./markdown";
+import {
+  markdownSelectionFromMarkedDocument,
+  markdownToDocumentWithSelection,
+  selectionMarker,
+} from "./selectionMapping";
 
 const editors: Editor[] = [];
 afterEach(() => editors.splice(0).forEach((editor) => editor.destroy()));
@@ -32,6 +38,40 @@ function type(editor: Editor, text: string) {
     }
   }
 }
+
+it("preserves editable underline after the editor command is saved and reopened", () => {
+  const editor = make("Before target after");
+  editor.commands.setTextSelection({ from: 8, to: 14 });
+  expect(editor.commands.toggleUnderline()).toBe(true);
+  expect(editor.getJSON().content?.[0].content?.[1]).toEqual({
+    type: "text",
+    text: "target",
+    marks: [{ type: "underline" }],
+  });
+  const markdown = documentToMarkdown(editor.getJSON());
+  expect(markdown).toBe("Before <u>target</u> after\n");
+  const marked = editor.state.tr
+    .insertText(selectionMarker, 10, 10)
+    .doc.toJSON();
+  const caret = markdownSelectionFromMarkedDocument(editor.getJSON(), marked);
+  expect(caret?.offset).toBe(markdown.indexOf("target") + 2);
+  expect(
+    markdownToDocumentWithSelection(markdown, caret!.offset).anchor,
+  ).toEqual({
+    kind: "text",
+    path: [0],
+    offset: "Before ta".length,
+  });
+  const reopened = new Editor({
+    extensions: [StarterKit, MarkdownTyping],
+    content: markdownToDocument(markdown),
+  });
+  editors.push(reopened);
+  reopened.commands.setTextSelection({ from: 8, to: 14 });
+  expect(reopened.isActive("underline")).toBe(true);
+  expect(reopened.commands.toggleUnderline()).toBe(true);
+  expect(documentToMarkdown(reopened.getJSON())).toBe("Before target after\n");
+});
 it("supports closing-first bold markers and preserves the caret inside the text", () => {
   const editor = make("核心问题**");
   editor.commands.setTextSelection(1);

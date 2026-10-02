@@ -12,7 +12,8 @@ import {
 import { documentToMarkdown, markdownToDocument } from '../editor/markdown';
 import { detectLanguage, getMessages, isLanguage, type Language } from '../i18n';
 import { normalizeLineSpacing } from './lineSpacing';
-import { localAssetUrl } from './localAssets';
+import { normalizeFontSize } from './fontSize';
+import { encodeLocalAssetPath, localAssetUrl } from './localAssets';
 import {
   rebaseHtmlImageAssets,
   rebaseImageDestination,
@@ -50,6 +51,14 @@ const settingsKey = 'papercanvas.settings.v1';
 const recentKey = 'recentFiles';
 const hiddenRecentKey = 'hiddenRecentFiles';
 const draftKey = 'unsavedDraft';
+
+let settingsMutationQueue: Promise<unknown> = Promise.resolve();
+
+function queueSettingsMutation<T>(operation: () => Promise<T>): Promise<T> {
+  const result = settingsMutationQueue.then(operation);
+  settingsMutationQueue = result.catch(() => undefined);
+  return result;
+}
 
 function separator(path: string) {
   return path.includes('\\') ? '\\' : '/';
@@ -99,8 +108,19 @@ function dataUrlBytes(dataUrl: string): Uint8Array | null {
 }
 
 function extensionForDataUrl(dataUrl: string): string {
-  const mime = /^data:([^;]+)/.exec(dataUrl)?.[1] ?? 'image/png';
-  return mime === 'image/jpeg' ? 'jpg' : mime === 'image/gif' ? 'gif' : mime === 'image/webp' ? 'webp' : 'png';
+  const mime = /^data:([^;]+)/.exec(dataUrl)?.[1].toLowerCase() ?? 'image/png';
+  const extensions: Record<string, string> = {
+    'image/png': 'png',
+    'image/jpeg': 'jpg',
+    'image/gif': 'gif',
+    'image/webp': 'webp',
+    'image/svg+xml': 'svg',
+    'image/avif': 'avif',
+    'image/bmp': 'bmp',
+    'image/x-ms-bmp': 'bmp',
+    'image/tiff': 'tiff',
+  };
+  return extensions[mime] ?? 'png';
 }
 
 async function persistEmbeddedImages(document: JSONContent, path: string): Promise<JSONContent> {
@@ -121,7 +141,7 @@ async function persistEmbeddedImages(document: JSONContent, path: string): Promi
       if (!bytes) return;
       const relative = `${fileName(path).replace(/\.md$/i, '')}.assets/image-${Date.now()}-${index}.${extensionForDataUrl(src)}`;
       await writeFile(joinPath(parentPath(path), relative), bytes);
-      node.attrs = { ...node.attrs, src: relative };
+      node.attrs = { ...node.attrs, src: encodeLocalAssetPath(relative) };
     }),
   );
   return prepared;
@@ -129,19 +149,20 @@ async function persistEmbeddedImages(document: JSONContent, path: string): Promi
 
 export function hydrateDocumentAssets(document: JSONContent, path?: string): JSONContent {
   const hydrated = cloneDocument(document);
-  if (!path) return hydrated;
-  const basePath = parentPath(path);
+  const basePath = path ? parentPath(path) : undefined;
   const desktop = isTauri();
   visit(hydrated, (node) => {
-    if (node.type === 'htmlPreview' || node.type === 'inlineHtmlPreview') {
+    if (basePath !== undefined && (node.type === 'htmlPreview' || node.type === 'inlineHtmlPreview')) {
       node.attrs = { ...node.attrs, basePath };
     }
     const src = node.type === 'image' ? node.attrs?.src : undefined;
-    if (desktop && typeof src === 'string' && !isExternalImage(src)) {
+    if (desktop && typeof src === 'string' && !isExternalImage(src) &&
+      (basePath !== undefined || /^(?:\/(?!\/)|\\|[A-Za-z]:[\\/]|file:\/\/)/i.test(src))) {
       node.attrs = {
         ...node.attrs,
         originalSrc: src,
-        src: localAssetUrl(basePath, src, convertFileSrc),
+        basePath: basePath ?? '',
+        src: localAssetUrl(basePath ?? '', src, convertFileSrc),
       };
     }
   });
@@ -230,25 +251,31 @@ export async function chooseMarkdownFile(): Promise<EditorFile | null> {
   return openMarkdownFile(selected);
 }
 
+function editorFileFromMarkdown(markdown: string, path?: string, name = path ? fileName(path) : getMessages().untitledFilename): EditorFile {
+  const parsed = parseMarkdownComments(markdown);
+  const document = hydrateDocumentAssets(markdownToDocument(parsed.body), path);
+  const canonicalMarkdown = parsed.comments.length > 0 ? documentToPortableMarkdown(document) : parsed.body;
+  return {
+    path,
+    name,
+    sourceMarkdown: markdown,
+    document,
+    comments: relocateMarkdownComments(parsed.comments, parsed.body, canonicalMarkdown),
+    ...(parsed.status === 'invalid' || parsed.status === 'unknown-version'
+      ? { commentWarning: getMessages().commentDataWarning }
+      : {}),
+  };
+}
+
 export async function openMarkdownFile(path: string): Promise<EditorFile> {
   const text = getMessages();
   if (!isTauri()) throw new Error(text.externalFilesDesktopOnly);
   if (!isMarkdownFilePath(path)) throw new Error(text.markdownFilesOnly);
   const markdown = await readTextFile(path);
-  const parsed = parseMarkdownComments(markdown);
-  const document = hydrateDocumentAssets(markdownToDocument(parsed.body), path);
-  const canonicalMarkdown = parsed.comments.length > 0 ? documentToPortableMarkdown(document) : parsed.body;
-  const file = {
-    path,
-    name: fileName(path),
-    sourceMarkdown: markdown,
-    document,
-    comments: relocateMarkdownComments(parsed.comments, parsed.body, canonicalMarkdown),
-    ...(parsed.status === 'invalid' || parsed.status === 'unknown-version'
-      ? { commentWarning: text.commentDataWarning }
-      : {}),
-  };
-  await rememberRecent({ path: file.path, name: file.name });
+  const file = editorFileFromMarkdown(markdown, path);
+  // History is supplementary. An unavailable settings store must not block a
+  // document that was read successfully, including files opened by the OS.
+  await rememberRecent({ path, name: file.name }).catch(() => undefined);
   return file;
 }
 
@@ -305,7 +332,10 @@ export type PdfExportResult = { type: 'saved'; name: string } | { type: 'print' 
  * Saves directly through AppKit on macOS so WKWebView never presents its stale
  * print-preview thumbnail. Other platforms retain their system print flow.
  */
-export async function exportPdfFile(defaultName: string): Promise<PdfExportResult> {
+export async function exportPdfFile(
+  defaultName: string,
+  isCurrentDocument: () => boolean = () => true,
+): Promise<PdfExportResult> {
   const isMacDesktop = isTauri() && /Macintosh|Mac OS X/i.test(navigator.userAgent);
   if (!isMacDesktop) {
     await Promise.resolve(window.print());
@@ -317,7 +347,7 @@ export async function exportPdfFile(defaultName: string): Promise<PdfExportResul
     defaultPath: pdfExportName(defaultName),
     filters: [{ name: 'PDF', extensions: ['pdf'] }],
   });
-  if (!selected) return { type: 'cancelled' };
+  if (!selected || !isCurrentDocument()) return { type: 'cancelled' };
 
   const path = selected.toLowerCase().endsWith('.pdf') ? selected : `${selected}.pdf`;
   await invoke('export_pdf', { path });
@@ -433,64 +463,77 @@ async function browserSettings(): Promise<Storage> {
   return localStorage;
 }
 
+function parseRecentValue(value: string | null): unknown {
+  try {
+    return JSON.parse(value ?? 'null');
+  } catch {
+    return undefined;
+  }
+}
+
+function hiddenRecentPaths(value: unknown): Set<string> {
+  return new Set(Array.isArray(value) ? value.filter((path): path is string => typeof path === 'string') : []);
+}
+
+function visibleRecentFiles(value: unknown, hiddenValue: unknown): RecentFile[] {
+  if (!Array.isArray(value)) return [];
+  const hidden = hiddenRecentPaths(hiddenValue);
+  return value.flatMap((item) => {
+    if (!item || typeof item !== 'object' || typeof item.path !== 'string' || !item.path.trim() || hidden.has(item.path)) return [];
+    return [{
+      path: item.path,
+      name: typeof item.name === 'string' && item.name.trim() ? item.name : fileName(item.path),
+    }];
+  });
+}
+
 export async function loadRecent(): Promise<RecentFile[]> {
   if (isTauri()) {
     const store = await Store.load(settingsKey, { autoSave: 200 });
-    const files = (await store.get<RecentFile[]>(recentKey)) ?? [];
-    const hidden = new Set((await store.get<string[]>(hiddenRecentKey)) ?? []);
-    return files.filter((item) => !hidden.has(item.path));
+    return visibleRecentFiles(await store.get<unknown>(recentKey), await store.get<unknown>(hiddenRecentKey));
   }
   const storage = await browserSettings();
-  try {
-    const files = JSON.parse(storage.getItem(recentKey) ?? '[]') as RecentFile[];
-    const hidden = new Set(JSON.parse(storage.getItem(hiddenRecentKey) ?? '[]') as string[]);
-    return files.filter((item) => !hidden.has(item.path));
-  } catch {
-    return [];
-  }
+  return visibleRecentFiles(parseRecentValue(storage.getItem(recentKey)), parseRecentValue(storage.getItem(hiddenRecentKey)));
 }
 
-export async function rememberRecent(recent: RecentFile): Promise<void> {
-  const files = [recent, ...(await loadRecent()).filter((item) => item.path !== recent.path)].slice(0, 12);
+async function updateRecentFiles(update: (files: RecentFile[]) => RecentFile[]): Promise<RecentFile[]> {
+  const files = update(await loadRecent());
   if (isTauri()) {
     const store = await Store.load(settingsKey, { autoSave: 200 });
     await store.set(recentKey, files);
-    return;
+  } else {
+    const storage = await browserSettings();
+    storage.setItem(recentKey, JSON.stringify(files));
   }
-  const storage = await browserSettings();
-  storage.setItem(recentKey, JSON.stringify(files));
-}
-
-export async function removeRecentFile(path: string): Promise<RecentFile[]> {
-  const files = (await loadRecent()).filter((item) => item.path !== path);
-  if (isTauri()) {
-    const store = await Store.load(settingsKey, { autoSave: 200 });
-    await store.set(recentKey, files);
-    return files;
-  }
-  const storage = await browserSettings();
-  storage.setItem(recentKey, JSON.stringify(files));
   return files;
 }
 
-export async function hideRecentFile(path: string): Promise<RecentFile[]> {
-  const files = await removeRecentFile(path);
-  if (isTauri()) {
-    const store = await Store.load(settingsKey, { autoSave: 200 });
-    const hidden = new Set((await store.get<string[]>(hiddenRecentKey)) ?? []);
-    hidden.add(path);
-    await store.set(hiddenRecentKey, [...hidden]);
+export function rememberRecent(recent: RecentFile): Promise<void> {
+  return queueSettingsMutation(async () => {
+    await updateRecentFiles((files) => [recent, ...files.filter((item) => item.path !== recent.path)].slice(0, 12));
+  });
+}
+
+export function removeRecentFile(path: string): Promise<RecentFile[]> {
+  return queueSettingsMutation(() => updateRecentFiles((files) => files.filter((item) => item.path !== path)));
+}
+
+export function hideRecentFile(path: string): Promise<RecentFile[]> {
+  return queueSettingsMutation(async () => {
+    const files = await updateRecentFiles((items) => items.filter((item) => item.path !== path));
+    if (isTauri()) {
+      const store = await Store.load(settingsKey, { autoSave: 200 });
+      const hidden = hiddenRecentPaths(await store.get<unknown>(hiddenRecentKey));
+      hidden.add(path);
+      await store.set(hiddenRecentKey, [...hidden]);
+    } else {
+      const storage = await browserSettings();
+      const hidden = hiddenRecentPaths(parseRecentValue(storage.getItem(hiddenRecentKey)));
+      hidden.add(path);
+      storage.setItem(hiddenRecentKey, JSON.stringify([...hidden]));
+    }
     return files;
-  }
-  const storage = await browserSettings();
-  let hidden: string[] = [];
-  try {
-    hidden = JSON.parse(storage.getItem(hiddenRecentKey) ?? '[]') as string[];
-  } catch {
-    // Replace malformed legacy state with a clean hidden-file list.
-  }
-  storage.setItem(hiddenRecentKey, JSON.stringify([...new Set([...hidden, path])]));
-  return files;
+  });
 }
 
 export async function revealFileInFolder(path: string): Promise<void> {
@@ -526,6 +569,11 @@ function mergePreferences(stored: Partial<AppPreferences> | null | undefined): A
   };
   return {
     ...preferences,
+    theme: preferences.theme === 'light' || preferences.theme === 'dark' ? preferences.theme : defaultPreferences.theme,
+    font: ['system', 'serif', 'mono'].includes(preferences.font) ? preferences.font : defaultPreferences.font,
+    fontSize: normalizeFontSize(String(preferences.fontSize), defaultPreferences.fontSize),
+    sidebarOpen: typeof preferences.sidebarOpen === 'boolean' ? preferences.sidebarOpen : defaultPreferences.sidebarOpen,
+    recentFilesExpanded: typeof preferences.recentFilesExpanded === 'boolean' ? preferences.recentFilesExpanded : defaultPreferences.recentFilesExpanded,
     lineSpacing: normalizeLineSpacing(
       preferences.lineSpacing,
       defaultPreferences.lineSpacing,
@@ -535,7 +583,7 @@ function mergePreferences(stored: Partial<AppPreferences> | null | undefined): A
   };
 }
 
-export async function loadPreferences(): Promise<AppPreferences> {
+async function readPreferences(): Promise<AppPreferences> {
   if (isTauri()) {
     const store = await Store.load(settingsKey, { autoSave: 200 });
     const stored = await store.get<Partial<AppPreferences>>(preferencesKey);
@@ -556,17 +604,23 @@ export async function loadPreferences(): Promise<AppPreferences> {
   return preferences;
 }
 
-export async function savePreferences(preferences: AppPreferences): Promise<void> {
+export function loadPreferences(): Promise<AppPreferences> {
+  return queueSettingsMutation(readPreferences);
+}
+
+export function savePreferences(preferences: AppPreferences): Promise<void> {
   const saved = {
     ...preferences,
     compactLayoutVersion: Math.max(currentCompactLayoutVersion, preferences.compactLayoutVersion ?? 0),
   };
-  if (isTauri()) {
-    const store = await Store.load(settingsKey, { autoSave: 200 });
-    await store.set(preferencesKey, saved);
-    return;
-  }
-  localStorage.setItem(preferencesKey, JSON.stringify(saved));
+  return queueSettingsMutation(async () => {
+    if (isTauri()) {
+      const store = await Store.load(settingsKey, { autoSave: 200 });
+      await store.set(preferencesKey, saved);
+      return;
+    }
+    localStorage.setItem(preferencesKey, JSON.stringify(saved));
+  });
 }
 
 export async function openRecent(recent: RecentFile): Promise<EditorFile | null> {
@@ -581,44 +635,35 @@ export async function openRecent(recent: RecentFile): Promise<EditorFile | null>
     if (!(await exists(recent.path))) return null;
     throw error;
   }
-  const parsed = parseMarkdownComments(markdown);
-  const document = hydrateDocumentAssets(markdownToDocument(parsed.body), recent.path);
-  const canonicalMarkdown = parsed.comments.length > 0 ? documentToPortableMarkdown(document) : parsed.body;
-  return {
-    path: recent.path,
-    name: recent.name,
-    sourceMarkdown: markdown,
-    document,
-    comments: relocateMarkdownComments(parsed.comments, parsed.body, canonicalMarkdown),
-    ...(parsed.status === 'invalid' || parsed.status === 'unknown-version'
-      ? { commentWarning: getMessages().commentDataWarning }
-      : {}),
-  };
+  return editorFileFromMarkdown(markdown, recent.path, recent.name);
+}
+
+function restoredDraft(value: unknown): EditorFile | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const draft = value as Partial<EditorFile>;
+  const name = typeof draft.name === 'string' && draft.name ? draft.name : getMessages().untitledFilename;
+  if (draft.document?.type === 'doc') return { ...draft, name } as EditorFile;
+  // Older or partially written recovery records may retain exact source without
+  // an editor document. Rebuild from that source instead of losing the draft.
+  if (typeof draft.sourceMarkdown !== 'string') return null;
+  return { ...draft, ...editorFileFromMarkdown(draft.sourceMarkdown, draft.path, name) };
 }
 
 export async function loadDraft(): Promise<EditorFile | null> {
   if (isTauri()) {
     const store = await Store.load(settingsKey, { autoSave: 200 });
-    return (await store.get<EditorFile>(draftKey)) ?? null;
+    return restoredDraft(await store.get<unknown>(draftKey));
   }
   try {
-    return JSON.parse(localStorage.getItem(draftKey) ?? 'null') as EditorFile | null;
+    return restoredDraft(JSON.parse(localStorage.getItem(draftKey) ?? 'null'));
   } catch {
     return null;
   }
 }
 
-let draftMutationQueue: Promise<void> = Promise.resolve();
-
-function queueDraftMutation(operation: () => Promise<void>): Promise<void> {
-  const result = draftMutationQueue.then(operation);
-  draftMutationQueue = result.catch(() => undefined);
-  return result;
-}
-
 export function saveDraft(file: EditorFile): Promise<void> {
   const draft = { ...file, path: undefined };
-  return queueDraftMutation(async () => {
+  return queueSettingsMutation(async () => {
     if (isTauri()) {
       const store = await Store.load(settingsKey, { autoSave: 200 });
       await store.set(draftKey, draft);
@@ -629,7 +674,7 @@ export function saveDraft(file: EditorFile): Promise<void> {
 }
 
 export function clearDraft(): Promise<void> {
-  return queueDraftMutation(async () => {
+  return queueSettingsMutation(async () => {
     if (isTauri()) {
       const store = await Store.load(settingsKey, { autoSave: 200 });
       await store.delete(draftKey);

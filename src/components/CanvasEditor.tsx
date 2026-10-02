@@ -61,6 +61,7 @@ const lowlight = createLowlight(common);
 type Props = {
   language: Language;
   documentId: number;
+  documentPath?: string;
   initialDocument: JSONContent;
   comments?: readonly MarkdownComment[];
   outlineTarget?: { index: number; request: number };
@@ -291,6 +292,7 @@ function sameCanvasProps(previous: Props, next: Props): boolean {
   return (
     previous.language === next.language &&
     previous.documentId === next.documentId &&
+    previous.documentPath === next.documentPath &&
     previous.comments === next.comments &&
     previous.onEdit === next.onEdit &&
     previous.outlineTarget === next.outlineTarget &&
@@ -310,6 +312,7 @@ export const CanvasEditor = memo(
   {
     language,
     documentId,
+    documentPath,
     initialDocument,
     comments = [],
     outlineTarget,
@@ -346,6 +349,9 @@ export const CanvasEditor = memo(
   const appliedDocument = useRef<{ id: number; editor: Editor } | undefined>(undefined);
   const commentsRef = useRef<readonly MarkdownComment[]>(comments);
   const onChangeRef = useRef(onChange);
+  const documentPathRef = useRef(documentPath);
+  documentPathRef.current = documentPath;
+  const getDocumentPath = useCallback(() => documentPathRef.current, []);
   const onEditRef = useRef(onEdit);
   const onCommentRequestRef = useRef(onCommentRequest);
   const onCommentClickRef = useRef(onCommentClick);
@@ -454,6 +460,7 @@ export const CanvasEditor = memo(
           defaultProtocol: 'https',
         }),
         PaperImage.configure({
+          getDocumentPath,
           allowBase64: true,
           resize: {
             enabled: true,

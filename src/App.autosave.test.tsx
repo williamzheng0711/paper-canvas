@@ -58,7 +58,7 @@ const files = vi.hoisted(() => ({
   chooseMarkdownFile: vi.fn(async () => null as { name: string; document: JSONContent; path?: string } | null),
   clearDraft: vi.fn(async () => undefined),
   exportMarkdownFile: vi.fn(async () => 'research.md'),
-  exportPdfFile: vi.fn(async () => ({
+  exportPdfFile: vi.fn<typeof FileLibrary.exportPdfFile>(async () => ({
     type: 'saved' as const,
     name: 'research.pdf',
   })),
@@ -345,6 +345,46 @@ describe('App autosave cursor stability', () => {
     expect(files.saveDraft).not.toHaveBeenCalled();
   });
 
+  it('handles failed reading-settings persistence while keeping the current setting usable', async () => {
+    await act(async () => { documentAction(getMessages().save).click(); await flushEffects(); });
+    files.savePreferences.mockRejectedValueOnce(new Error('Cannot save reading settings'));
+    await act(async () => {
+      host.querySelector<HTMLButtonElement>(`button[aria-label="${getMessages().toggleTheme}"]`)!.click();
+      await flushEffects();
+    });
+    expect(host.querySelector('.theme-dark')).not.toBeNull();
+    expect(host.querySelector('.status-message')?.textContent).toBe('Cannot save reading settings');
+    expect(host.querySelector('.dirty-dot')).toBeNull();
+  });
+
+  it('ignores a reading-settings error after a newer setting replaces it', async () => {
+    let failOldSetting!: () => void;
+    files.savePreferences.mockImplementationOnce(() => new Promise((_, reject) => { failOldSetting = () => reject(new Error('Stale setting failure')); }));
+    const toggleTheme = () => host.querySelector<HTMLButtonElement>(`button[aria-label="${getMessages().toggleTheme}"]`)!.click();
+    await act(async () => { toggleTheme(); await flushEffects(); });
+    await act(async () => { toggleTheme(); await flushEffects(); });
+    await act(async () => { failOldSetting(); await flushEffects(); });
+    expect(host.querySelector('.theme-light')).not.toBeNull();
+    expect(host.querySelector('.status-message')?.textContent).not.toBe('Stale setting failure');
+  });
+
+  it.each(['new', 'open'] as const)('handles recovery-cleanup failure after %s without losing the chosen document', async (action) => {
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    files.clearDraft.mockRejectedValueOnce(new Error('Cannot clear recovery data'));
+    try {
+      await act(async () => {
+        if (action === 'new') documentAction(getMessages().new).click();
+        else (await recentFileButton()).click();
+        await flushEffects();
+      });
+      expect(host.querySelector('.document-name')?.textContent).toContain(action === 'new' ? 'Untitled.md' : 'recent.md');
+      expect(host.querySelector('.status-message')?.textContent).toBe('Cannot clear recovery data');
+      expect(host.querySelector('.dirty-dot')).toBeNull();
+    } finally {
+      confirm.mockRestore();
+    }
+  });
+
   it.each([
     { setting: 'fontSize' as const, input: 'fontSize' as const, typed: '22', original: '15' },
     { setting: 'lineSpacing' as const, input: 'lineSpacing' as const, typed: '2.2', original: '1.62' },
@@ -474,6 +514,20 @@ describe('App autosave cursor stability', () => {
     expect(host.querySelector('.statusbar')?.textContent).toContain('2 詞 · 11 字元');
   });
 
+  it.each(['canvas', 'source'] as const)('includes visible HTML prose in %s word and character counters', async (mode) => {
+    const source = 'Press <kbd>Command</kbd> to continue.\n\n<table><tr><td><p>A</p><p>B</p></td></tr></table>\n\n研究\n';
+    await act(async () => {
+      if (mode === 'source') {
+        readingModeButton('source').click();
+        await flushEffects();
+        harness.sourceProps?.onChange(source);
+      } else harness.canvasProps?.onChange(markdownToDocument(source));
+      await vi.advanceTimersByTimeAsync(400);
+      await flushEffects();
+    });
+    expect(host.querySelector('.statusbar')?.textContent).toContain('8 詞 · 30 字元');
+  });
+
   it('does not reload an unchanged editor document after autosave', async () => {
     const initialDocumentId = harness.canvasProps?.documentId;
     const editedDocument: JSONContent = {
@@ -592,7 +646,7 @@ describe('App autosave cursor stability', () => {
     });
     if (action === 'save') expect(files.saveEditorFile).toHaveBeenCalledWith(expect.objectContaining({ document: withImage }), false);
     else if (action === 'markdown') expect(files.exportMarkdownFile).toHaveBeenCalledWith(documentToMarkdown(withImage), 'research.md');
-    else expect(files.exportPdfFile).toHaveBeenCalledWith('research.md');
+    else expect(files.exportPdfFile).toHaveBeenCalledWith('research.md', expect.any(Function));
   });
 
   it.each(['save', 'markdown', 'pdf'] as const)('cancels a waiting %s when another document replaces the canvas', async (action) => {
@@ -645,7 +699,7 @@ describe('App autosave cursor stability', () => {
       if (replace) await act(async () => { documentAction(getMessages().new).click(); await flushEffects(); });
       await act(async () => { finishDecode(); await flushEffects(); });
       if (replace) expect(files.exportPdfFile).not.toHaveBeenCalled();
-      else expect(files.exportPdfFile).toHaveBeenCalledWith('research.md');
+      else expect(files.exportPdfFile).toHaveBeenCalledWith('research.md', expect.any(Function));
     } finally {
       confirm.mockRestore();
     }
@@ -1003,6 +1057,31 @@ describe('App autosave cursor stability', () => {
     expect(host.querySelector('.dirty-dot')).toBeNull();
   });
 
+  it.each(['draft cleanup', 'recent metadata'] as const)('retains successful Save As status when %s fails', async (metadata) => {
+    const failure = new Error('Settings unavailable after document write');
+    if (metadata === 'draft cleanup') files.clearDraft.mockRejectedValueOnce(failure);
+    else files.loadRecent.mockRejectedValueOnce(failure);
+    files.saveEditorFile.mockImplementationOnce(async (candidate: EditorFile) => ({ ...candidate, path: '/tmp/copy.md', name: 'copy.md' }));
+    await act(async () => { documentAction(getMessages().saveAs).click(); await flushEffects(); });
+    expect(host.querySelector('.document-name')?.textContent).toContain('copy.md');
+    expect(host.querySelector('.save-status--saved')).not.toBeNull();
+    expect(host.querySelector('.dirty-dot')).toBeNull();
+    expect(host.querySelector('.status-message')?.textContent).toBe(failure.message);
+  });
+
+  it.each(['draft cleanup', 'recent metadata'] as const)('still saves late typing after %s rejects', async (metadata) => {
+    let failMetadata!: () => void;
+    const failing = () => new Promise<never>((_, reject) => { failMetadata = () => reject(new Error('Settings unavailable')); });
+    if (metadata === 'draft cleanup') files.clearDraft.mockImplementationOnce(failing);
+    else files.loadRecent.mockImplementationOnce(failing);
+    await act(async () => { readingModeButton('source').click(); await vi.advanceTimersByTimeAsync(50); });
+    await act(async () => { harness.sourceProps?.onChange('# First\n'); documentAction(getMessages().save).click(); await flushEffects(); });
+    await act(async () => { harness.sourceProps?.onChange('# Latest typing\n'); failMetadata(); await flushEffects(); });
+    expect(files.saveEditorFile).toHaveBeenCalledTimes(2);
+    expect(files.saveEditorFile.mock.calls[1]?.[2]).toBe('# Latest typing\n');
+    expect(host.querySelector('.dirty-dot')).toBeNull();
+  });
+
   it('publishes rebased Save As source while preserving its other bytes and clean reading switches', async () => {
     const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
     try {
@@ -1237,7 +1316,7 @@ describe('App autosave cursor stability', () => {
       await flushEffects();
     });
 
-    expect(files.exportPdfFile).toHaveBeenCalledWith('research.md');
+    expect(files.exportPdfFile).toHaveBeenCalledWith('research.md', expect.any(Function));
     expect(print).not.toHaveBeenCalled();
     expect(document.documentElement.className).not.toContain('pdf-export');
     expect(host.querySelector('.status-message')?.textContent).toContain('research.pdf');
@@ -1560,6 +1639,32 @@ describe('App autosave cursor stability', () => {
     expect(host.querySelector('.status-message')?.textContent).toContain('research.pdf');
   });
 
+  it.each(['new', 'open'] as const)('invalidates pending PDF capture after %s replaces the document', async (action) => {
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    let completeExport!: (result: { type: 'saved'; name: string }) => void;
+    files.exportPdfFile.mockImplementationOnce(() => new Promise((resolve) => { completeExport = resolve; }));
+    try {
+      await act(async () => { exportAction('PDF (.pdf)').click(); await flushEffects(); });
+      const isCurrentDocument = files.exportPdfFile.mock.calls[0]?.[1];
+      expect(isCurrentDocument).toBeTypeOf('function');
+      expect(isCurrentDocument?.()).toBe(true);
+      await act(async () => {
+        if (action === 'new') documentAction(getMessages().new).click();
+        else {
+          files.chooseMarkdownFile.mockResolvedValueOnce({ path: '/tmp/chosen.md', name: 'chosen.md', document: markdownToDocument('New document.') });
+          documentAction(getMessages().open).click();
+        }
+        await flushEffects();
+      });
+      expect(isCurrentDocument?.()).toBe(false);
+      await act(async () => { completeExport({ type: 'saved', name: 'research.pdf' }); await flushEffects(); });
+      expect(host.querySelector('.document-name')?.textContent).toContain(action === 'new' ? 'Untitled.md' : 'chosen.md');
+      expect(host.querySelector('.status-message')?.textContent).not.toContain('research.pdf');
+    } finally {
+      confirm.mockRestore();
+    }
+  });
+
   it('reports a rejected native PDF export command', async () => {
     files.exportPdfFile.mockRejectedValueOnce(new Error('原生 PDF 導出失敗'));
     const button = exportAction('PDF (.pdf)');
@@ -1569,7 +1674,7 @@ describe('App autosave cursor stability', () => {
       await flushEffects();
     });
 
-    expect(files.exportPdfFile).toHaveBeenCalledWith('research.md');
+    expect(files.exportPdfFile).toHaveBeenCalledWith('research.md', expect.any(Function));
     expect(host.querySelector('.status-message')?.textContent).toContain('原生 PDF 導出失敗');
   });
 

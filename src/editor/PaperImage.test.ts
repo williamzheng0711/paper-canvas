@@ -155,4 +155,17 @@ describe("image reading fidelity", () => {
       },
     });
   });
+
+  it("does not promote unsafe or relative clipboard origin metadata into image URLs", () => {
+    editor = createEditor("replace me");
+    editor.commands.selectAll();
+    editor.view.pasteHTML(
+      '<img src="javascript:discard()" data-image-original-src="javascript:discard()"><img data-image-original-src="images/relative.png">',
+      new Event("paste") as ClipboardEvent,
+    );
+    expect(
+      editor.getJSON().content?.some((node) => node.type === "image"),
+    ).toBe(false);
+    expect(editor.view.dom.querySelector("img")).toBeNull();
+  });
 });

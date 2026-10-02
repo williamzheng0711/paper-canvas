@@ -1,4 +1,5 @@
 import type { JSONContent } from "@tiptap/core";
+import { tableCellPositions } from "./tableGeometry";
 
 function hasUnescapedPipe(source: string): boolean {
   for (let index = 0; index < source.length; index += 1) {
@@ -34,6 +35,36 @@ function unsafeCellInline(node: JSONContent): boolean {
   return (node.content ?? []).some(unsafeCellInline);
 }
 
+function cellColumnWidths(cell: JSONContent): number[] | null {
+  if (!Array.isArray(cell.attrs?.colwidth)) return null;
+  const widths = cell.attrs.colwidth.map((value: unknown) => {
+    const width = Number(value);
+    return Number.isFinite(width) && width > 0 ? Math.round(width) : 0;
+  });
+  return widths.some((width: number) => width > 0) ? widths : null;
+}
+
+/** Place widths in table columns, accounting for cells spanning earlier rows. */
+function tableColumns(table: JSONContent): number[] {
+  const widths: number[] = [];
+  for (const { cell, column, colspan } of tableCellPositions<JSONContent>(
+    (table.content ?? []).map((row) => row.content ?? []),
+    (cell) => ({
+      colspan: Number(cell.attrs?.colspan ?? 1),
+      rowspan: Number(cell.attrs?.rowspan ?? 1),
+    }),
+  )) {
+    const cellWidths = cellColumnWidths(cell);
+    for (let offset = 0; offset < colspan; offset += 1) {
+      const position = column + offset;
+      widths[position] ??= 0;
+      if (!widths[position] && cellWidths?.[offset])
+        widths[position] = cellWidths[offset];
+    }
+  }
+  return widths;
+}
+
 /** GFM cannot represent arbitrary blocks, merged cells, or body-row headers. */
 export function requiresHtmlTable(table: JSONContent): boolean {
   return (table.content ?? []).some((row, rowIndex) =>
@@ -42,6 +73,7 @@ export function requiresHtmlTable(table: JSONContent): boolean {
         cell.type !== (rowIndex === 0 ? "tableHeader" : "tableCell") ||
         Number(cell.attrs?.colspan ?? 1) !== 1 ||
         Number(cell.attrs?.rowspan ?? 1) !== 1 ||
+        cellColumnWidths(cell) !== null ||
         unsafeCellInline(cell) ||
         (cell.content ?? []).some((block) => block.type !== "paragraph"),
     ),
@@ -100,6 +132,9 @@ function markedHtml(node: JSONContent, html: string): string {
         break;
       case "strike":
         html = `<del>${html}</del>`;
+        break;
+      case "underline":
+        html = `<u>${html}</u>`;
         break;
       case "code":
         html = `<code>${html}</code>`;
@@ -162,8 +197,13 @@ export function tableToHtml(node: JSONContent): string {
       );
     case "footnoteDefinition":
       return `<div data-footnote-definition=""${attribute("data-footnote-identifier", node.attrs?.identifier)}${attribute("data-footnote-label", node.attrs?.label)}><span>${escapeHtml(node.attrs?.label || node.attrs?.identifier)} ↩</span><div class="footnote-content">${children()}</div></div>`;
-    case "table":
-      return `<table>${children()}</table>`;
+    case "table": {
+      const columns = tableColumns(node);
+      const colgroup = columns.some((width) => width > 0)
+        ? `<colgroup>${columns.map((width) => `<col${width > 0 ? attribute("width", width) : ""}>`).join("")}</colgroup>`
+        : "";
+      return `<table>${colgroup}${children()}</table>`;
+    }
     case "tableRow":
       return `<tr>${children()}</tr>`;
     case "tableHeader":
@@ -171,8 +211,9 @@ export function tableToHtml(node: JSONContent): string {
       const tag = node.type === "tableHeader" ? "th" : "td";
       const colspan = Number(node.attrs?.colspan ?? 1);
       const rowspan = Number(node.attrs?.rowspan ?? 1);
+      const widths = cellColumnWidths(node);
       const align = node.attrs?.textAlign;
-      return `<${tag}${colspan > 1 ? attribute("colspan", colspan) : ""}${rowspan > 1 ? attribute("rowspan", rowspan) : ""}${["left", "center", "right"].includes(String(align)) ? attribute("align", align) : ""}>${children()}</${tag}>`;
+      return `<${tag}${colspan > 1 ? attribute("colspan", colspan) : ""}${rowspan > 1 ? attribute("rowspan", rowspan) : ""}${attribute("colwidth", widths?.join(","))}${["left", "center", "right"].includes(String(align)) ? attribute("align", align) : ""}>${children()}</${tag}>`;
     }
     case "htmlPreview":
     case "inlineHtmlPreview":

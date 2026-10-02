@@ -1,3 +1,20 @@
+/** Encode a physical path as a Markdown destination without changing separators. */
+export function encodeLocalAssetPath(path: string): string {
+  const normalized = path.replace(/\\/g, "/");
+  return normalized
+    .split("/")
+    .map((segment, index) =>
+      index === 0 && /^[A-Za-z]:\//.test(normalized)
+        ? segment
+        : encodeURIComponent(segment).replace(
+            /[!'()*]/g,
+            (character) =>
+              `%${character.charCodeAt(0).toString(16).toUpperCase()}`,
+          ),
+    )
+    .join("/");
+}
+
 /** Resolve Markdown image URLs to canonical local paths before Tauri encodes them. */
 export function localAssetPath(
   basePath: string,

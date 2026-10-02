@@ -252,10 +252,13 @@ export function resolveActiveMatch(
       return previousActive;
   }
 
-  const closest = closestMatch(matches, position);
-  if (direction !== "previous") return closest;
-  if (matches[closest]?.from < position) return closest;
-  return (closest - 1 + matches.length) % matches.length;
+  if (direction === "previous") {
+    for (let index = matches.length - 1; index >= 0; index -= 1) {
+      if (matches[index].from < position) return index;
+    }
+    return matches.length - 1;
+  }
+  return closestMatch(matches, position);
 }
 
 function createDocumentSearchPlugin(): Plugin<DocumentSearchState> {

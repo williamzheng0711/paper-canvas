@@ -1,12 +1,69 @@
-import Image from "@tiptap/extension-image";
+import Image, { type ImageOptions } from "@tiptap/extension-image";
 import { mergeAttributes } from "@tiptap/core";
 import type { DOMOutputSpec } from "@tiptap/pm/model";
+import { convertFileSrc, isTauri } from "@tauri-apps/api/core";
+import {
+  encodeLocalAssetPath,
+  localAssetPath,
+  localAssetUrl,
+} from "../lib/localAssets";
+import { rebaseImageDestination } from "./markdownAssetReferences";
 
-export const PaperImage = Image.extend({
+interface PaperImageOptions extends ImageOptions {
+  getDocumentPath: () => string | undefined;
+}
+
+function clipboardOriginalSource(element: HTMLElement): string | null {
+  const source = element.getAttribute("data-image-original-src");
+  return source && /^(?:\/(?!\/)|[A-Za-z]:[\\/]|file:\/\/)/i.test(source)
+    ? source
+    : null;
+}
+
+export const PaperImage = Image.extend<PaperImageOptions>({
+  addOptions() {
+    return {
+      ...this.parent!(),
+      getDocumentPath: () => undefined,
+    };
+  },
   addAttributes() {
     return {
       ...this.parent?.(),
-      originalSrc: { default: null, rendered: false },
+      src: {
+        default: null,
+        parseHTML: (element) => {
+          const original = clipboardOriginalSource(element);
+          return original && isTauri()
+            ? localAssetUrl("", original, convertFileSrc)
+            : (element.getAttribute("src") ?? original);
+        },
+      },
+      originalSrc: {
+        default: null,
+        rendered: false,
+        parseHTML: (element) => {
+          const original = clipboardOriginalSource(element);
+          const documentPath = this.options.getDocumentPath();
+          if (!original || !documentPath) return original;
+          const resolved = localAssetPath("", original);
+          const filename = resolved.path.replace(/\\/g, "/").split("/").at(-1);
+          if (!filename) return original;
+          return rebaseImageDestination(
+            encodeLocalAssetPath(filename) + resolved.suffix,
+            resolved.path,
+            documentPath,
+          );
+        },
+      },
+      basePath: {
+        default: null,
+        rendered: false,
+        parseHTML: (element) =>
+          clipboardOriginalSource(element)
+            ? (this.options.getDocumentPath()?.replace(/[^\\/]*$/, "") ?? null)
+            : null,
+      },
       linkHref: {
         default: null,
         renderHTML: (attrs) =>
@@ -30,14 +87,47 @@ export const PaperImage = Image.extend({
     };
   },
 
+  parseHTML() {
+    return [
+      ...(this.parent?.() ?? []),
+      {
+        tag: "img[data-image-original-src]",
+        getAttrs: (element) =>
+          clipboardOriginalSource(element) ? null : false,
+      },
+    ];
+  },
+
   renderHTML({ node, HTMLAttributes }) {
     // The live resize view uses the link title as its tooltip. Clipboard HTML
     // needs an actual anchor and separate titles so sanitization and other
     // editors can preserve both the link and the image's authored caption.
+    // Relative sources belong to this document's directory. Clipboard origin
+    // metadata uses the physical path so another document can save and reopen
+    // the same image without retaining a runtime asset-protocol URL.
+    let originalSrc: string | undefined;
+    if (
+      typeof node.attrs.originalSrc === "string" &&
+      typeof node.attrs.basePath === "string"
+    ) {
+      const resolved = localAssetPath(
+        node.attrs.basePath,
+        node.attrs.originalSrc,
+      );
+      const encoded = encodeLocalAssetPath(resolved.path);
+      originalSrc =
+        (encoded.startsWith("//") ? `file:${encoded}` : encoded) + resolved.suffix;
+    } else if (
+      typeof node.attrs.originalSrc === "string" &&
+      /^(?:\/(?!\/)|[A-Za-z]:[\\/]|file:\/\/)/i.test(node.attrs.originalSrc)
+    ) {
+      originalSrc = node.attrs.originalSrc;
+    }
     const image: DOMOutputSpec = [
       "img",
       mergeAttributes(this.options.HTMLAttributes, HTMLAttributes, {
         title: node.attrs.title,
+        ...(originalSrc ? { "data-image-original-src": originalSrc } : {}),
       }),
     ];
     if (!node.attrs.linkHref) return image;
