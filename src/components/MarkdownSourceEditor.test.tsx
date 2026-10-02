@@ -1,5 +1,12 @@
 import { act, createRef } from "react";
-import { isolateHistory, redo, undo, undoDepth } from "@codemirror/commands";
+import {
+  indentLess,
+  indentMore,
+  isolateHistory,
+  redo,
+  undo,
+  undoDepth,
+} from "@codemirror/commands";
 import { EditorView } from "@codemirror/view";
 import { createRoot, type Root } from "react-dom/client";
 import {
@@ -753,17 +760,39 @@ describe("MarkdownSourceEditor search", () => {
       const rawPosition = (value: string, normalizedPosition: number) => {
         let sourcePosition = 0;
         for (let index = 0; index < normalizedPosition; index += 1) {
-          sourcePosition += value.slice(sourcePosition, sourcePosition + 2) === "\r\n" ? 2 : 1;
+          sourcePosition +=
+            value.slice(sourcePosition, sourcePosition + 2) === "\r\n" ? 2 : 1;
         }
         return sourcePosition;
       };
       const onChange = vi.fn();
-      await act(async () => root.render(
-        <MarkdownSourceEditor language="en" value={initial} valueRevision={0} onChange={onChange} />,
-      ));
-      const editor = EditorView.findFromDOM(host.querySelector<HTMLElement>(".cm-editor")!)!;
+      await act(async () =>
+        root.render(
+          <MarkdownSourceEditor
+            language="en"
+            value={initial}
+            valueRevision={0}
+            onChange={onChange}
+          />,
+        ),
+      );
+      const editor = EditorView.findFromDOM(
+        host.querySelector<HTMLElement>(".cm-editor")!,
+      )!;
       const snapshots = [initial];
-      const inserts = ["", "\n", "\n\n", "A\nB", "😀", "\0", "中文", "e\u0301", "\r\n", "\r", "\u2028"];
+      const inserts = [
+        "",
+        "\n",
+        "\n\n",
+        "A\nB",
+        "😀",
+        "\0",
+        "中文",
+        "e\u0301",
+        "\r\n",
+        "\r",
+        "\u2028",
+      ];
       for (let index = 0; index < 60; index += 1) {
         const before = snapshots.at(-1)!;
         const length = normalize(before).length;
@@ -771,25 +800,66 @@ describe("MarkdownSourceEditor search", () => {
         const end = Math.min(length, start + random(8));
         const inserted = normalize(inserts[random(inserts.length)]);
         if (start === end && !inserted) continue;
-        const expected = before.slice(0, rawPosition(before, start)) + inserted.replace(/\n/g, "\r\n") + before.slice(rawPosition(before, end));
+        const expected =
+          before.slice(0, rawPosition(before, start)) +
+          inserted.replace(/\n/g, "\r\n") +
+          before.slice(rawPosition(before, end));
         editor.dispatch({
           changes: { from: start, to: end, insert: inserted },
           annotations: isolateHistory.of("full"),
         });
         expect(onChange.mock.lastCall?.[0], `edit ${index}`).toBe(expected);
-        expect(editor.state.doc.toString(), `edit ${index}`).toBe(normalize(expected));
+        expect(editor.state.doc.toString(), `edit ${index}`).toBe(
+          normalize(expected),
+        );
         snapshots.push(expected);
       }
       for (let index = snapshots.length - 2; index >= 0; index -= 1) {
         expect(undo(editor), `undo ${index}`).toBe(true);
-        expect(onChange.mock.lastCall?.[0], `undo ${index}`).toBe(snapshots[index]);
+        expect(onChange.mock.lastCall?.[0], `undo ${index}`).toBe(
+          snapshots[index],
+        );
       }
       expect(undo(editor)).toBe(false);
       for (let index = 1; index < snapshots.length; index += 1) {
         expect(redo(editor), `redo ${index}`).toBe(true);
-        expect(onChange.mock.lastCall?.[0], `redo ${index}`).toBe(snapshots[index]);
+        expect(onChange.mock.lastCall?.[0], `redo ${index}`).toBe(
+          snapshots[index],
+        );
       }
       expect(redo(editor)).toBe(false);
     },
   );
+
+  it("indents a large source selection without a stall and retains mixed separators through undo", async () => {
+    const before = "Plain text\r\nNext line\n".repeat(20_000);
+    const indented = before.replace(/[^\r\n]+/g, "  $&");
+    const onChange = vi.fn();
+    await act(async () =>
+      root.render(
+        <MarkdownSourceEditor
+          language="en"
+          value={before}
+          valueRevision={0}
+          onChange={onChange}
+        />,
+      ),
+    );
+    const editor = EditorView.findFromDOM(
+      host.querySelector<HTMLElement>(".cm-editor")!,
+    )!;
+    editor.dispatch({
+      selection: { anchor: 0, head: editor.state.doc.length },
+    });
+    const started = performance.now();
+    expect(indentMore(editor)).toBe(true);
+    expect(performance.now() - started).toBeLessThan(1_500);
+    expect(onChange).toHaveBeenLastCalledWith(indented);
+    expect(undo(editor)).toBe(true);
+    expect(onChange).toHaveBeenLastCalledWith(before);
+    expect(redo(editor)).toBe(true);
+    expect(onChange).toHaveBeenLastCalledWith(indented);
+    expect(indentLess(editor)).toBe(true);
+    expect(onChange).toHaveBeenLastCalledWith(before);
+  }, 20_000);
 });

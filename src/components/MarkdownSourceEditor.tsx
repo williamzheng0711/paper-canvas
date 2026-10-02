@@ -16,7 +16,6 @@ import {
   ChangeSet,
   Compartment,
   EditorState,
-  MapMode,
   StateEffect,
   StateField,
   Transaction,
@@ -143,14 +142,26 @@ const separatorMetadata = StateField.define<SeparatorMetadata>({
     let next = current;
     if (transaction.docChanged) {
       const separators = new Map<number, string>();
-      for (const [previous, value] of current.separators) {
-        const position = transaction.changes.mapPos(
-          previous,
-          1,
-          MapMode.TrackAfter,
-        );
-        if (position !== null) separators.set(position, value);
-      }
+      const previousSeparators = [...current.separators].sort(
+        ([left], [right]) => left - right,
+      );
+      let separatorIndex = 0;
+      // Walk unchanged ranges once. Mapping each separator independently is
+      // quadratic for large selections with an edit on every selected line.
+      transaction.changes.iterGaps((from, mappedFrom, length) => {
+        while (
+          separatorIndex < previousSeparators.length &&
+          previousSeparators[separatorIndex][0] < from
+        )
+          separatorIndex += 1;
+        while (
+          separatorIndex < previousSeparators.length &&
+          previousSeparators[separatorIndex][0] < from + length
+        ) {
+          const [position, value] = previousSeparators[separatorIndex++];
+          separators.set(mappedFrom + position - from, value);
+        }
+      });
       transaction.changes.iterChanges((_from, _to, fromB, _toB, inserted) => {
         const text = inserted.toString();
         for (
@@ -184,6 +195,10 @@ function deletedSeparators(transaction: Transaction): SeparatorRecord[] {
   const records: SeparatorRecord[] = [];
   const previous = transaction.startState.field(separatorMetadata);
   transaction.changes.iterChangedRanges((from, to, anchor) => {
+    // Indenting many selected lines creates thousands of small edits. None
+    // delete a separator, so avoid scanning the whole separator map per line.
+    if (!transaction.startState.doc.sliceString(from, to).includes("\n"))
+      return;
     for (const [position, value] of previous.separators) {
       if (position >= from && position < to && value !== previous.lineEnding)
         records.push({ anchor, offset: position - from, value });

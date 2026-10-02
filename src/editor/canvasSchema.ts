@@ -14,6 +14,7 @@ import { PaperCode, PaperLink } from './PaperLink';
 import { PaperImage } from './PaperImage';
 import { PaperOrderedList } from './PaperOrderedList';
 import { PaperTableCell, PaperTableHeader } from './PaperTable';
+import { PaperTrailingNode } from './PaperTrailingNode';
 import { UnsupportedMarkdown } from './UnsupportedMarkdown';
 
 const lowlight = createLowlight(common);
@@ -28,7 +29,8 @@ export function canvasNodesAndMarks(
     backlinkLabel: (number: string) => getText().footnoteBacklinkLabel(number),
   };
   return [
-    StarterKit.configure({ code: false, codeBlock: false, link: false, orderedList: false, trailingNode: { notAfter: ['footnoteDefinition', 'unsupportedMarkdown'] } }),
+    StarterKit.configure({ code: false, codeBlock: false, link: false, orderedList: false, trailingNode: false }),
+    PaperTrailingNode.configure({ notAfter: ['footnoteDefinition', 'unsupportedMarkdown'] }),
     PaperOrderedList,
     FootnoteReference.configure(footnoteLabels),
     FootnoteDefinition.configure(footnoteLabels),

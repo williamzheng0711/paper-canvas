@@ -1,4 +1,5 @@
 import type { Editor } from '@tiptap/core';
+import { TextSelection } from '@tiptap/pm/state';
 import type * as TiptapReact from '@tiptap/react';
 import { act, createRef } from 'react';
 import { createRoot } from 'react-dom/client';
@@ -105,6 +106,78 @@ it('does not mark a standalone image document edited while setting up its labels
     expect(harness.editor!.getJSON().content?.map((node) => node.type)).toEqual(['image']);
     expect(onEdit).not.toHaveBeenCalled();
     expect(onChange).not.toHaveBeenCalled();
+  } finally {
+    await act(async () => root.unmount());
+    host.remove();
+    Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: false });
+  }
+});
+
+it.each([
+  '# Heading',
+  '| A | B |\r\n| - | - |\r\n| First | Last |\r\n',
+  '- First\n- Last',
+  '```js\nconst value = 1;\n```',
+  '![Image](https://example.com/a.png)',
+  '<aside>HTML</aside>',
+])('keeps a document ending in %s unchanged through reading and mode-selection actions', async (markdown) => {
+  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+  const host = document.createElement('div');
+  document.body.append(host);
+  const root = createRoot(host);
+  const handle = createRef<SwitchableEditorHandle>();
+  const onChange = vi.fn();
+  const onEdit = vi.fn();
+  try {
+    await act(async () => root.render(
+      <CanvasEditor ref={handle} language="en" documentId={1} initialDocument={markdownConversion.markdownToDocument(markdown)} onChange={onChange} onEdit={onEdit} />,
+    ));
+    const editor = harness.editor!;
+    const before = editor.getJSON();
+    await act(async () => {
+      handle.current!.setSelectionProgress(1);
+      handle.current!.focus();
+      handle.current!.getMarkdownSelection?.();
+      handle.current!.search('First', 'reset');
+      handle.current!.clearSearch();
+      handle.current!.runContextAction?.('selectAll');
+      handle.current!.flushCommentMapping?.();
+      editor.view.dom.blur();
+    });
+    expect(editor.getJSON()).toEqual(before);
+    expect(onEdit).not.toHaveBeenCalled();
+    expect(onChange).not.toHaveBeenCalled();
+    expect(editor.commands.undo()).toBe(false);
+  } finally {
+    await act(async () => root.unmount());
+    host.remove();
+    Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: false });
+  }
+});
+
+it.each(['![Image](https://example.com/a.png)', '| A | B |\n| - | - |\n| First | Last |'])('adds an editable paragraph after the first real edit and undoes it exactly for %s', async (markdown) => {
+  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+  const host = document.createElement('div');
+  document.body.append(host);
+  const root = createRoot(host);
+  const onEdit = vi.fn();
+  try {
+    await act(async () => root.render(
+      <CanvasEditor language="en" documentId={1} initialDocument={markdownConversion.markdownToDocument(markdown)} onChange={() => {}} onEdit={onEdit} />,
+    ));
+    const editor = harness.editor!;
+    const before = editor.getJSON();
+    await act(async () => {
+      if (editor.state.doc.firstChild!.type.name === 'image') editor.commands.updateAttributes('image', { alt: 'Edited alt' });
+      else editor.commands.insertContent('Typed');
+    });
+    expect(onEdit).toHaveBeenCalledOnce();
+    expect(editor.state.doc.lastChild?.type.name).toBe('paragraph');
+    const edited = editor.getJSON();
+    await act(async () => { expect(editor.commands.undo()).toBe(true); });
+    expect(editor.getJSON()).toEqual(before);
+    await act(async () => { expect(editor.commands.redo()).toBe(true); });
+    expect(editor.getJSON()).toEqual(edited);
   } finally {
     await act(async () => root.unmount());
     host.remove();
@@ -698,6 +771,52 @@ it.each([
     expect(content[0].content).toEqual([{ type: 'text', text: 'New Before ' }]);
     expect(content[2].content).toEqual([{ type: 'text', text: 'after' }]);
     expect(harness.editor!.state.selection.head).toBe(1);
+  } finally {
+    await act(async () => root.unmount());
+    host.remove();
+    vi.unstubAllGlobals();
+    Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: false });
+  }
+});
+
+it.each([
+  { text: 'Before **text* after', closing: '*', prefix: 'Before **text*', node: 'text' },
+  { text: 'Before $$ after', closing: 'x', prefix: 'Before $', node: 'inlineFormula' },
+])('maps a pending image through appended Markdown conversion: $node', async ({ text, closing, prefix, node }) => {
+  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+  let finishRead: (() => void) | undefined;
+  vi.stubGlobal('FileReader', class {
+    result = 'data:image/png;base64,dGVzdA==';
+    onload: (() => void) | null = null;
+    readAsDataURL() { finishRead = () => this.onload?.(); }
+  });
+  const host = document.createElement('div');
+  document.body.append(host);
+  const root = createRoot(host);
+  const onLinkError = vi.fn();
+  try {
+    await act(async () => root.render(
+      <CanvasEditor language="en" documentId={1} initialDocument={{ type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text }] }] }} onChange={() => {}} onLinkError={onLinkError} />,
+    ));
+    const editor = harness.editor!;
+    editor.commands.setTextSelection(text.length + 1);
+    const event = new Event('paste', { cancelable: true });
+    Object.defineProperty(event, 'clipboardData', {
+      value: { files: [new File(['image'], 'sample.png', { type: 'image/png' })] },
+    });
+    editor.view.someProp('handlePaste', (handler) => handler(editor.view, event as ClipboardEvent, null!));
+    await act(async () => {
+      const position = prefix.length + 1;
+      const transaction = editor.state.tr.insertText(closing, position, position);
+      transaction.setSelection(TextSelection.create(transaction.doc, position + closing.length));
+      editor.view.dispatch(transaction);
+    });
+    const beforeImage = editor.getJSON();
+    expect(beforeImage.content?.[0].content?.some((content) => content.type === node)).toBe(true);
+    await act(async () => { finishRead?.(); });
+    expect(onLinkError).not.toHaveBeenCalled();
+    expect(editor.getJSON().content?.filter((content) => content.type === 'image')).toHaveLength(1);
+    expect(editor.getJSON().content?.[0]).toEqual(beforeImage.content?.[0]);
   } finally {
     await act(async () => root.unmount());
     host.remove();

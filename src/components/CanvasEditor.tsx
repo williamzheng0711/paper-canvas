@@ -557,16 +557,19 @@ export const CanvasEditor = memo(
           },
         },
       },
-      onTransaction: ({ editor: currentEditor, transaction }) => {
+      onTransaction: ({ editor: currentEditor, transaction, appendedTransactions }) => {
         // Recreating the editor restores the same document with a complete
         // replacement transaction. Only map through edits to the active editor.
-        if (!transaction.docChanged || appliedDocument.current?.editor !== currentEditor ||
+        const changes = [transaction, ...appendedTransactions].filter((change) => change.docChanged);
+        if (!changes.length || appliedDocument.current?.editor !== currentEditor ||
           appliedDocument.current.id !== documentSnapshot.current.id) return;
         for (const insertion of pendingImagesRef.current) {
           if (insertion.documentId !== documentSnapshot.current.id) continue;
-          insertion.target = insertion.target.kind === 'paste'
-            ? { ...insertion.target, selection: insertion.target.selection.map(transaction.mapping) }
-            : { kind: 'drop', position: transaction.mapping.map(insertion.target.position) };
+          for (const change of changes) {
+            insertion.target = insertion.target.kind === 'paste'
+              ? { ...insertion.target, selection: insertion.target.selection.map(change.mapping) }
+              : { kind: 'drop', position: change.mapping.map(insertion.target.position) };
+          }
         }
       },
       onUpdate: ({ editor: currentEditor }) => {
