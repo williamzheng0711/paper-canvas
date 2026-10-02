@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
   rename: vi.fn(),
   writeTextFile: vi.fn(),
   storeSet: vi.fn(),
+  storeGet: vi.fn(),
   invoke: vi.fn(),
   exists: vi.fn(),
 }));
@@ -35,7 +36,7 @@ vi.mock("@tauri-apps/plugin-fs", () => ({
   writeFile: vi.fn(),
 }));
 vi.mock("@tauri-apps/plugin-store", () => ({
-  Store: { load: async () => ({ get: async () => [], set: mocks.storeSet }) },
+  Store: { load: async () => ({ get: mocks.storeGet, set: mocks.storeSet }) },
 }));
 
 const path = "/notes/research.md";
@@ -45,6 +46,7 @@ describe("native document rename", () => {
   beforeEach(() => {
     vi.resetAllMocks();
     mocks.entries.clear();
+    mocks.storeGet.mockResolvedValue([]);
     mocks.exists.mockImplementation(async (path: string) =>
       mocks.entries.has(path),
     );
@@ -104,6 +106,66 @@ describe("native document rename", () => {
     expect(mocks.entries.get(path)).toBe("Original source\n");
     expect(mocks.entries.has(target)).toBe(false);
   });
+
+  it("replaces the old filename in recent history only after the rename completes", async () => {
+    const unrelated = { path: "/notes/other.md", name: "other.md" };
+    mocks.entries.set(path, "Original source\n");
+    mocks.storeGet.mockImplementation(async (key: string) =>
+      key === "recentFiles" ? [{ path, name: "research.md" }, unrelated] : [],
+    );
+    await renameEditorFile(
+      {
+        path,
+        name: "research.md",
+        document: markdownToDocument("Original source\n"),
+      },
+      "renamed.md",
+    );
+    expect(mocks.storeSet).toHaveBeenCalledWith("recentFiles", [
+      { path: target, name: "renamed.md" },
+      unrelated,
+    ]);
+    expect(mocks.rename.mock.invocationCallOrder[0]).toBeLessThan(
+      mocks.storeSet.mock.invocationCallOrder[0],
+    );
+  });
+
+  it.each([
+    ["note.markdown", "note.markdown.md", "note.markdown.assets"],
+    ["note.md", "note.MD", "note.assets"],
+  ])(
+    "retains the shared companion folder when renaming %s to %s",
+    async (oldName, newName, assets) => {
+      const sourcePath = `/notes/${oldName}`;
+      const targetPath = `/notes/${newName}`;
+      const source = `![Diagram](${assets}/diagram.svg)\n`;
+      mocks.entries.set(sourcePath, source);
+      mocks.entries.set(`/notes/${assets}`, null);
+      mocks.entries.set(`/notes/${assets}/diagram.svg`, "image bytes");
+      const renamed = await renameEditorFile(
+        {
+          path: sourcePath,
+          name: oldName,
+          sourceMarkdown: source,
+          document: markdownToDocument(source),
+        },
+        newName,
+      );
+      expect(renamed.path).toBe(targetPath);
+      expect(renamed.sourceMarkdown).toBe(source);
+      expect(mocks.rename).toHaveBeenCalledExactlyOnceWith(
+        sourcePath,
+        targetPath,
+      );
+      expect(mocks.entries.get(targetPath)).toBe(source);
+      expect(mocks.entries.get(`/notes/${assets}/diagram.svg`)).toBe(
+        "image bytes",
+      );
+      expect(documentToPortableMarkdown(renamed.document)).toContain(
+        `${assets}/diagram.svg`,
+      );
+    },
+  );
 
   it("leaves an unchanged uppercase Markdown filename alone", async () => {
     const file = {

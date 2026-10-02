@@ -43,6 +43,9 @@ Use a temporary copy for intentional edits.
   valid. Renaming or saving files ending in `.MD` or `.markdown` must not append
   a duplicate extension. In the native app, Rename must show a filename input;
   Cancel and Escape must leave the original filename intact.
+  Rename must replace its old Recent entry, and renaming `note.markdown` to
+  `note.markdown.md` must keep their shared image folder. Save As must accept
+  `.markdown`; cancelling it must preserve the current saved/unsaved status.
 - Type while saving, renaming, switching files, or completing an image paste/drop.
   Confirm the latest edits stay with their originating file. A history-settings
   failure after a successful save or rename must not restore the previous path.

@@ -289,7 +289,7 @@ export async function chooseSavePath(defaultName: string): Promise<string | null
   const selected = await save({
     title: text.saveDocumentDialog,
     defaultPath: isMarkdownFilePath(defaultName) ? defaultName : `${defaultName}.md`,
-    filters: [{ name: 'Markdown', extensions: ['md'] }],
+    filters: [{ name: 'Markdown', extensions: ['md', 'markdown'] }],
   });
   return selected;
 }
@@ -367,10 +367,9 @@ export async function saveEditorFile(
   let path = file.path;
   if (!path || forceSaveAs) {
     const selected = await chooseSavePath(file.name);
-    if (!selected) throw new Error(getMessages().saveCancelled);
+    if (!selected) throw new DOMException(getMessages().saveCancelled, 'AbortError');
     path = selected;
   }
-  if (!path) throw new Error(getMessages().saveCancelled);
   const candidate = { ...file, sourceMarkdown: rawMarkdown ?? file.sourceMarkdown };
   const prepared = file.path && file.path !== path ? rebaseEditorFileAssets(candidate, file.path, path) : candidate;
   const portable = restoreRelativeImagePaths(prepared.document);
@@ -420,8 +419,8 @@ export async function renameEditorFile(file: EditorFile, newName: string): Promi
 
   const oldAssets = assetDirectory(file.path);
   const nextAssets = assetDirectory(target);
-  const hasAssets = await exists(oldAssets);
-  if (hasAssets && (await exists(nextAssets))) {
+  const moveAssets = oldAssets !== nextAssets && await exists(oldAssets);
+  if (moveAssets && (await exists(nextAssets))) {
     throw new Error(text.assetsDirectoryExists);
   }
 
@@ -429,7 +428,7 @@ export async function renameEditorFile(file: EditorFile, newName: string): Promi
   let rewriteAttempted = false;
   await rename(file.path, target);
   try {
-    if (hasAssets) await rename(oldAssets, nextAssets);
+    if (moveAssets) await rename(oldAssets, nextAssets);
     originalSource = await readTextFile(target);
     const renamedSource = renameMarkdownImageAssets(originalSource, file.path, target);
     if (renamedSource !== originalSource) {
@@ -443,7 +442,7 @@ export async function renameEditorFile(file: EditorFile, newName: string): Promi
       await writeTextFile(target, originalSource).catch(() => undefined);
     }
     // Recover the original pair when moving the companion directory fails.
-    if (hasAssets && (await exists(nextAssets)) && !(await exists(oldAssets))) {
+    if (moveAssets && (await exists(nextAssets)) && !(await exists(oldAssets))) {
       await rename(nextAssets, oldAssets).catch(() => undefined);
     }
     if ((await exists(target)) && !(await exists(file.path))) {
@@ -453,7 +452,7 @@ export async function renameEditorFile(file: EditorFile, newName: string): Promi
   }
   // The file and companion assets have moved successfully; keep the live path
   // consistent with disk even if persisting recent history fails.
-  await rememberRecent({ path: target, name: fileName(target) }).catch(() => undefined);
+  await rememberRecent({ path: target, name: fileName(target) }, file.path).catch(() => undefined);
   const document = hydrateDocumentAssets(renameDocumentAssetReferences(file.document, file.path, target), target);
   return {
     ...file,
@@ -514,9 +513,9 @@ async function updateRecentFiles(update: (files: RecentFile[]) => RecentFile[]):
   return files;
 }
 
-export function rememberRecent(recent: RecentFile): Promise<void> {
+export function rememberRecent(recent: RecentFile, replacedPath?: string): Promise<void> {
   return queueSettingsMutation(async () => {
-    await updateRecentFiles((files) => [recent, ...files.filter((item) => item.path !== recent.path)].slice(0, 12));
+    await updateRecentFiles((files) => [recent, ...files.filter((item) => item.path !== recent.path && item.path !== replacedPath)].slice(0, 12));
   });
 }
 

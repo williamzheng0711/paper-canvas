@@ -1696,6 +1696,25 @@ describe('App autosave cursor stability', () => {
     expect(harness.sourceProps?.value).toBe(expected);
   });
 
+  it.each([false, true])('keeps cancellation distinct from a write error when typing during Save As=%s', async (editWhileDialogOpen) => {
+    await act(async () => { documentAction(getMessages().save).click(); await flushEffects(); });
+    expect(host.querySelector('.dirty-dot')).toBeNull();
+    let cancelSave!: () => void;
+    files.saveEditorFile.mockImplementationOnce(() => new Promise((_, reject) => {
+      cancelSave = () => reject(new DOMException(getMessages().saveCancelled, 'AbortError'));
+    }));
+    await act(async () => { documentAction(getMessages().saveAs).click(); await flushEffects(); });
+    if (editWhileDialogOpen) {
+      await act(async () => { harness.canvasProps?.onChange(markdownToDocument('Latest unsaved writing')); });
+    }
+    await act(async () => { cancelSave(); await flushEffects(); });
+    expect(host.querySelector('.save-status')?.textContent).toBe(getMessages().saveStatus[editWhileDialogOpen ? 'unsaved' : 'saved']);
+    expect(host.querySelector('.status-message')?.textContent).toBe(getMessages().saveCancelled);
+    expect(host.querySelector('.document-name')?.textContent).toContain('research.md');
+    expect(Boolean(host.querySelector('.dirty-dot'))).toBe(editWhileDialogOpen);
+    if (editWhileDialogOpen) expect(harness.canvasProps?.initialDocument).toEqual(markdownToDocument('Latest unsaved writing'));
+  });
+
   it('cancels a queued rename when its preceding save fails', async () => {
     let failSave!: () => void;
     files.saveEditorFile.mockImplementationOnce(() => new Promise((_, reject) => {

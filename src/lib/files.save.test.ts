@@ -68,7 +68,7 @@ describe('saving documents', () => {
   it('does not overwrite the original file when Save As is cancelled', async () => {
     mocks.save.mockResolvedValue(null);
     const textFile = { ...file, document: { type: 'doc', content: [{ type: 'paragraph' }] } };
-    await expect(saveEditorFile(textFile, true)).rejects.toThrow();
+    await expect(saveEditorFile(textFile, true)).rejects.toMatchObject({ name: 'AbortError' });
     expect(mocks.invoke).not.toHaveBeenCalled();
     expect(mocks.writeTextFile).not.toHaveBeenCalled();
   });
@@ -76,7 +76,7 @@ describe('saving documents', () => {
   it.each(['Research.MD', 'Research.markdown', 'Research.MARKDOWN'])('keeps the existing supported extension in the Save As default: %s', async (name) => {
     mocks.save.mockResolvedValue(null);
     await chooseSavePath(name);
-    expect(mocks.save).toHaveBeenCalledWith(expect.objectContaining({ defaultPath: name }));
+    expect(mocks.save).toHaveBeenCalledWith(expect.objectContaining({ defaultPath: name, filters: [{ name: 'Markdown', extensions: ['md', 'markdown'] }] }));
   });
 
   it('authorizes the selected destination when saving an image document as a new file', async () => {

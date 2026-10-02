@@ -94,6 +94,20 @@ describe("settings mutation ordering", () => {
   );
 
   it.each(["native", "browser"])(
+    "replaces a renamed file in %s history without losing overlapping additions",
+    async (platform) => {
+      mocks.native = platform === "native";
+      await rememberRecent(first);
+      const renamed = { path: "/notes/renamed.md", name: "renamed.md" };
+      await Promise.all([
+        rememberRecent(renamed, first.path),
+        rememberRecent(second),
+      ]);
+      expect(await loadRecent()).toEqual([second, renamed]);
+    },
+  );
+
+  it.each(["native", "browser"])(
     "retains overlapping hidden-file removals in %s recent history",
     async (platform) => {
       mocks.native = platform === "native";

@@ -757,8 +757,9 @@ export default function App() {
         }
       } catch (error) {
         if (documentSessionRef.current === saveSession) {
-          setSaveStatus('error');
-          setMessage(error instanceof Error ? error.message : getMessages().saveFailed);
+          const cancelled = error instanceof DOMException && error.name === 'AbortError';
+          setSaveStatus(cancelled ? (dirtyRef.current ? 'unsaved' : 'saved') : 'error');
+          setMessage(cancelled ? getMessages().saveCancelled : error instanceof Error ? error.message : getMessages().saveFailed);
         }
       }
     });
