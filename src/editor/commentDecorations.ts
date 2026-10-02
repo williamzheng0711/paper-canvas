@@ -25,7 +25,10 @@ function clampPosition(position: number, document: ProseMirrorNode): number {
   return Math.min(Math.max(0, Math.round(position)), document.content.size);
 }
 
-function targetWasChanged(position: CanvasCommentPosition, transaction: Transaction): boolean {
+function mapPosition(
+  position: CanvasCommentPosition,
+  transaction: Transaction,
+): { position: CanvasCommentPosition; targetChanged: boolean } {
   let from = position.from;
   let to = position.to;
   let touched = false;
@@ -34,31 +37,32 @@ function targetWasChanged(position: CanvasCommentPosition, transaction: Transact
   for (let index = mapping.from; index < mapping.to; index += 1) {
     mapping.maps[index].forEach((oldStart, oldEnd) => {
       if (oldEnd === oldStart) return;
-      if (position.kind === 'position' ? oldStart <= from && from < oldEnd : oldStart < to && from < oldEnd) {
+      if (
+        position.kind === 'position' || from === to ? oldStart <= from && from < oldEnd : oldStart < to && from < oldEnd
+      ) {
         // A replacement or deletion touched the anchored Markdown content.
         // Insertions have oldStart === oldEnd and intentionally do not orphan it.
         touched = true;
       }
     });
-    from = mapping.maps[index].map(from, -1);
-    to = mapping.maps[index].map(to, 1);
+    // Match Decoration.inline's exclusive endpoints and the marker widget's
+    // right affinity. A deleted range becomes a point for all later steps.
+    const endAffinity = position.kind === 'position' || from === to ? 1 : -1;
+    const fromResult = mapping.maps[index].mapResult(from, 1);
+    const toResult = mapping.maps[index].mapResult(to, endAffinity);
+    touched ||= fromResult.deleted || toResult.deleted;
+    from = Math.min(fromResult.pos, toResult.pos);
+    to = Math.max(fromResult.pos, toResult.pos);
   }
 
-  return touched;
-}
-
-function mapPosition(position: CanvasCommentPosition, transaction: Transaction): CanvasCommentPosition {
-  const fromResult = transaction.mapping.mapResult(position.from, -1);
-  const toResult = transaction.mapping.mapResult(position.to, 1);
-  const contentChanged = targetWasChanged(position, transaction);
   return {
-    ...position,
-    from: clampPosition(fromResult.pos, transaction.doc),
-    to: clampPosition(toResult.pos, transaction.doc),
-    status:
-      position.status === 'needs-review' || fromResult.deleted || toResult.deleted || contentChanged
-        ? 'needs-review'
-        : 'active',
+    position: {
+      ...position,
+      from: clampPosition(from, transaction.doc),
+      to: clampPosition(to, transaction.doc),
+      status: position.status === 'needs-review' || touched ? 'needs-review' : 'active',
+    },
+    targetChanged: touched,
   };
 }
 
@@ -137,13 +141,15 @@ export function createCommentDecorationsExtension(
                 };
               }
               if (!transaction.docChanged) return current;
-              const positions = current.positions.map((position) => mapPosition(position, transaction));
-              const statusChanged = positions.some((position, index) => position.status !== current.positions[index]?.status);
+              const mapped = current.positions.map((position) => mapPosition(position, transaction));
+              const positions = mapped.map((result) => result.position);
+              const targetChanged = mapped.some((result) => result.targetChanged);
               return {
                 positions,
-                decorations: statusChanged
-                  ? buildDecorations(transaction.doc, positions, markerClickRef)
-                  : current.decorations.map(transaction.mapping, transaction.doc),
+                decorations:
+                  targetChanged
+                    ? buildDecorations(transaction.doc, positions, markerClickRef)
+                    : current.decorations.map(transaction.mapping, transaction.doc),
               };
             },
           },

@@ -39,6 +39,12 @@ Use a temporary copy for intentional edits.
 - Type while saving, renaming, switching files, or completing an image paste/drop.
   Confirm the latest edits stay with their originating file. A history-settings
   failure after a successful save or rename must not restore the previous path.
+- In a table cell, press Enter and Shift+Enter, then add formatted text and a
+  formula. Switch modes and save/reopen; every paragraph and line break must
+  remain. Richer tables that GFM cannot represent retain their content as HTML previews.
+- Rename an unnamed draft, including an empty one, and restart. Confirm recovery
+  restores the new filename. Paste an image, immediately switch to Markdown,
+  and confirm the completed image survives switching back and saving.
 - Unsupported footnotes, ordered task lists, and image-containing headings/table
   cells retain recoverable Markdown source. Relative links to another Markdown
   file report a status message; they do not navigate the editor away.

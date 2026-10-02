@@ -2,13 +2,15 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { getSchema, type JSONContent } from "@tiptap/core";
 import { Node as ProseMirrorNode } from "@tiptap/pm/model";
+import { splitBlock } from "@tiptap/pm/commands";
+import { EditorState, TextSelection } from "@tiptap/pm/state";
 import StarterKit from "@tiptap/starter-kit";
 import { Table, TableRow } from "@tiptap/extension-table";
 import TaskList from "@tiptap/extension-task-list";
 import TaskItem from "@tiptap/extension-task-item";
 import { describe, expect, it } from "vitest";
 import { InlineFormula, BlockFormula } from "./Formula";
-import { HtmlPreview, InlineHtmlPreview } from "./HtmlPreview";
+import { HtmlPreview, InlineHtmlPreview, htmlPreviewText } from "./HtmlPreview";
 import { PaperImage } from "./PaperImage";
 import { PaperCode, PaperLink } from "./PaperLink";
 import { PaperTableCell, PaperTableHeader } from "./PaperTable";
@@ -38,6 +40,249 @@ function allText(node: JSONContent): string {
 }
 
 describe("reading fixtures in the real editor schema", () => {
+  it("preserves the additional paragraph and formula created by Enter in a table cell", () => {
+    const imported = ProseMirrorNode.fromJSON(
+      schema,
+      markdownToDocument(
+        "| Heading | Value |\n| --- | --- |\n| First | $x^2$ |",
+      ),
+    );
+    let formulaPosition = 0;
+    imported.descendants((node, position) => {
+      if (node.type.name === "inlineFormula") formulaPosition = position;
+    });
+    let state = EditorState.create({
+      schema,
+      doc: imported,
+      selection: TextSelection.create(imported, formulaPosition),
+    });
+    expect(
+      splitBlock(state, (transaction) => {
+        state = state.apply(transaction);
+      }),
+    ).toBe(true);
+    state = state.apply(state.tr.insertText("Second line "));
+    const edited = state.doc.toJSON();
+    const serialized = documentToMarkdown(edited);
+    expect(serialized).toContain("Second line");
+    expect(serialized).toContain("$x^2$");
+    const reopened = ProseMirrorNode.fromJSON(
+      schema,
+      markdownToDocument(serialized),
+    );
+    expect(() => reopened.check()).not.toThrow();
+    expect(reopened.toJSON()).toEqual(edited);
+  });
+
+  it("preserves hard breaks and formatting in every table-cell paragraph", () => {
+    const imported = ProseMirrorNode.fromJSON(
+      schema,
+      markdownToDocument("| Heading |\n| --- |\n| First |"),
+    );
+    const edited = imported.toJSON();
+    edited.content![0].content![1].content![0].content = [
+      {
+        type: "paragraph",
+        content: [
+          { type: "text", text: "first | line", marks: [{ type: "bold" }] },
+          { type: "hardBreak" },
+          { type: "text", text: "after break" },
+        ],
+      },
+      {
+        type: "paragraph",
+        content: [
+          { type: "inlineFormula", attrs: { latex: "x^2" } },
+          { type: "text", text: "second ` line", marks: [{ type: "code" }] },
+        ],
+      },
+      { type: "paragraph" },
+    ];
+    const before = ProseMirrorNode.fromJSON(schema, edited);
+    const serialized = documentToMarkdown(before.toJSON());
+    expect(serialized).toContain("after break");
+    expect(serialized).toContain("second");
+    const reopened = ProseMirrorNode.fromJSON(
+      schema,
+      markdownToDocument(serialized),
+    );
+    expect(() => reopened.check()).not.toThrow();
+    expect(reopened.toJSON()).toEqual(before.toJSON());
+  });
+
+  it.each([
+    "# Literal heading",
+    "- Literal list",
+    "> Literal quote",
+    "    Literal indentation",
+    "1. Literal numbering",
+    "---",
+  ])("retains literal paragraph text in multiline table cells: %s", (text) => {
+    const edited = ProseMirrorNode.fromJSON(
+      schema,
+      markdownToDocument("| Heading |\n| --- |\n| First |"),
+    ).toJSON();
+    edited.content![0].content![1].content![0].content = [
+      { type: "paragraph", content: [{ type: "text", text }] },
+      {
+        type: "paragraph",
+        content: [{ type: "text", text: "Second paragraph" }],
+      },
+    ];
+    const before = ProseMirrorNode.fromJSON(schema, edited);
+    const reopened = ProseMirrorNode.fromJSON(
+      schema,
+      markdownToDocument(documentToMarkdown(before.toJSON())),
+    );
+    expect(() => reopened.check()).not.toThrow();
+    expect(reopened.toJSON()).toEqual(before.toJSON());
+  });
+
+  it("decodes table escaping exactly once for inline code in additional paragraphs", () => {
+    const edited = ProseMirrorNode.fromJSON(
+      schema,
+      markdownToDocument("| Heading |\n| --- |\n| First |"),
+    ).toJSON();
+    edited.content![0].content![1].content![0].content = [
+      {
+        type: "paragraph",
+        content: [{ type: "text", text: "a|b", marks: [{ type: "code" }] }],
+      },
+      {
+        type: "paragraph",
+        content: [{ type: "text", text: "Second paragraph" }],
+      },
+      { type: "paragraph" },
+    ];
+    const before = ProseMirrorNode.fromJSON(schema, edited);
+    const reopened = ProseMirrorNode.fromJSON(
+      schema,
+      markdownToDocument(documentToMarkdown(before.toJSON())),
+    );
+    expect(reopened.toJSON()).toEqual(before.toJSON());
+  });
+
+  it.each([
+    [{ type: "text", text: "a\\|b", marks: [{ type: "code" }] }, "a\\|b"],
+    [{ type: "inlineFormula", attrs: { latex: "a|b" } }, "a|b"],
+    [{ type: "inlineFormula", attrs: { latex: "a\\\\|b" } }, "a\\\\|b"],
+    [{ type: "inlineFormula", attrs: { latex: "x\ny" } }, "x\ny"],
+    [
+      {
+        type: "inlineHtmlPreview",
+        attrs: { source: '<span title="a|b">t</span>' },
+      },
+      'title="a|b"',
+    ],
+  ] satisfies Array<[JSONContent, string]>)(
+    "retains inline content that cannot fit a GFM table row: %j",
+    (inline, retained) => {
+      const edited = ProseMirrorNode.fromJSON(
+        schema,
+        markdownToDocument("| Heading |\n| --- |\n| First |"),
+      ).toJSON();
+      edited.content![0].content![1].content![0].content = [
+        { type: "paragraph", content: [inline] },
+        {
+          type: "paragraph",
+          content: [{ type: "text", text: "Second paragraph" }],
+        },
+      ];
+      const serialized = documentToMarkdown(
+        ProseMirrorNode.fromJSON(schema, edited).toJSON(),
+      );
+      expect(serialized).toContain("<table>");
+      expect(serialized).toContain(retained);
+      expect(serialized).toContain("Second paragraph");
+      const reopened = ProseMirrorNode.fromJSON(
+        schema,
+        markdownToDocument(serialized),
+      );
+      expect(() => reopened.check()).not.toThrow();
+      expect(reopened.firstChild?.type.name).toBe("htmlPreview");
+      expect(documentToMarkdown(reopened.toJSON())).toBe(serialized);
+    },
+  );
+
+  it("keeps an escaped LaTeX pipe editable in a multiline GFM cell", () => {
+    const edited = ProseMirrorNode.fromJSON(
+      schema,
+      markdownToDocument("| Heading |\n| --- |\n| First |"),
+    ).toJSON();
+    edited.content![0].content![1].content![0].content = [
+      {
+        type: "paragraph",
+        content: [{ type: "inlineFormula", attrs: { latex: "a\\|b" } }],
+      },
+      {
+        type: "paragraph",
+        content: [{ type: "text", text: "Second paragraph" }],
+      },
+    ];
+    const before = ProseMirrorNode.fromJSON(schema, edited);
+    const serialized = documentToMarkdown(before.toJSON());
+    expect(serialized).not.toContain("<table>");
+    expect(
+      ProseMirrorNode.fromJSON(schema, markdownToDocument(serialized)).toJSON(),
+    ).toEqual(before.toJSON());
+  });
+
+  it("preserves every block in rich table cells instead of discarding nonparagraph blocks", () => {
+    const edited = ProseMirrorNode.fromJSON(
+      schema,
+      markdownToDocument("| Heading |\n| --- |\n| First |"),
+    ).toJSON();
+    edited.content![0].content![1].content![0].content = [
+      {
+        type: "heading",
+        attrs: { level: 2 },
+        content: [{ type: "text", text: "Cell heading" }],
+      },
+      {
+        type: "bulletList",
+        content: [
+          {
+            type: "listItem",
+            content: [
+              {
+                type: "paragraph",
+                content: [{ type: "text", text: "Nested item" }],
+              },
+            ],
+          },
+        ],
+      },
+      {
+        type: "codeBlock",
+        attrs: { language: "js" },
+        content: [{ type: "text", text: "const example = '<script>';" }],
+      },
+      { type: "image", attrs: { src: "diagram.png", alt: "Diagram" } },
+    ];
+    const serialized = documentToMarkdown(
+      ProseMirrorNode.fromJSON(schema, edited).toJSON(),
+    );
+    expect(serialized).toContain('src="diagram.png"');
+    expect(serialized).toContain("&lt;script&gt;");
+    const reopened = ProseMirrorNode.fromJSON(
+      schema,
+      markdownToDocument(serialized),
+    );
+    expect(() => reopened.check()).not.toThrow();
+    expect(reopened.firstChild?.type.name).toBe("htmlPreview");
+    const text = htmlPreviewText(
+      String(reopened.firstChild?.attrs.source),
+      "block",
+    );
+    for (const value of [
+      "Cell heading",
+      "Nested item",
+      "const example = '<script>';",
+    ])
+      expect(text).toContain(value);
+    expect(documentToMarkdown(reopened.toJSON())).toBe(serialized);
+  });
+
   it("preserves image sources and the task checkbox when unrelated text is edited", () => {
     const source = '# ![Logo](logo.svg "Logo title") Title\n\n- [x] [![Badge](badge.svg)](https://example.com/guide "Guide title")\n\n| Figure |\n| :---: |\n| ![Diagram](diagram.png "Figure title") |\n\nOriginal text.';
     const imported = ProseMirrorNode.fromJSON(schema, markdownToDocument(source));

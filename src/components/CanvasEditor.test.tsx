@@ -340,3 +340,109 @@ it('ignores a pasted image that finishes between unmount and deferred editor des
     Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: false });
   }
 });
+
+it.each([
+  { action: 'paste', changeLanguage: false },
+  { action: 'drop', changeLanguage: false },
+  { action: 'paste', changeLanguage: true },
+  { action: 'drop', changeLanguage: true },
+] as const)('maps a delayed $action image through edits and cursor movement (language change: $changeLanguage)', async ({ action, changeLanguage }) => {
+  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+  let finishRead: (() => void) | undefined;
+  vi.stubGlobal('FileReader', class {
+    result = 'data:image/png;base64,dGVzdA==';
+    onload: (() => void) | null = null;
+    readAsDataURL() { finishRead = () => this.onload?.(); }
+  });
+  const host = document.createElement('div');
+  document.body.append(host);
+  const root = createRoot(host);
+  try {
+    await act(async () => root.render(
+      <CanvasEditor language="en" documentId={1} initialDocument={markdownConversion.markdownToDocument('Before after')} onChange={() => {}} />,
+    ));
+    const editor = harness.editor!;
+    editor.commands.setTextSelection(8);
+    const event = new Event(action, { cancelable: true });
+    Object.defineProperty(event, action === 'paste' ? 'clipboardData' : 'dataTransfer', {
+      value: { files: [new File(['image'], 'sample.png', { type: 'image/png' })] },
+    });
+    if (action === 'paste') {
+      editor.view.someProp('handlePaste', (handler) => handler(editor.view, event as ClipboardEvent, null!));
+    } else {
+      vi.spyOn(editor.view, 'posAtCoords').mockReturnValue({ pos: 8, inside: 0 });
+      editor.view.someProp('handleDrop', (handler) => handler(editor.view, event as DragEvent, null!, false));
+    }
+    await act(async () => {
+      editor.commands.insertContentAt(1, 'New ');
+      editor.commands.setTextSelection(1);
+    });
+    if (changeLanguage) await act(async () => root.render(
+      <CanvasEditor language="zh-Hant" documentId={1} initialDocument={markdownConversion.markdownToDocument('Before after')} onChange={() => {}} />,
+    ));
+    await act(async () => {
+      finishRead?.();
+    });
+    const content = harness.editor!.getJSON().content!;
+    expect(content.map((node) => node.type)).toEqual(['paragraph', 'image', 'paragraph']);
+    expect(content[0].content).toEqual([{ type: 'text', text: 'New Before ' }]);
+    expect(content[2].content).toEqual([{ type: 'text', text: 'after' }]);
+    expect(harness.editor!.state.selection.head).toBe(1);
+  } finally {
+    await act(async () => root.unmount());
+    host.remove();
+    vi.unstubAllGlobals();
+    Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: false });
+  }
+});
+
+it.each([false, true])('replaces only unchanged selected content after an image read (range edited: %s)', async (editRange) => {
+  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+  let finishRead: (() => void) | undefined;
+  vi.stubGlobal('FileReader', class {
+    result = 'data:image/png;base64,dGVzdA==';
+    onload: (() => void) | null = null;
+    readAsDataURL() { finishRead = () => this.onload?.(); }
+  });
+  const host = document.createElement('div');
+  document.body.append(host);
+  const root = createRoot(host);
+  const handle = createRef<SwitchableEditorHandle>();
+  try {
+    await act(async () => root.render(
+      <CanvasEditor ref={handle} language="en" documentId={1} initialDocument={markdownConversion.markdownToDocument('Before target after')} onChange={() => {}} />,
+    ));
+    const editor = harness.editor!;
+    editor.commands.setTextSelection({ from: 8, to: 14 });
+    const event = new Event('paste', { cancelable: true });
+    Object.defineProperty(event, 'clipboardData', {
+      value: { files: [new File(['image'], 'sample.png', { type: 'image/png' })] },
+    });
+    editor.view.someProp('handlePaste', (handler) => handler(editor.view, event as ClipboardEvent, null!));
+    let settled = false;
+    const completion = handle.current?.waitForPendingImages?.()?.then(() => { settled = true; });
+    expect(completion).toBeDefined();
+    await act(async () => {
+      if (editRange) editor.commands.insertContentAt(11, 'LATEST');
+      editor.commands.setTextSelection(1);
+      await Promise.resolve();
+    });
+    expect(settled).toBe(false);
+    await act(async () => {
+      finishRead?.();
+      await completion;
+    });
+    expect(settled).toBe(true);
+    expect(handle.current?.waitForPendingImages?.()).toBeUndefined();
+    const content = editor.getJSON().content!;
+    expect(content.map((node) => node.type)).toEqual(['paragraph', 'image', 'paragraph']);
+    expect(content[0].content).toEqual([{ type: 'text', text: editRange ? 'Before tarLATESTget' : 'Before ' }]);
+    expect(content[2].content).toEqual([{ type: 'text', text: ' after' }]);
+    expect(editor.state.selection.head).toBe(1);
+  } finally {
+    await act(async () => root.unmount());
+    host.remove();
+    vi.unstubAllGlobals();
+    Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: false });
+  }
+});

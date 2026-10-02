@@ -54,6 +54,8 @@ export type SwitchableEditorHandle = SearchableEditorHandle & {
   runContextAction?: (action: ContextMenuAction) => void;
   /** Flush any deferred canvas-to-Markdown comment position synchronization. */
   flushCommentMapping?: () => void;
+  /** Wait for image reads and insertions before serializing a mode transition. */
+  waitForPendingImages?: () => Promise<void> | undefined;
   isFocused: () => boolean;
   requestMeasure: () => void;
 };

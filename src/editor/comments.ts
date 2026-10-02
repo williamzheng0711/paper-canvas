@@ -207,12 +207,14 @@ function findOccurrences(text: string, needle: string): number[] {
   let offset = text.indexOf(needle);
   while (offset >= 0) {
     occurrences.push(offset);
-    offset = text.indexOf(needle, offset + Math.max(1, needle.length));
+    // Overlapping matches are distinct anchors too (for example, both `ana`
+    // substrings in `banana`); skipping them can make a relocation look unique.
+    offset = text.indexOf(needle, offset + 1);
   }
   return occurrences;
 }
 
-function relocateByContext(comment: MarkdownComment, markdown: string): number | undefined {
+function relocateByContext(comment: MarkdownComment, markdown: string): { from: number; to: number } | undefined {
   const before = comment.contextBefore.slice(-72);
   const after = comment.contextAfter.slice(0, 72);
   if (!before && !after) return undefined;
@@ -221,10 +223,10 @@ function relocateByContext(comment: MarkdownComment, markdown: string): number |
   const candidates = beforeEnds.flatMap((beforeEnd) =>
     afterStarts
       .filter((afterStart) => afterStart >= beforeEnd)
-      .map((afterStart) => ({ offset: beforeEnd, afterStart })),
+      .map((afterStart) => ({ from: beforeEnd, to: afterStart })),
   );
   if (candidates.length !== 1) return undefined;
-  return candidates[0].offset;
+  return candidates[0];
 }
 
 function refreshCommentAnchor(
@@ -322,18 +324,18 @@ export function relocateMarkdownComments(
       }
     }
 
-    const contextOffset = relocateByContext(comment, targetMarkdown);
-    if (contextOffset !== undefined) {
+    const contextBounds = relocateByContext(comment, targetMarkdown);
+    if (contextBounds !== undefined) {
       return refreshCommentAnchor(
         comment,
         targetMarkdown,
         comment.target.kind === 'range'
           ? {
               kind: 'range',
-              from: contextOffset,
-              to: contextOffset + Math.max(0, oldBounds.to - oldBounds.from),
+              from: contextBounds.from,
+              to: contextBounds.to,
             }
-          : { kind: 'position', offset: contextOffset },
+          : { kind: 'position', offset: contextBounds.from },
         comment.status,
       );
     }

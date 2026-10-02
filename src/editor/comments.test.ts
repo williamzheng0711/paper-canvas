@@ -25,7 +25,11 @@ describe('PaperCanvas Markdown comments metadata', () => {
     const rangeStart = body.indexOf('選區');
     const range = createMarkdownComment(
       body,
-      { kind: 'range', from: rangeStart, to: rangeStart + '選區文字 😀'.length },
+      {
+        kind: 'range',
+        from: rangeStart,
+        to: rangeStart + '選區文字 😀'.length,
+      },
       '請確認這段內容 --> 再補一個來源。',
       undefined,
       'comment-range',
@@ -108,7 +112,11 @@ describe('PaperCanvas Markdown comments metadata', () => {
     const source = '這裡有 target。\n';
     const comment = createMarkdownComment(
       source,
-      { kind: 'range', from: source.indexOf('target'), to: source.indexOf('target') + 6 },
+      {
+        kind: 'range',
+        from: source.indexOf('target'),
+        to: source.indexOf('target') + 6,
+      },
       '請確認。',
       undefined,
       'comment-ambiguous',
@@ -122,5 +130,39 @@ describe('PaperCanvas Markdown comments metadata', () => {
       from: source.indexOf('target'),
       to: source.indexOf('target') + 6,
     });
+  });
+
+  it.each(['much longer replacement', 'x', ''])(
+    'uses both context boundaries when selected text changes to %j',
+    (replacement) => {
+      const source = 'Before [old text] after\n';
+      const from = source.indexOf('old text');
+      const comment = createMarkdownComment(
+        source,
+        { kind: 'range', from, to: from + 8 },
+        'Review',
+        undefined,
+        'range',
+      );
+      const target = `Before [${replacement}] after\n`;
+
+      const [relocated] = relocateMarkdownComments([comment], source, target);
+
+      expect(relocated.target).toEqual({
+        kind: 'range',
+        from,
+        to: from + replacement.length,
+      });
+      expect(relocated.anchorText).toBe(replacement);
+    },
+  );
+
+  it('treats overlapping anchor matches as ambiguous', () => {
+    const source = 'Before ana after';
+    const comment = createMarkdownComment(source, { kind: 'range', from: 7, to: 10 }, 'Review', undefined, 'range');
+
+    const [relocated] = relocateMarkdownComments([comment], source, 'banana');
+
+    expect(relocated.status).toBe('needs-review');
   });
 });

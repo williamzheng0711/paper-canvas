@@ -8,6 +8,7 @@ import { getMessages } from "../i18n";
 import { parseMarkdownComments } from "./comments";
 import { isDisplayLatexEnvironment } from "./formulaInput";
 import { isHtmlPreviewCandidate } from "./htmlSafety";
+import { requiresHtmlTable, tableToHtml } from "./markdownTableHtml";
 
 type MdNode = {
   type: string;
@@ -46,20 +47,23 @@ function isEscaped(text: string, index: number): boolean {
   return slashes % 2 === 1;
 }
 
-function normalizeInlineLatexDelimiters(line: string): string {
+type SourceRange = { start: number; end: number };
+
+function normalizeInlineLatexDelimiters(
+  line: string,
+  literalRanges: SourceRange[] = [],
+): string {
   let result = "";
   let cursor = 0;
   let dollarDelimiter: "$" | "$$" | null = null;
+  let rangeIndex = 0;
 
   while (cursor < line.length) {
-    if (line[cursor] === "`") {
-      let runLength = 1;
-      while (line[cursor + runLength] === "`") runLength += 1;
-      const delimiter = "`".repeat(runLength);
-      const closing = line.indexOf(delimiter, cursor + runLength);
-      if (closing === -1) return result + line.slice(cursor);
-      result += line.slice(cursor, closing + runLength);
-      cursor = closing + runLength;
+    const literal = literalRanges[rangeIndex];
+    if (literal && cursor >= literal.start) {
+      result += line.slice(cursor, literal.end);
+      cursor = literal.end;
+      rangeIndex += 1;
       continue;
     }
 
@@ -99,6 +103,26 @@ function normalizeInlineLatexDelimiters(line: string): string {
  * delimiters, without touching fenced/indented code or inline code spans.
  */
 export function normalizeLatexDelimiters(markdown: string): string {
+  if (!/\\(?:[([]|begin\{)|\$\$/.test(markdown)) return markdown;
+
+  // Markdown's parser knows where nested fences, multiline code spans and
+  // paired HTML end. Line-based fence detection alone rewrites literal TeX in
+  // quoted/list code and changes the source of supposedly lossless previews.
+  const literalRoot = processor.parse(markdown) as unknown as MdRoot;
+  groupInlineHtml(literalRoot, markdown);
+  const literalRanges: SourceRange[] = [];
+  const collectLiteralRanges = (node: MdNode) => {
+    if (["code", "inlineCode", "html"].includes(node.type)) {
+      const start = node.position?.start.offset;
+      const end = node.position?.end.offset;
+      if (start !== undefined && end !== undefined)
+        literalRanges.push({ start, end });
+      return;
+    }
+    node.children?.forEach(collectLiteralRanges);
+  };
+  collectLiteralRanges(literalRoot);
+  literalRanges.sort((left, right) => left.start - right.start);
   const lines = markdown.split("\n");
   const normalized: string[] = [];
   let fence: { marker: "`" | "~"; length: number } | null = null;
@@ -106,8 +130,26 @@ export function normalizeLatexDelimiters(markdown: string): string {
   let bracketOpeningSource = "";
   let dollarDisplayBlock = false;
   let latexEnvironment: { name: string; openingIndex: number } | null = null;
+  let lineOffset = 0;
+  let rangeIndex = 0;
 
   for (const line of lines) {
+    const lineStart = lineOffset;
+    const lineEnd = lineStart + line.length;
+    lineOffset = lineEnd + 1;
+    while (literalRanges[rangeIndex]?.end <= lineStart) rangeIndex += 1;
+    const lineRanges: SourceRange[] = [];
+    for (
+      let index = rangeIndex;
+      literalRanges[index]?.start < lineEnd;
+      index += 1
+    ) {
+      const range = literalRanges[index];
+      lineRanges.push({
+        start: Math.max(0, range.start - lineStart),
+        end: Math.min(line.length, range.end - lineStart),
+      });
+    }
     if (latexEnvironment !== null) {
       normalized.push(line);
       if (
@@ -128,6 +170,11 @@ export function normalizeLatexDelimiters(markdown: string): string {
       } else {
         normalized.push(line);
       }
+      continue;
+    }
+
+    if (lineRanges.length > 0) {
+      normalized.push(normalizeInlineLatexDelimiters(line, lineRanges));
       continue;
     }
 
@@ -305,7 +352,11 @@ function groupInlineHtml(node: MdNode, source: string): void {
     const start = child.position?.start.offset;
     const end = node.children[closingIndex]?.position?.end.offset;
     if (depth === 0 && start !== undefined && end !== undefined) {
-      children.push({ type: "html", value: source.slice(start, end) });
+      children.push({
+        type: "html",
+        value: source.slice(start, end),
+        position: { start: { offset: start }, end: { offset: end } },
+      });
       index = closingIndex;
     } else {
       children.push(child);
@@ -416,6 +467,47 @@ function applyMark(
 
 function containsImage(node: MdNode): boolean {
   return node.type === "image" || (node.children?.some(containsImage) ?? false);
+}
+
+function tableCellContent(node: MdNode): JSONContent[] {
+  const children = node.children ?? [];
+  const paragraphs = children.map((child) =>
+    child.type === "html"
+      ? /^<p>([\s\S]*)<\/p>$/i.exec(child.value ?? "")
+      : null,
+  );
+  // GFM cells have no native paragraph boundary. Standard inline HTML keeps
+  // paragraphs created by Enter intact without moving text out of the table.
+  if (paragraphs.length > 0 && paragraphs.every(Boolean)) {
+    return paragraphs.flatMap((paragraph) => {
+      // A prefix forces phrasing context, so literal text such as "# title"
+      // or "- item" is not reinterpreted as a block after removing <p>.
+      const prefix = "paragraph ";
+      const suffix = " paragraph";
+      // Parse in the original GFM-cell context: a pipe escaped inside an
+      // inline code span is table syntax, not a literal backslash in the code.
+      const source = `| cell |\n| --- |\n| ${prefix}${paragraph![1]}${suffix} |`;
+      const root = processor.parse(source) as unknown as MdRoot;
+      groupInlineHtml(root, source);
+      resolveReferences(root);
+      const cell = root.children[0]?.children?.[1]?.children?.[0];
+      if (!cell)
+        return [{ type: "paragraph", content: content(children, "inline") }];
+      const first = cell.children?.[0];
+      if (first?.type === "text" && first.value?.startsWith(prefix)) {
+        first.value = first.value.slice(prefix.length);
+        if (!first.value) cell.children!.shift();
+      }
+      const lastChildren = cell.children;
+      const last = lastChildren?.at(-1);
+      if (last?.type === "text" && last.value?.endsWith(suffix)) {
+        last.value = last.value.slice(0, -suffix.length);
+        if (!last.value) lastChildren!.pop();
+      }
+      return fromMdast({ type: "paragraph", children: cell.children });
+    });
+  }
+  return [{ type: "paragraph", content: content(children, "inline") }];
 }
 
 function fromMdast(
@@ -539,9 +631,10 @@ function fromMdast(
               : undefined,
           // Both list-item schemas require a paragraph first. This also keeps
           // GFM's checkbox serializer active for an image-only task item.
-          content: children[0]?.type === "paragraph"
-            ? children
-            : [{ type: "paragraph" }, ...children],
+          content:
+            children[0]?.type === "paragraph"
+              ? children
+              : [{ type: "paragraph" }, ...children],
         },
       ];
     }
@@ -557,12 +650,7 @@ function fromMdast(
             content: (row.children ?? []).map((cell, columnIndex) => ({
               type: rowIndex === 0 ? "tableHeader" : "tableCell",
               attrs: { textAlign: node.align?.[columnIndex] ?? null },
-              content: [
-                {
-                  type: "paragraph",
-                  content: content(cell.children, "inline"),
-                },
-              ],
+              content: tableCellContent(cell),
             })),
           })),
         },
@@ -573,21 +661,19 @@ function fromMdast(
       return [
         {
           type: "tableCell",
-          content: [
-            { type: "paragraph", content: content(node.children, "inline") },
-          ],
+          content: tableCellContent(node),
         },
       ];
     case "tableHeader":
       return [
         {
           type: "tableHeader",
-          content: [
-            { type: "paragraph", content: content(node.children, "inline") },
-          ],
+          content: tableCellContent(node),
         },
       ];
     case "html":
+      if (context === "inline" && /^<br\s*\/?\s*>$/i.test(node.value ?? ""))
+        return [{ type: "hardBreak" }];
       if (context === "block" && !isHtmlPreviewCandidate(node.value ?? "")) {
         return [unsupported(node, getMessages().htmlPreserved)];
       }
@@ -636,7 +722,8 @@ function mergeInlineMarks(nodes: MdNode[]): MdNode[] {
   const merged: MdNode[] = [];
   const append = (target: MdNode[], current: MdNode) => {
     const previous = target[target.length - 1];
-    const sameMark = previous?.type === current.type &&
+    const sameMark =
+      previous?.type === current.type &&
       ["strong", "emphasis", "delete", "link"].includes(current.type) &&
       (current.type !== "link" ||
         (previous.url === current.url && previous.title === current.title));
@@ -648,7 +735,8 @@ function mergeInlineMarks(nodes: MdNode[]): MdNode[] {
     // mark around a contiguous run, since adjacent delimiters such as
     // **text ****$x$** otherwise become literal characters when reopened.
     previous.children ??= [];
-    for (const child of current.children ?? []) append(previous.children, child);
+    for (const child of current.children ?? [])
+      append(previous.children, child);
   };
   for (const node of nodes) {
     const current = node.children
@@ -663,9 +751,12 @@ function toMdast(node: JSONContent): MdNode | null {
   const childNodes = (node.content ?? []).flatMap((child) => {
     const converted = toMdast(child);
     if (!converted) return [];
-    return [child.type === "image" && ["blockquote", "listItem", "taskItem"].includes(node.type ?? "")
-      ? { type: "paragraph", children: [converted] }
-      : converted];
+    return [
+      child.type === "image" &&
+      ["blockquote", "listItem", "taskItem"].includes(node.type ?? "")
+        ? { type: "paragraph", children: [converted] }
+        : converted,
+    ];
   });
   if (node.type === "text") {
     return wrapInlineMarks(node, {
@@ -739,6 +830,8 @@ function toMdast(node: JSONContent): MdNode | null {
     case "blockFormula":
       return { type: "math", value: String(node.attrs?.latex ?? "") };
     case "table":
+      if (requiresHtmlTable(node))
+        return { type: "html", value: tableToHtml(node) };
       return {
         type: "table",
         align: (node.content?.[0]?.content ?? []).map((cell) => {
@@ -773,17 +866,37 @@ function toMdast(node: JSONContent): MdNode | null {
 function listItemChildren(children: MdNode[]): MdNode[] {
   // The schema-only leading paragraph is unnecessary in Markdown. An empty
   // marker line would push later blocks outside the list or break GFM tasks.
-  return children.length > 1 && children[0].type === "paragraph" && !children[0].children?.length
+  return children.length > 1 &&
+    children[0].type === "paragraph" &&
+    !children[0].children?.length
     ? children.slice(1)
     : children;
 }
 
 function cellInlineChildren(node: JSONContent): MdNode[] {
-  const paragraph = node.content?.find((child) => child.type === "paragraph");
-  return mergeInlineMarks((paragraph?.content ?? []).flatMap((child) => {
-    const converted = toMdast(child);
-    return converted ? [converted] : [];
-  }));
+  const paragraphs = (node.content ?? []).filter(
+    (child) => child.type === "paragraph",
+  );
+  return paragraphs.flatMap((paragraph) => {
+    const children = mergeInlineMarks(
+      (paragraph.content ?? []).flatMap((child) => {
+        // remark-gfm flattens Markdown hard breaks into a space in cells. HTML
+        // breaks fit on one table row and retain the authored line boundary.
+        const converted =
+          child.type === "hardBreak"
+            ? { type: "html", value: "<br>" }
+            : toMdast(child);
+        return converted ? [converted] : [];
+      }),
+    );
+    return paragraphs.length > 1
+      ? [
+          { type: "html", value: "<p>" },
+          ...children,
+          { type: "html", value: "</p>" },
+        ]
+      : children;
+  });
 }
 
 function flattenText(node: JSONContent): string {

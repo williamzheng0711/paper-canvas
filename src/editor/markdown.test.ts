@@ -326,6 +326,48 @@ unclosed`;
     expect(markdownToDocument(documentToMarkdown(document))).toEqual(document);
   });
 
+  it.each([
+    "> ```tex\n> \\(literal\\)\n> \\[also literal\\]\n> ```",
+    "- ```tex\n  \\(literal\\)\n  \\[also literal\\]\n  ```",
+    "Code: `first line\n\\(literal\\)` then \\(x\\).",
+    "Code: ``a ` b \\(literal\\)`` then \\(x\\).",
+  ])("preserves TeX inside nested and multiline code spans: %s", (source) => {
+    const document = markdownToDocument(source);
+    const codes = [
+      ...nodesOfType(document, "codeBlock"),
+      ...nodesOfType(document, "text").filter((node) =>
+        node.marks?.some((mark) => mark.type === "code"),
+      ),
+    ];
+    expect(
+      codes.map((node) => node.text ?? node.content?.[0]?.text).join("\n"),
+    ).toContain("\\(literal\\)");
+    expect(markdownToDocument(documentToMarkdown(document))).toEqual(document);
+    if (source.includes("then"))
+      expect(nodesOfType(document, "inlineFormula")[0].attrs?.latex).toBe("x");
+  });
+
+  it("does not let a literal escaped backtick hide following math", () => {
+    const document = markdownToDocument("Literal \\` then \\(x\\).");
+    expect(nodesOfType(document, "inlineFormula")[0]?.attrs?.latex).toBe("x");
+  });
+
+  it.each([
+    "<pre>\\(literal\\) and $$literal$$</pre>",
+    "Before <kbd>\\(literal\\)</kbd> after \\(x\\).",
+    "<div>\n\\[literal\\]\n</div>",
+  ])("preserves the original TeX syntax inside HTML previews: %s", (source) => {
+    const document = markdownToDocument(source);
+    const previews = [
+      ...nodesOfType(document, "htmlPreview"),
+      ...nodesOfType(document, "inlineHtmlPreview"),
+    ];
+    expect(previews[0]?.attrs?.source).toContain(
+      source.includes("\\[") ? "\\[literal\\]" : "\\(literal\\)",
+    );
+    expect(markdownToDocument(documentToMarkdown(document))).toEqual(document);
+  });
+
   it("imports starred LaTeX display environments without absorbing following prose", () => {
     const document = markdownToDocument(
       "\\begin{align*}\nx &= y\n\\end{align*}\n\nFollowing prose.",

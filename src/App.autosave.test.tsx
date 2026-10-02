@@ -49,6 +49,7 @@ const harness = vi.hoisted(() => ({
     isFocused: vi.fn(() => false),
     requestMeasure: vi.fn(),
     flushCommentMapping: vi.fn(),
+    waitForPendingImages: vi.fn<() => Promise<void> | undefined>(() => undefined),
     getDocument: vi.fn<() => JSONContent | undefined>(() => undefined),
   },
 }));
@@ -254,6 +255,7 @@ describe('App autosave cursor stability', () => {
     harness.searchHandle.getSelectedText.mockReturnValue('');
     harness.searchHandle.getDocument.mockReturnValue(undefined);
     harness.searchHandle.flushCommentMapping.mockReset();
+    harness.searchHandle.waitForPendingImages.mockReset().mockReturnValue(undefined);
     harness.searchHandle.getSelectionProgress.mockReturnValue(0.5);
     harness.searchHandle.getSelectionViewportOffset.mockReturnValue(undefined);
     harness.searchHandle.getMarkdownSelection.mockReturnValue(undefined);
@@ -546,6 +548,51 @@ describe('App autosave cursor stability', () => {
     expect(host.querySelector('.editor-mode-pane--canvas')?.hasAttribute('hidden')).toBe(false);
     expect(harness.canvasMounts).toBe(1);
     expect(harness.canvasUnmounts).toBe(0);
+  });
+
+  it('waits for a pending canvas image before serializing Markdown and coalesces repeated mode clicks', async () => {
+    let finishImage!: () => void;
+    harness.searchHandle.waitForPendingImages.mockReturnValue(new Promise<void>((resolve) => { finishImage = resolve; }));
+    const withImage = markdownToDocument('Original text\n\n![sample.png](data:image/png;base64,dGVzdA==)\n');
+    await act(async () => {
+      readingModeButton('source').click();
+      readingModeButton('source').click();
+      await flushEffects();
+    });
+    expect(harness.searchHandle.waitForPendingImages).toHaveBeenCalledOnce();
+    expect(harness.sourceProps).toBeNull();
+    expect(host.querySelector('.editor-mode-pane--canvas')?.hasAttribute('hidden')).toBe(false);
+    await act(async () => {
+      harness.canvasProps?.onChange(withImage);
+      finishImage();
+      await flushEffects();
+    });
+    expect(harness.sourceProps?.value).toBe(documentToMarkdown(withImage));
+    await act(async () => { readingModeButton('canvas').click(); await flushEffects(); });
+    expect(harness.canvasProps?.initialDocument).toEqual(withImage);
+  });
+
+  it.each(['new', 'open'] as const)('drops a pending source-mode switch when %s replaces its document', async (replacement) => {
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    let finishImage!: () => void;
+    harness.searchHandle.waitForPendingImages.mockReturnValue(new Promise<void>((resolve) => { finishImage = resolve; }));
+    try {
+      await act(async () => { readingModeButton('source').click(); await flushEffects(); });
+      await act(async () => {
+        if (replacement === 'new') documentAction(getMessages().new).click();
+        else (await recentFileButton()).click();
+        await flushEffects();
+      });
+      const documentId = harness.canvasProps?.documentId;
+      const nextDocument = harness.canvasProps?.initialDocument;
+      await act(async () => { finishImage(); await flushEffects(); });
+      expect(harness.sourceProps).toBeNull();
+      expect(host.querySelector('.editor-mode-pane--canvas')?.hasAttribute('hidden')).toBe(false);
+      expect(harness.canvasProps?.documentId).toBe(documentId);
+      expect(harness.canvasProps?.initialDocument).toEqual(nextDocument);
+    } finally {
+      confirm.mockRestore();
+    }
   });
 
   it('preserves exact opened Markdown across reading switches and outline navigation without autosaving', async () => {
@@ -1156,6 +1203,31 @@ describe('App autosave cursor stability', () => {
     });
     expect(files.saveDraft).toHaveBeenCalledWith(expect.objectContaining({ sourceMarkdown }));
     confirm.mockRestore();
+  });
+
+  it.each([false, true])('persists an unnamed document rename after its existing draft has settled (edited=%s)', async (edited) => {
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const prompt = vi.spyOn(window, 'prompt').mockReturnValue('renamed.md');
+    files.renameEditorFile.mockImplementationOnce(async (candidate: EditorFile) => ({ ...candidate, name: 'renamed.md' }));
+    try {
+      await act(async () => { documentAction(getMessages().new).click(); await flushEffects(); });
+      if (edited) {
+        await act(async () => { harness.canvasProps?.onChange(markdownToDocument('# Draft content\n')); });
+        await act(async () => { await vi.advanceTimersByTimeAsync(100); await flushEffects(); });
+        await act(async () => { await vi.advanceTimersByTimeAsync(1000); await flushEffects(); });
+        expect(files.saveDraft).toHaveBeenCalledOnce();
+      }
+      files.saveDraft.mockClear();
+      await act(async () => { documentAction(getMessages().rename).click(); await flushEffects(); });
+      expect(host.querySelector('.document-name')?.textContent).toContain('renamed.md');
+      await act(async () => { await vi.advanceTimersByTimeAsync(100); await flushEffects(); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(1000); await flushEffects(); });
+      expect(files.saveDraft).toHaveBeenCalledWith(expect.objectContaining({ name: 'renamed.md', path: undefined }));
+      expect(files.saveEditorFile).not.toHaveBeenCalled();
+    } finally {
+      prompt.mockRestore();
+      confirm.mockRestore();
+    }
   });
 
   it('updates live Markdown image paths when a source document is renamed', async () => {

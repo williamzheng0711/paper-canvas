@@ -121,4 +121,143 @@ describe('canvas comment decorations', () => {
     expect(host.querySelectorAll('[data-comment-marker]').length).toBe(count);
     expect(elapsed).toBeLessThan(1_500);
   });
+
+  it('keeps point anchors at the displayed marker when text is inserted at their position', () => {
+    const { editor } = createEditor();
+    setPositions(editor, [
+      {
+        id: 'point',
+        kind: 'position',
+        from: 7,
+        to: 7,
+        status: 'active',
+        number: 1,
+      },
+    ]);
+
+    editor.view.dispatch(editor.state.tr.insertText('new ', 7, 7));
+
+    const state = commentDecorationsPluginKey.getState(editor.state)!;
+    expect(state.positions[0].from).toBe(state.decorations.find()[0].from);
+    expect(state.positions[0].from).toBe(11);
+    expect(state.positions[0].to).toBe(11);
+  });
+
+  it('keeps persisted range bounds consistent with the highlight after boundary insertions', () => {
+    const { editor, host } = createEditor();
+    setPositions(editor, [
+      {
+        id: 'range',
+        kind: 'range',
+        from: 7,
+        to: 11,
+        status: 'active',
+        number: 1,
+      },
+    ]);
+
+    editor.view.dispatch(editor.state.tr.insertText('new ', 7, 7));
+    editor.view.dispatch(editor.state.tr.insertText(' ending', 15, 15));
+
+    const state = commentDecorationsPluginKey.getState(editor.state)!;
+    const decoration = state.decorations.find()[0];
+    expect(state.positions[0].from).toBe(decoration.from);
+    expect(state.positions[0].to).toBe(decoration.to);
+    expect(host.querySelector('.comment-highlight')?.textContent).toBe('beta');
+    expect(state.positions[0].status).toBe('active');
+  });
+
+  it('keeps a range active when adjacent text is deleted', () => {
+    const { editor } = createEditor();
+    setPositions(editor, [
+      {
+        id: 'range',
+        kind: 'range',
+        from: 7,
+        to: 11,
+        status: 'active',
+        number: 1,
+      },
+    ]);
+
+    editor.view.dispatch(editor.state.tr.delete(1, 7));
+
+    expect(commentDecorationsPluginKey.getState(editor.state)?.positions[0]).toMatchObject({
+      from: 1,
+      to: 5,
+      status: 'active',
+    });
+  });
+
+  it('keeps a collapsed range aligned with its marker on later insertion', () => {
+    const { editor } = createEditor();
+    setPositions(editor, [
+      {
+        id: 'range',
+        kind: 'range',
+        from: 7,
+        to: 11,
+        status: 'active',
+        number: 1,
+      },
+    ]);
+    editor.view.dispatch(editor.state.tr.delete(7, 11));
+
+    editor.view.dispatch(editor.state.tr.insertText('new ', 7, 7));
+
+    const state = commentDecorationsPluginKey.getState(editor.state)!;
+    expect(state.positions[0]).toMatchObject({
+      from: 11,
+      to: 11,
+      status: 'needs-review',
+    });
+    expect(state.decorations.find()[0].from).toBe(11);
+  });
+
+  it('retains a review highlight when its entire range is replaced again', () => {
+    const { editor, host } = createEditor();
+    setPositions(editor, [
+      {
+        id: 'range',
+        kind: 'range',
+        from: 7,
+        to: 11,
+        status: 'needs-review',
+        number: 1,
+      },
+    ]);
+
+    editor.view.dispatch(editor.state.tr.insertText('replacement', 7, 11));
+
+    const state = commentDecorationsPluginKey.getState(editor.state)!;
+    expect(state.positions[0]).toMatchObject({
+      from: 7,
+      to: 18,
+      status: 'needs-review',
+    });
+    expect(host.querySelector('.comment-highlight')?.textContent).toBe('replacement');
+  });
+
+  it('maps each step in a compound edit using the updated range bounds', () => {
+    const { editor, host } = createEditor();
+    setPositions(editor, [{ id: 'range', kind: 'range', from: 7, to: 11, status: 'active', number: 1 }]);
+
+    editor.view.dispatch(editor.state.tr.insertText('replacement', 7, 11).insertText('new ', 7, 7));
+
+    const state = commentDecorationsPluginKey.getState(editor.state)!;
+    expect(state.positions[0]).toMatchObject({ from: 11, to: 22, status: 'needs-review' });
+    expect(host.querySelector('.comment-highlight')?.textContent).toBe('replacement');
+  });
+
+  it('keeps a deleted range collapsed through later steps in the same transaction', () => {
+    const { editor, host } = createEditor();
+    setPositions(editor, [{ id: 'range', kind: 'range', from: 7, to: 11, status: 'active', number: 1 }]);
+
+    editor.view.dispatch(editor.state.tr.delete(7, 11).insertText('new ', 7, 7));
+
+    const state = commentDecorationsPluginKey.getState(editor.state)!;
+    expect(state.positions[0]).toMatchObject({ from: 11, to: 11, status: 'needs-review' });
+    expect(host.querySelector('.comment-highlight')).toBeNull();
+    expect(state.decorations.find()[0].from).toBe(11);
+  });
 });

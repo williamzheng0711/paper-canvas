@@ -8,6 +8,7 @@ import StarterKit from '@tiptap/starter-kit';
 import { common, createLowlight } from 'lowlight';
 import { forwardRef, memo, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useRef } from 'react';
 import type { Editor, JSONContent } from '@tiptap/core';
+import type { Slice } from '@tiptap/pm/model';
 import { Selection, TextSelection, type SelectionBookmark } from '@tiptap/pm/state';
 import type { EditorView } from '@tiptap/pm/view';
 import {
@@ -82,16 +83,38 @@ function readImage(file: File): Promise<string> {
   });
 }
 
-function insertImage(view: EditorView, src: string, alt = '', position?: number): void {
+type ImageInsertionTarget =
+  | { kind: 'paste'; selection: SelectionBookmark; content: Slice }
+  | { kind: 'drop'; position: number };
+
+type PendingImageInsertion = {
+  documentId: number;
+  target: ImageInsertionTarget;
+  completion?: Promise<void>;
+};
+
+function insertImage(view: EditorView, src: string, alt: string, target: ImageInsertionTarget): void {
   const imageNode = view.state.schema.nodes.image;
   if (!imageNode) return;
   const image = imageNode.create({ src, alt });
+  const currentSelection = view.state.selection.getBookmark();
+  let pasteSelection: Selection | undefined;
+  if (target.kind === 'paste') {
+    pasteSelection = target.selection.resolve(view.state.doc);
+    if (!view.state.doc.slice(pasteSelection.from, pasteSelection.to).eq(target.content)) {
+      // Intervening edits to a selected range belong to the user. Insert after
+      // that range instead of replacing newly typed or modified content.
+      pasteSelection = Selection.near(view.state.doc.resolve(pasteSelection.to), -1);
+    }
+  }
   const transaction =
-    position === undefined
-      ? view.state.tr.replaceSelectionWith(image)
-      : view.state.tr.replaceRangeWith(position, position, image);
+    target.kind === 'paste'
+      ? view.state.tr.setSelection(pasteSelection!).replaceSelectionWith(image)
+      : view.state.tr.replaceRangeWith(target.position, target.position, image);
+  transaction.setSelection(currentSelection.map(transaction.mapping).resolve(transaction.doc));
+  const restoreFocus = view.hasFocus();
   view.dispatch(transaction.scrollIntoView());
-  view.focus();
+  if (restoreFocus) view.focus();
 }
 
 function markdownOffsetAtPosition(editor: Editor, position: number): number | undefined {
@@ -348,6 +371,7 @@ export const CanvasEditor = memo(
   const lastMappedCommentsRef = useRef<readonly MarkdownComment[] | undefined>(undefined);
   const decorationSignatureRef = useRef<string | undefined>(undefined);
   const decorationDocumentIdRef = useRef<number | undefined>(undefined);
+  const pendingImagesRef = useRef(new Set<PendingImageInsertion>());
 
   const flushCommentMapping = useCallback(() => {
     if (commentSyncTimerRef.current !== undefined) {
@@ -382,18 +406,31 @@ export const CanvasEditor = memo(
   }, [flushCommentMapping]);
 
   const readAndInsertImage = useCallback((image: File, position?: number) => {
+    const originatingEditor = editorRef.current;
+    if (!originatingEditor) return;
     const originatingDocumentId = documentSnapshot.current.id;
+    const insertion: PendingImageInsertion = {
+      documentId: originatingDocumentId,
+      target: position === undefined
+        ? {
+            kind: 'paste',
+            selection: originatingEditor.state.selection.getBookmark(),
+            content: originatingEditor.state.doc.slice(originatingEditor.state.selection.from, originatingEditor.state.selection.to),
+          }
+        : { kind: 'drop', position },
+    };
+    pendingImagesRef.current.add(insertion);
     const currentView = () => {
       const currentEditor = editorRef.current;
       return componentMountedRef.current && currentEditor && !currentEditor.isDestroyed && documentSnapshot.current.id === originatingDocumentId
         ? currentEditor.view : undefined;
     };
-    void readImage(image).then((src) => {
+    insertion.completion = readImage(image).then((src) => {
       const view = currentView();
-      if (view) insertImage(view, src, image.name, position);
+      if (view) insertImage(view, src, image.name, insertion.target);
     }).catch((error: unknown) => {
       if (currentView()) onLinkErrorRef.current?.(error instanceof Error ? error.message : getMessages().imageReadFailed);
-    });
+    }).finally(() => { pendingImagesRef.current.delete(insertion); });
   }, []);
 
   const editor = useEditor(
@@ -542,6 +579,18 @@ export const CanvasEditor = memo(
             return false;
           },
         },
+      },
+      onTransaction: ({ editor: currentEditor, transaction }) => {
+        // Recreating the editor restores the same document with a complete
+        // replacement transaction. Only map through edits to the active editor.
+        if (!transaction.docChanged || appliedDocument.current?.editor !== currentEditor ||
+          appliedDocument.current.id !== documentSnapshot.current.id) return;
+        for (const insertion of pendingImagesRef.current) {
+          if (insertion.documentId !== documentSnapshot.current.id) continue;
+          insertion.target = insertion.target.kind === 'paste'
+            ? { ...insertion.target, selection: insertion.target.selection.map(transaction.mapping) }
+            : { kind: 'drop', position: transaction.mapping.map(insertion.target.position) };
+        }
       },
       onUpdate: ({ editor: currentEditor }) => {
         documentSnapshot.current.live = currentEditor.state.doc;
@@ -731,6 +780,18 @@ export const CanvasEditor = memo(
         contextSelectionRef.current = undefined;
       },
       flushCommentMapping,
+      waitForPendingImages: () => {
+        const originatingDocumentId = documentSnapshot.current.id;
+        const pending = () => [...pendingImagesRef.current].filter((insertion) => insertion.documentId === originatingDocumentId);
+        if (pending().length === 0) return undefined;
+        return (async () => {
+          while (documentSnapshot.current.id === originatingDocumentId) {
+            const insertions = pending();
+            if (insertions.length === 0) return;
+            await Promise.all(insertions.map((insertion) => insertion.completion));
+          }
+        })();
+      },
       isFocused: () => editor ? editor.view.hasFocus() || Boolean(focusedFormulaSelection(editor.view)) : false,
       requestMeasure: () => undefined,
     }),

@@ -190,6 +190,7 @@ export default function App() {
   const markdownSearch = useRef<SwitchableEditorHandle>(null);
   const canvasArea = useRef<HTMLElement>(null);
   const pendingModeTransition = useRef<PendingModeTransition | undefined>(undefined);
+  const pendingSourceModeWait = useRef<{ session: number } | undefined>(undefined);
   const modeTransitionFrame = useRef<number | undefined>(undefined);
   const sourceCommentSyncTimerRef = useRef<number | undefined>(undefined);
   const revisionSyncTimerRef = useRef<number | undefined>(undefined);
@@ -918,13 +919,16 @@ export default function App() {
         fileRef.current = nextFile;
         setFile(nextFile);
         if (documentChanged) setDocumentId((id) => id + 1);
+        // An unnamed document's filename lives only in its recovery draft.
+        // Reschedule that draft even when its content was already autosaved.
+        if (!currentFile.path && nextFile.name !== currentFile.name) markEdited();
         setMessage(getMessages().renamedFile(renamed.name));
         setRecent(await loadRecent());
       } catch (error) {
         if (documentSessionRef.current === session) setMessage(error instanceof Error ? error.message : getMessages().renameFailed);
       }
     });
-  }, [clearSourceCommentSync, flushCanvasChanges, queueFileOperation, setExternalRawMarkdown]);
+  }, [clearSourceCommentSync, flushCanvasChanges, markEdited, queueFileOperation, setExternalRawMarkdown]);
 
   const activeSearchEditor = useCallback(
     () => (sourceModeRef.current ? markdownSearch.current : canvasSearch.current),
@@ -1068,8 +1072,29 @@ export default function App() {
     return offset !== undefined && offset >= 0 && offset <= (canvasArea.current?.clientHeight ?? 0);
   };
 
-  const toggleSourceMode = () => {
-    if (!sourceMode) {
+  const toggleSourceMode = async () => {
+    if (!sourceModeRef.current) {
+      const session = documentSessionRef.current;
+      if (pendingSourceModeWait.current?.session === session) return;
+      const pendingImages = canvasSearch.current?.waitForPendingImages?.();
+      if (pendingImages) {
+        const waiting = { session };
+        pendingSourceModeWait.current = waiting;
+        try {
+          // A pending image must reach the canvas before we serialize source.
+          // Otherwise it would arrive in the hidden canvas and disappear when
+          // the unchanged Markdown is parsed on the next reading-mode switch.
+          await pendingImages;
+        } catch (error) {
+          if (documentSessionRef.current === session) {
+            setMessage(error instanceof Error ? error.message : getMessages().imageReadFailed);
+          }
+          return;
+        } finally {
+          if (pendingSourceModeWait.current === waiting) pendingSourceModeWait.current = undefined;
+        }
+        if (documentSessionRef.current !== session || sourceModeRef.current) return;
+      }
       flushCanvasChanges();
       const mappedSelection = visibleEditorSelection() ? canvasSearch.current?.getMarkdownSelection?.() : undefined;
       const currentFile = fileRef.current;
@@ -1358,7 +1383,7 @@ export default function App() {
             aria-label={text.backToCanvas}
             aria-pressed={!sourceMode}
             onPointerDown={(event) => { if (event.button === 0) event.preventDefault(); }}
-            onClick={() => { if (sourceMode) toggleSourceMode(); }}
+            onClick={() => { if (sourceMode) void toggleSourceMode(); }}
           >
             {text.canvas}
           </button>
@@ -1368,7 +1393,7 @@ export default function App() {
             aria-label={text.showMarkdownSource}
             aria-pressed={sourceMode}
             onPointerDown={(event) => { if (event.button === 0) event.preventDefault(); }}
-            onClick={() => { if (!sourceMode) toggleSourceMode(); }}
+            onClick={() => { if (!sourceMode) void toggleSourceMode(); }}
           >
             Markdown
           </button>
