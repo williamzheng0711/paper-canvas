@@ -28,6 +28,8 @@ import { MarkdownTyping } from '../editor/markdownTyping';
 import { QuoteTyping } from '../editor/quoteTyping';
 import { IndentedListInput } from '../editor/indentedListInput';
 import { TaskListInput } from '../editor/taskListInput';
+import { FootnoteReference, FootnoteDefinition } from '../editor/Footnote';
+import { PaperOrderedList } from '../editor/PaperOrderedList';
 import { HtmlPreview, InlineHtmlPreview } from '../editor/HtmlPreview';
 import { replaceDocumentPreservingSelection } from '../editor/documentSync';
 import { documentToMarkdown } from '../editor/markdown';
@@ -436,7 +438,10 @@ export const CanvasEditor = memo(
   const editor = useEditor(
     {
       extensions: [
-        StarterKit.configure({ code: false, codeBlock: false, link: false }),
+        StarterKit.configure({ code: false, codeBlock: false, link: false, orderedList: false, trailingNode: { notAfter: ['footnoteDefinition'] } }),
+        PaperOrderedList,
+        FootnoteReference.configure({ referenceLabel: text.footnoteReferenceLabel, backlinkLabel: text.footnoteBacklinkLabel }),
+        FootnoteDefinition.configure({ referenceLabel: text.footnoteReferenceLabel, backlinkLabel: text.footnoteBacklinkLabel }),
         PaperCode,
         CodeBlockLowlight.configure({ lowlight }),
         PaperLink.configure({

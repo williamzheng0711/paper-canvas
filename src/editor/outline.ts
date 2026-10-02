@@ -2,7 +2,9 @@ import type { JSONContent } from '@tiptap/core';
 import { getMessages } from '../i18n';
 import { createHtmlPreview } from './HtmlPreview';
 
-const headingSelector = ':scope > h1, :scope > h2, :scope > h3, :scope > h4, :scope > h5, :scope > h6';
+const headingSelector = 'h1, h2, h3, h4, h5, h6';
+const headingContainerSelector =
+  'blockquote, ul, ol, li, table, thead, tbody, tfoot, tr, td, th, .tableWrapper, .footnote-definition, .footnote-content, li[data-checked] > div, li[data-type="taskItem"] > div';
 
 function readableText(text: string): string {
   return text.replace(/\s+/g, ' ').trim();
@@ -48,16 +50,33 @@ function headingNodeText(node: JSONContent): string {
 }
 
 export function collectOutline(document: JSONContent): Array<{ level: number; text: string }> {
-  return (document.content ?? [])
-    .filter((node) => node.type === 'heading')
-    .map((node) => ({
-      level: Number(node.attrs?.level ?? 1),
-      text: readableText(headingNodeText(node)) || getMessages().unnamedHeading,
-    }));
+  const walk = (node: JSONContent): Array<{ level: number; text: string }> =>
+    node.type === 'heading'
+      ? [
+          {
+            level: Number(node.attrs?.level ?? 1),
+            text: readableText(headingNodeText(node)) || getMessages().unnamedHeading,
+          },
+        ]
+      : (node.content ?? []).flatMap(walk);
+  return walk(document);
+}
+
+/** Follow native editor containers, keeping preview HTML outside the outline. */
+export function renderedOutlineHeadings(editorRoot: HTMLElement): HTMLElement[] {
+  const headings: HTMLElement[] = [];
+  const walk = (parent: Element) => {
+    for (const child of parent.children) {
+      if (child instanceof HTMLElement && child.matches(headingSelector)) headings.push(child);
+      else if (child.matches(headingContainerSelector)) walk(child);
+    }
+  };
+  walk(editorRoot);
+  return headings;
 }
 
 export function scrollToOutlineHeading(editorRoot: HTMLElement, index: number): boolean {
-  const heading = editorRoot.querySelectorAll<HTMLElement>(headingSelector).item(index);
+  const heading = renderedOutlineHeadings(editorRoot)[index];
   if (!heading) return false;
   const scrollContainer = editorRoot.closest<HTMLElement>('.canvas-area');
   if (scrollContainer) {

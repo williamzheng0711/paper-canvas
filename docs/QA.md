@@ -45,8 +45,20 @@ Use a temporary copy for intentional edits.
 - Rename an unnamed draft, including an empty one, and restart. Confirm recovery
   restores the new filename. Paste an image, immediately switch to Markdown,
   and confirm the completed image survives switching back and saving.
-- Unsupported footnotes, ordered task lists, and image-containing headings/table
-  cells retain recoverable Markdown source. Relative links to another Markdown
+- Footnotes render as numbered references and editable notes. Click references
+  and backlinks, edit a note, and switch modes; labels, repeated references,
+  nested blocks, and formulas must remain. Ordered task lists retain their starting
+  number and ordinary siblings when toggled, typed, split with Enter, or reopened.
+- Navigate into a note beginning with a formula, then type in its explanation;
+  the formula must remain. Follow nested notes from repeated references and
+  return with backlinks; every note must return to its own last reference.
+- Copy and paste numbered tasks, footnotes with math, merged table cells, and
+  resized images between documents; numbering, checked states, note bodies,
+  alignment, cell spans, and dimensions must survive.
+- Import display TeX inside list or footnote continuation paragraphs. The formula
+  and following text must remain within the same item or note; indented code
+  examples must remain literal.
+- Image-containing headings/table cells retain recoverable Markdown source. Relative links to another Markdown
   file report a status message; they do not navigate the editor away.
 
 Run `npm test`, `npm run lint`, `npm run build`, and `cargo test --offline` from

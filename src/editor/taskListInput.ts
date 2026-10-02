@@ -5,7 +5,7 @@ import { canJoin } from "@tiptap/pm/transform";
 
 const taskMarker = /^\[([ xX])\]\s$/;
 
-/** Converts a marker typed into a bullet item into a task item. */
+/** Converts a marker typed into a list item into a task item. */
 export const TaskListInput = Extension.create({
   name: "taskListInput",
   priority: 1000,
@@ -29,6 +29,39 @@ export const TaskListInput = Extension.create({
               undefined,
               {
                 ...$marker.node(-1).attrs,
+                checked: match[1].toLowerCase() === "x",
+              },
+            );
+            return;
+          }
+
+          // An ordered list accepts task and ordinary items together. Change
+          // only the item type so its number and every neighboring item survive.
+          if (
+            $marker.depth >= 3 &&
+            $marker.node(-1).type.name === "listItem" &&
+            $marker.node(-2).type.name === "orderedList" &&
+            $marker.parentOffset === 0 &&
+            $marker.index(-1) === 0
+          ) {
+            const taskItem = state.schema.nodes.taskItem;
+            const item = $marker.node(-1);
+            const list = $marker.node(-2);
+            if (
+              !taskItem ||
+              !list.canReplaceWith(
+                $marker.index(-2),
+                $marker.index(-2) + 1,
+                taskItem,
+              )
+            )
+              return;
+            state.tr.delete(range.from, range.to);
+            state.tr.setNodeMarkup(
+              $marker.before($marker.depth - 1),
+              taskItem,
+              {
+                ...item.attrs,
                 checked: match[1].toLowerCase() === "x",
               },
             );

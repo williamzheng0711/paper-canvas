@@ -12,13 +12,18 @@ import { describe, expect, it } from "vitest";
 import { InlineFormula, BlockFormula } from "./Formula";
 import { HtmlPreview, InlineHtmlPreview, htmlPreviewText } from "./HtmlPreview";
 import { PaperImage } from "./PaperImage";
+import { FootnoteReference, FootnoteDefinition } from "./Footnote";
+import { PaperOrderedList } from "./PaperOrderedList";
 import { PaperCode, PaperLink } from "./PaperLink";
 import { PaperTableCell, PaperTableHeader } from "./PaperTable";
 import { UnsupportedMarkdown } from "./UnsupportedMarkdown";
 import { documentToMarkdown, markdownToDocument } from "./markdown";
 
 const schema = getSchema([
-  StarterKit.configure({ code: false, link: false }),
+  StarterKit.configure({ code: false, link: false, orderedList: false }),
+  PaperOrderedList,
+  FootnoteReference,
+  FootnoteDefinition,
   PaperCode,
   PaperLink,
   PaperImage,
@@ -284,17 +289,32 @@ describe("reading fixtures in the real editor schema", () => {
   });
 
   it("preserves image sources and the task checkbox when unrelated text is edited", () => {
-    const source = '# ![Logo](logo.svg "Logo title") Title\n\n- [x] [![Badge](badge.svg)](https://example.com/guide "Guide title")\n\n| Figure |\n| :---: |\n| ![Diagram](diagram.png "Figure title") |\n\nOriginal text.';
-    const imported = ProseMirrorNode.fromJSON(schema, markdownToDocument(source));
+    const source =
+      '# ![Logo](logo.svg "Logo title") Title\n\n- [x] [![Badge](badge.svg)](https://example.com/guide "Guide title")\n\n| Figure |\n| :---: |\n| ![Diagram](diagram.png "Figure title") |\n\nOriginal text.';
+    const imported = ProseMirrorNode.fromJSON(
+      schema,
+      markdownToDocument(source),
+    );
     expect(() => imported.check()).not.toThrow();
     const edited = imported.toJSON();
     edited.content!.at(-1)!.content = [{ type: "text", text: "Edited text." }];
     const serialized = documentToMarkdown(edited);
     expect(serialized).toContain("[x]");
     expect(serialized).toContain("Edited text.");
-    for (const value of ["logo.svg", "Logo title", "badge.svg", "https://example.com/guide", "Guide title", "diagram.png", "Figure title"])
+    for (const value of [
+      "logo.svg",
+      "Logo title",
+      "badge.svg",
+      "https://example.com/guide",
+      "Guide title",
+      "diagram.png",
+      "Figure title",
+    ])
       expect(serialized).toContain(value);
-    const reopened = ProseMirrorNode.fromJSON(schema, markdownToDocument(serialized));
+    const reopened = ProseMirrorNode.fromJSON(
+      schema,
+      markdownToDocument(serialized),
+    );
     expect(() => reopened.check()).not.toThrow();
     expect(reopened.toJSON()).toEqual(edited);
     expect(reopened.child(1).firstChild?.attrs.checked).toBe(true);
@@ -327,15 +347,21 @@ describe("reading fixtures in the real editor schema", () => {
     "# **Cost $x^2$** and [$y$](https://example.com)",
     "| Formula | Value |\n| :--- | ---: |\n| **$x^2$** | $y$ |",
     "**Cost $x^2$** and *$x$ plus $y$*.",
-    "[Cost $x^2$](https://example.com \"Price\")",
+    '[Cost $x^2$](https://example.com "Price")',
     "***Cost $x^2$*** and ~~$x$ plus $y$~~.",
     "**Press <kbd>Ctrl</kbd>** then **$x$**.",
     "| Formula |\n| --- |\n| **Cost $x^2$** |",
   ])("keeps adversarial reading content valid and stable: %s", (source) => {
-    const imported = ProseMirrorNode.fromJSON(schema, markdownToDocument(source));
+    const imported = ProseMirrorNode.fromJSON(
+      schema,
+      markdownToDocument(source),
+    );
     expect(() => imported.check()).not.toThrow();
     const serialized = documentToMarkdown(imported.toJSON());
-    const reopened = ProseMirrorNode.fromJSON(schema, markdownToDocument(serialized));
+    const reopened = ProseMirrorNode.fromJSON(
+      schema,
+      markdownToDocument(serialized),
+    );
     expect(() => reopened.check()).not.toThrow();
     expect(reopened.toJSON()).toEqual(imported.toJSON());
   });
@@ -348,40 +374,67 @@ describe("reading fixtures in the real editor schema", () => {
     "1. ![Diagram](diagram.png)",
     "- # An item beginning with a heading",
     "- ```ts\n  const value = 1;\n  ```",
-  ])("keeps the required list-item paragraph and authored content: %s", (source) => {
-    const imported = ProseMirrorNode.fromJSON(schema, markdownToDocument(source));
-    expect(() => imported.check()).not.toThrow();
-    const serialized = documentToMarkdown(imported.toJSON());
-    const reopened = ProseMirrorNode.fromJSON(schema, markdownToDocument(serialized));
-    expect(() => reopened.check()).not.toThrow();
-    expect(reopened.toJSON()).toEqual(imported.toJSON());
-    if (source.includes("[x]")) expect(serialized).toContain("[x]");
-    if (source.includes("[ ]")) expect(serialized).toContain("[ ]");
-    if (source.includes("diagram.png")) expect(serialized).toContain("diagram.png");
-    if (source.includes("badge.png")) {
-      expect(serialized).toContain("badge.png");
-      expect(serialized).toContain("https://example.com/guide");
-    }
-  });
+  ])(
+    "keeps the required list-item paragraph and authored content: %s",
+    (source) => {
+      const imported = ProseMirrorNode.fromJSON(
+        schema,
+        markdownToDocument(source),
+      );
+      expect(() => imported.check()).not.toThrow();
+      const serialized = documentToMarkdown(imported.toJSON());
+      const reopened = ProseMirrorNode.fromJSON(
+        schema,
+        markdownToDocument(serialized),
+      );
+      expect(() => reopened.check()).not.toThrow();
+      expect(reopened.toJSON()).toEqual(imported.toJSON());
+      if (source.includes("[x]")) expect(serialized).toContain("[x]");
+      if (source.includes("[ ]")) expect(serialized).toContain("[ ]");
+      if (source.includes("diagram.png"))
+        expect(serialized).toContain("diagram.png");
+      if (source.includes("badge.png")) {
+        expect(serialized).toContain("badge.png");
+        expect(serialized).toContain("https://example.com/guide");
+      }
+    },
+  );
 
   it.each([
     '# ![Logo](logo.svg "Logo title") Title',
     '# [![Badge](badge.svg)](https://example.com/guide "Read guide") Title',
     '| Figure |\n| :---: |\n| ![Diagram](diagram.png "Figure title") |',
     '| Figure |\n| ---: |\n| [![Badge][image]][guide] |\n\n[image]: badge.svg "Badge title"\n[guide]: https://example.com/guide',
-  ])("preserves image-bearing headings and tables without invalid inline images: %s", (source) => {
-    const imported = ProseMirrorNode.fromJSON(schema, markdownToDocument(source));
-    expect(() => imported.check()).not.toThrow();
-    expect(imported.firstChild?.type.name).toBe("unsupportedMarkdown");
-    const serialized = documentToMarkdown(imported.toJSON());
-    const reopened = ProseMirrorNode.fromJSON(schema, markdownToDocument(serialized));
-    expect(() => reopened.check()).not.toThrow();
-    expect(reopened.toJSON()).toEqual(imported.toJSON());
-    for (const value of ["logo.svg", "badge.svg", "diagram.png", "https://example.com/guide", "Logo title", "Figure title", "Badge title"]) {
-      if (source.includes(value)) expect(serialized).toContain(value);
-    }
-    if (source.includes(":---:")) expect(serialized).toMatch(/:-+:|:-+\s*:/);
-  });
+  ])(
+    "preserves image-bearing headings and tables without invalid inline images: %s",
+    (source) => {
+      const imported = ProseMirrorNode.fromJSON(
+        schema,
+        markdownToDocument(source),
+      );
+      expect(() => imported.check()).not.toThrow();
+      expect(imported.firstChild?.type.name).toBe("unsupportedMarkdown");
+      const serialized = documentToMarkdown(imported.toJSON());
+      const reopened = ProseMirrorNode.fromJSON(
+        schema,
+        markdownToDocument(serialized),
+      );
+      expect(() => reopened.check()).not.toThrow();
+      expect(reopened.toJSON()).toEqual(imported.toJSON());
+      for (const value of [
+        "logo.svg",
+        "badge.svg",
+        "diagram.png",
+        "https://example.com/guide",
+        "Logo title",
+        "Figure title",
+        "Badge title",
+      ]) {
+        if (source.includes(value)) expect(serialized).toContain(value);
+      }
+      if (source.includes(":---:")) expect(serialized).toMatch(/:-+:|:-+\s*:/);
+    },
+  );
 
   it.each(["remark-gfm-readme.md", "reading-edge-cases.md"])(
     "loads %s without schema-invalid or silently discarded content",

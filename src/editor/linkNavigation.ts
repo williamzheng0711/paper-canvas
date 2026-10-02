@@ -1,13 +1,14 @@
 import { invoke, isTauri } from '@tauri-apps/api/core';
-import { renderedHeadingText, scrollToOutlineHeading } from './outline';
+import { renderedHeadingText, renderedOutlineHeadings, scrollToOutlineHeading } from './outline';
 
 type DocumentLinkTarget = { kind: 'fragment'; fragment: string } | { kind: 'external'; url: string };
 
 /** Keep navigation out of the editable webview and reject executable URL schemes. */
 export function documentLinkTarget(href: string): DocumentLinkTarget | undefined {
-  if (href.startsWith('#')) return { kind: 'fragment', fragment: href.slice(1) };
+  const normalized = href.trim();
+  if (normalized.startsWith('#')) return { kind: 'fragment', fragment: normalized.slice(1) };
   try {
-    const url = new URL(href);
+    const url = new URL(normalized);
     if (url.protocol === 'mailto:' || ((url.protocol === 'https:' || url.protocol === 'http:') && url.hostname)) {
       return { kind: 'external', url: url.href };
     }
@@ -44,7 +45,7 @@ export function scrollToDocumentFragment(editorRoot: HTMLElement, fragment: stri
     } else explicitTarget.scrollIntoView?.({ block: 'start', behavior: 'smooth' });
     return true;
   }
-  const headings = [...editorRoot.querySelectorAll<HTMLElement>(':scope > h1, :scope > h2, :scope > h3, :scope > h4, :scope > h5, :scope > h6')];
+  const headings = renderedOutlineHeadings(editorRoot);
   const usedSlugs = new Set<string>();
   for (let index = 0; index < headings.length; index += 1) {
     const base = headingSlug(renderedHeadingText(headings[index]));

@@ -140,6 +140,18 @@ export const IndentedListInput = Extension.create({
             $cursor.index(-1) === 0
           ) {
             state.tr.delete(range.from, range.to);
+            // Enter continues a checkbox as another task. An explicit numbered
+            // prefix starts an ordinary item; a following [ ] marker can turn
+            // it back into a task without disturbing the list's numbering.
+            if (
+              listName === "orderedList" &&
+              $cursor.node(-1).type.name === "taskItem"
+            ) {
+              state.tr.setNodeMarkup(
+                $cursor.before($cursor.depth - 1),
+                itemType,
+              );
+            }
             return;
           }
           if (outerDepth) {

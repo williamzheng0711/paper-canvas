@@ -1,15 +1,20 @@
 import { Editor } from '@tiptap/core';
 import StarterKit from '@tiptap/starter-kit';
+import TaskList from '@tiptap/extension-task-list';
+import TaskItem from '@tiptap/extension-task-item';
 import { describe, expect, it, vi } from 'vitest';
 import { getMessages } from '../i18n';
 import { focusFormulaSource, InlineFormula } from './Formula';
 import { InlineHtmlPreview } from './HtmlPreview';
+import { FootnoteDefinition, FootnoteReference } from './Footnote';
 import { markdownToDocument } from './markdown';
 import { collectOutline, renderedHeadingText, scrollToOutlineHeading } from './outline';
 
 describe('outline navigation', () => {
   it('labels formulas and inline HTML using authored content rather than editor controls', () => {
-    const document = markdownToDocument('# Cost $x^2$\n\n## Use <kbd>Ctrl</kbd> &amp; <sup>2</sup>\n\n### $\\alpha$\n\n## <!-- hidden -->');
+    const document = markdownToDocument(
+      '# Cost $x^2$\n\n## Use <kbd>Ctrl</kbd> &amp; <sup>2</sup>\n\n### $\\alpha$\n\n## <!-- hidden -->',
+    );
     expect(collectOutline(document)).toEqual([
       { level: 1, text: 'Cost x^2' },
       { level: 2, text: 'Use Ctrl & 2' },
@@ -34,7 +39,8 @@ describe('outline navigation', () => {
 
   it('excludes hidden preview comments and helper controls from rendered labels', () => {
     const heading = document.createElement('h2');
-    heading.innerHTML = 'Visible <span hidden>comment source</span><span aria-hidden="true">duplicate</span><button>Copy</button><br>text';
+    heading.innerHTML =
+      'Visible <span hidden>comment source</span><span aria-hidden="true">duplicate</span><button>Copy</button><br>text';
     expect(renderedHeadingText(heading)).toBe('Visible text');
   });
 
@@ -43,7 +49,14 @@ describe('outline navigation', () => {
       type: 'doc',
       content: [
         { type: 'heading', attrs: { level: 1 }, content: [{ type: 'inlineFormula', attrs: { latex: '' } }] },
-        { type: 'heading', attrs: { level: 2 }, content: [{ type: 'text', text: 'Cost ' }, { type: 'inlineFormula', attrs: { latex: 'x^2' } }] },
+        {
+          type: 'heading',
+          attrs: { level: 2 },
+          content: [
+            { type: 'text', text: 'Cost ' },
+            { type: 'inlineFormula', attrs: { latex: 'x^2' } },
+          ],
+        },
       ],
     };
     const editor = new Editor({ extensions: [StarterKit, InlineFormula], content });
@@ -94,5 +107,63 @@ describe('outline navigation', () => {
 
     expect(scrollToOutlineHeading(editor, 0)).toBe(true);
     expect(canvas.scrollTo).toHaveBeenCalledWith({ top: 536, behavior: 'smooth' });
+  });
+
+  it('keeps native nested headings in the same source and canvas document order', () => {
+    const content = markdownToDocument(
+      '# Root\n\n> ## Quoted $x^2$\n\n- Item\n\n  ### Nested list heading\n\n[^note]: #### Footnote heading',
+    );
+    const editor = new Editor({
+      extensions: [StarterKit, InlineFormula, InlineHtmlPreview, FootnoteReference, FootnoteDefinition],
+      content,
+    });
+    try {
+      expect(collectOutline(content)).toEqual([
+        { level: 1, text: 'Root' },
+        { level: 2, text: 'Quoted x^2' },
+        { level: 3, text: 'Nested list heading' },
+        { level: 4, text: 'Footnote heading' },
+      ]);
+      const headings = Array.from(editor.view.dom.querySelectorAll<HTMLElement>('h1, h2, h3, h4'));
+      const scrolls = headings.map((heading) => {
+        const scroll = vi.fn();
+        Object.defineProperty(heading, 'scrollIntoView', { value: scroll });
+        return scroll;
+      });
+      expect(scrollToOutlineHeading(editor.view.dom, 1)).toBe(true);
+      expect(scrolls[1]).toHaveBeenCalledOnce();
+      expect(scrollToOutlineHeading(editor.view.dom, 2)).toBe(true);
+      expect(scrolls[2]).toHaveBeenCalledOnce();
+      expect(scrollToOutlineHeading(editor.view.dom, 3)).toBe(true);
+      expect(scrolls[3]).toHaveBeenCalledOnce();
+    } finally {
+      editor.destroy();
+    }
+  });
+
+  it.each(['live', 'serialized'])('keeps %s task-item wrappers in source and canvas heading order', (mode) => {
+    const content = markdownToDocument('- [x] Task\n\n  ## Nested task heading\n\n# Later');
+    const editor = new Editor({ extensions: [StarterKit, TaskList, TaskItem.configure({ nested: true })], content });
+    try {
+      expect(collectOutline(content)).toEqual([
+        { level: 2, text: 'Nested task heading' },
+        { level: 1, text: 'Later' },
+      ]);
+      const root = mode === 'live' ? editor.view.dom : document.createElement('article');
+      if (mode === 'serialized') root.innerHTML = editor.getHTML();
+      const taskHeading = root.querySelector<HTMLElement>('li h2')!;
+      const laterHeading = root.querySelector<HTMLElement>('h1')!;
+      const taskScroll = vi.fn();
+      const laterScroll = vi.fn();
+      Object.defineProperty(taskHeading, 'scrollIntoView', { value: taskScroll });
+      Object.defineProperty(laterHeading, 'scrollIntoView', { value: laterScroll });
+      expect(scrollToOutlineHeading(root, 0)).toBe(true);
+      expect(taskScroll).toHaveBeenCalledOnce();
+      expect(laterScroll).not.toHaveBeenCalled();
+      expect(scrollToOutlineHeading(root, 1)).toBe(true);
+      expect(laterScroll).toHaveBeenCalledOnce();
+    } finally {
+      editor.destroy();
+    }
   });
 });

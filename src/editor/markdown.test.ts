@@ -106,6 +106,54 @@ S(\\theta')\\le n\\ \\text{MB},
     expect(JSON.stringify(document)).not.toContain("\\\\[");
   });
 
+  it.each([
+    "    \\[x^2+y^2\\]",
+    "    \\[\n    x^2+y^2\n    \\]",
+    "    \\begin{equation}\n    x^2+y^2\n    \\end{equation}",
+    "    $$x^2+y^2$$",
+  ])(
+    "keeps nested display math inside a footnote continuation: %s",
+    (formula) => {
+      const source = `Reference[^note].\n\n[^note]: Explanation.\n\n${formula}\n\n    Following text.`;
+      const document = markdownToDocument(source);
+      const note = nodesOfType(document, "footnoteDefinition")[0];
+      expect(nodesOfType(note, "blockFormula")).toHaveLength(1);
+      expect(document.content?.map((node) => node.type)).toEqual([
+        "paragraph",
+        "footnoteDefinition",
+      ]);
+      expect(JSON.stringify(note)).toContain("Following text.");
+      expect(markdownToDocument(documentToMarkdown(document))).toEqual(
+        document,
+      );
+    },
+  );
+
+  it("keeps display TeX and following prose inside a numbered list item", () => {
+    const source =
+      "3. Explanation.\n\n   \\[\n   x^2+y^2\n   \\]\n\n   Following text.\n\n4. Next item.";
+    const document = markdownToDocument(source);
+    const list = document.content?.[0];
+    expect(list?.type).toBe("orderedList");
+    expect(list?.attrs?.start).toBe(3);
+    expect(list?.content).toHaveLength(2);
+    expect(nodesOfType(list!.content![0], "blockFormula")).toHaveLength(1);
+    expect(JSON.stringify(list?.content?.[0])).toContain("Following text.");
+    expect(document.content).toHaveLength(1);
+    expect(markdownToDocument(documentToMarkdown(document))).toEqual(document);
+  });
+
+  it("keeps indented display TeX literal when the parser identifies it as code", () => {
+    const source =
+      "Example:\n\n    \\[x^2\\]\n    \\begin{equation}\n    y^2\n    \\end{equation}";
+    expect(normalizeLatexDelimiters(source)).toBe(source);
+    const document = markdownToDocument(source);
+    expect(nodesOfType(document, "blockFormula")).toHaveLength(0);
+    expect(nodesOfType(document, "codeBlock")[0].content?.[0].text).toContain(
+      "\\[x^2\\]",
+    );
+  });
+
   it("imports standalone LaTeX display environments and keeps their wrappers", () => {
     const source = `Before
 
@@ -380,16 +428,19 @@ unclosed`;
     );
   });
 
-  it("keeps unsupported footnote references inline and their definitions recoverable", () => {
+  it("imports editable footnote references and definitions with stable source labels", () => {
     const source = "A note[^1].\n\n[^1]: Preserved note.";
     const document = markdownToDocument(source);
     expect(document.content?.[0]?.content?.map((node) => node.type)).toEqual([
       "text",
-      "inlineHtmlPreview",
+      "footnoteReference",
       "text",
     ]);
     expect(documentToMarkdown(document)).toContain("[^1]");
     expect(documentToMarkdown(document)).toContain("[^1]: Preserved note.");
+    expect(nodesOfType(document, "footnoteDefinition")).toHaveLength(1);
+    expect(nodesOfType(document, "unsupportedMarkdown")).toHaveLength(0);
+    expect(markdownToDocument(documentToMarkdown(document))).toEqual(document);
   });
 
   it("keeps all items in mixed ordinary and task bullet lists in document order", () => {
@@ -413,11 +464,20 @@ unclosed`;
     ).toHaveLength(2);
   });
 
-  it("preserves ordered task lists as source instead of silently losing their numbering", () => {
+  it("imports mixed numbered task lists with editable items and stable numbering", () => {
     const source = "3. [x] Third\n4. Plain fourth";
-    const serialized = documentToMarkdown(markdownToDocument(source));
+    const document = markdownToDocument(source);
+    expect(document.content?.[0]?.type).toBe("orderedList");
+    expect(document.content?.[0]?.attrs?.start).toBe(3);
+    expect(document.content?.[0]?.content?.map((node) => node.type)).toEqual([
+      "taskItem",
+      "listItem",
+    ]);
+    expect(nodesOfType(document, "unsupportedMarkdown")).toHaveLength(0);
+    const serialized = documentToMarkdown(document);
     expect(serialized).toContain("3. [x] Third");
     expect(serialized).toContain("4. Plain fourth");
+    expect(markdownToDocument(serialized)).toEqual(document);
   });
 
   it("imports the official remark-gfm demo with working reference links and stable code samples", () => {

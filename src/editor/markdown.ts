@@ -23,6 +23,7 @@ type MdNode = {
   title?: string | null;
   lang?: string | null;
   identifier?: string;
+  label?: string;
   position?: { start: { offset?: number }; end: { offset?: number } };
   align?: Array<"left" | "right" | "center" | null>;
 };
@@ -129,7 +130,11 @@ export function normalizeLatexDelimiters(markdown: string): string {
   let bracketOpeningIndex: number | null = null;
   let bracketOpeningSource = "";
   let dollarDisplayBlock = false;
-  let latexEnvironment: { name: string; openingIndex: number } | null = null;
+  let latexEnvironment: {
+    name: string;
+    openingIndex: number;
+    indent: string;
+  } | null = null;
   let lineOffset = 0;
   let rangeIndex = 0;
 
@@ -157,14 +162,15 @@ export function normalizeLatexDelimiters(markdown: string): string {
           `\\\\end\\{${latexEnvironment.name.replace(/\*/g, "\\*")}\\}\\s*$`,
         ).test(line)
       ) {
-        normalized.push("$$");
+        normalized.push(`${latexEnvironment.indent}$$`);
         latexEnvironment = null;
       }
       continue;
     }
     if (bracketOpeningIndex !== null) {
-      if (/^\s*\\\]\s*$/.test(line)) {
-        normalized.push("$$");
+      const closing = /^([ \t]*)\\\]\s*$/.exec(line);
+      if (closing) {
+        normalized.push(`${closing[1]}$$`);
         bracketOpeningIndex = null;
         bracketOpeningSource = "";
       } else {
@@ -200,11 +206,9 @@ export function normalizeLatexDelimiters(markdown: string): string {
       continue;
     }
 
-    // Four-space and tab-indented code must win over math delimiter detection.
-    if (/^(?: {4}|\t)/.test(line)) {
-      normalized.push(line);
-      continue;
-    }
+    // Actual indented code is protected by parser ranges above. Indentation
+    // alone also occurs in list and footnote continuation paragraphs, where
+    // inline TeX must still be converted into an editable formula.
 
     if (dollarDisplayBlock) {
       normalized.push(line);
@@ -219,42 +223,43 @@ export function normalizeLatexDelimiters(markdown: string): string {
 
     // Expand complete display lines here, where code fences are already
     // excluded. A document-wide replacement also changes literal code samples.
-    const sameLineDollarDisplay = /^ {0,3}\$\$([^\n]+)\$\$\s*$/.exec(line);
+    const sameLineDollarDisplay = /^([ \t]*)\$\$([^\n]+)\$\$\s*$/.exec(line);
     if (sameLineDollarDisplay) {
-      normalized.push("$$", sameLineDollarDisplay[1], "$$");
+      const [, indent, latex] = sameLineDollarDisplay;
+      normalized.push(`${indent}$$`, `${indent}${latex}`, `${indent}$$`);
       continue;
     }
 
-    const sameLineBracketDisplay = /^\s*\\\[\s*([\s\S]*?\S)\s*\\\]\s*$/.exec(
-      line,
-    );
+    const sameLineBracketDisplay =
+      /^([ \t]*)\\\[\s*([\s\S]*?\S)\s*\\\]\s*$/.exec(line);
     if (sameLineBracketDisplay) {
-      normalized.push("$$", sameLineBracketDisplay[1], "$$");
+      const [, indent, latex] = sameLineBracketDisplay;
+      normalized.push(`${indent}$$`, `${indent}${latex}`, `${indent}$$`);
       continue;
     }
 
-    if (/^\s*\\\[\s*$/.test(line)) {
+    const bracketOpening = /^([ \t]*)\\\[\s*$/.exec(line);
+    if (bracketOpening) {
       bracketOpeningIndex = normalized.length;
       bracketOpeningSource = line;
-      normalized.push("$$");
+      normalized.push(`${bracketOpening[1]}$$`);
       continue;
     }
 
-    const environmentOpening = /^\s*\\begin\{([A-Za-z][A-Za-z0-9_*-]*)\}/.exec(
-      line,
-    );
+    const environmentOpening =
+      /^([ \t]*)\\begin\{([A-Za-z][A-Za-z0-9_*-]*)\}/.exec(line);
     if (
       environmentOpening &&
-      isDisplayLatexEnvironment(environmentOpening[1])
+      isDisplayLatexEnvironment(environmentOpening[2])
     ) {
-      const name = environmentOpening[1];
+      const [, indent, name] = environmentOpening;
       const closing = new RegExp(
         `\\\\end\\{${name.replace(/\*/g, "\\*")}\\}\\s*$`,
       );
       const openingIndex = normalized.length;
-      normalized.push("$$", line);
-      if (closing.test(line)) normalized.push("$$");
-      else latexEnvironment = { name, openingIndex };
+      normalized.push(`${indent}$$`, line);
+      if (closing.test(line)) normalized.push(`${indent}$$`);
+      else latexEnvironment = { name, openingIndex, indent };
       continue;
     }
     normalized.push(normalizeInlineLatexDelimiters(line));
@@ -392,7 +397,7 @@ function unsupported(
     type: "unsupportedMarkdown",
     attrs: {
       source,
-      reason: reason ?? getMessages().unsupportedStructure(node.type),
+      reason: reason ?? getMessages().unsupportedMarkdownReason,
     },
   };
 }
@@ -452,9 +457,12 @@ function applyMark(
           }
         : node;
     }
-    return ["text", "inlineFormula", "inlineHtmlPreview"].includes(
-      node.type ?? "",
-    )
+    return [
+      "text",
+      "inlineFormula",
+      "inlineHtmlPreview",
+      "footnoteReference",
+    ].includes(node.type ?? "")
       ? {
           ...node,
           marks: [...(node.marks ?? []), mark].sort((left, right) =>
@@ -539,6 +547,29 @@ function fromMdast(
       return [{ type: "image", attrs: imageAttributes(node) }];
     case "inlineMath":
       return [{ type: "inlineFormula", attrs: { latex: node.value ?? "" } }];
+    case "footnoteReference":
+      return [
+        {
+          type: "footnoteReference",
+          attrs: {
+            identifier: node.identifier ?? "",
+            label: node.label ?? node.identifier ?? "",
+          },
+        },
+      ];
+    case "footnoteDefinition": {
+      const children = content(node.children);
+      return [
+        {
+          type: "footnoteDefinition",
+          attrs: {
+            identifier: node.identifier ?? "",
+            label: node.label ?? node.identifier ?? "",
+          },
+          content: children.length ? children : [{ type: "paragraph" }],
+        },
+      ];
+    }
     case "break":
       return [{ type: "hardBreak" }];
     case "paragraph": {
@@ -596,8 +627,14 @@ function fromMdast(
     case "list": {
       const isTask = (child: MdNode) =>
         child.checked !== null && child.checked !== undefined;
-      if (node.ordered && node.children?.some(isTask))
-        return [unsupported(node)];
+      if (node.ordered)
+        return [
+          {
+            type: "orderedList",
+            attrs: { start: node.start ?? 1 },
+            content: content(node.children),
+          },
+        ];
       // The task-list schema accepts only taskItem children. Keep ordinary
       // bullet items in adjacent lists instead of silently discarding them.
       const runs: Array<{ task: boolean; items: MdNode[] }> = [];
@@ -608,12 +645,7 @@ function fromMdast(
         else runs.push({ task, items: [child] });
       }
       return runs.map((run) => ({
-        type: run.task
-          ? "taskList"
-          : node.ordered
-            ? "orderedList"
-            : "bulletList",
-        attrs: node.ordered ? { start: node.start ?? 1 } : undefined,
+        type: run.task ? "taskList" : "bulletList",
         content: content(run.items),
       }));
     }
@@ -753,7 +785,9 @@ function toMdast(node: JSONContent): MdNode | null {
     if (!converted) return [];
     return [
       child.type === "image" &&
-      ["blockquote", "listItem", "taskItem"].includes(node.type ?? "")
+      ["blockquote", "listItem", "taskItem", "footnoteDefinition"].includes(
+        node.type ?? "",
+      )
         ? { type: "paragraph", children: [converted] }
         : converted,
     ];
@@ -777,6 +811,19 @@ function toMdast(node: JSONContent): MdNode | null {
       };
     case "blockquote":
       return { type: "blockquote", children: childNodes };
+    case "footnoteReference":
+      return wrapInlineMarks(node, {
+        type: "footnoteReference",
+        identifier: String(node.attrs?.identifier ?? ""),
+        label: String(node.attrs?.label ?? node.attrs?.identifier ?? ""),
+      });
+    case "footnoteDefinition":
+      return {
+        type: "footnoteDefinition",
+        identifier: String(node.attrs?.identifier ?? ""),
+        label: String(node.attrs?.label ?? node.attrs?.identifier ?? ""),
+        children: childNodes,
+      };
     case "bulletList":
       return { type: "list", ordered: false, children: childNodes };
     case "orderedList":
