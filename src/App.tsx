@@ -188,6 +188,8 @@ export default function App() {
   const pendingSaveSession = useRef<number | undefined>(undefined);
   const fileOperationQueue = useRef<Promise<void>>(Promise.resolve());
   const preferencesLoaded = useRef(false);
+  const skipInitialPreferenceSave = useRef(false);
+  const preferencesRef = useRef(preferences);
   const fileRef = useRef(file);
   const dirtyRef = useRef(dirty);
   const editRevisionRef = useRef(editRevision);
@@ -196,7 +198,7 @@ export default function App() {
   const rawMarkdownRef = useRef('');
   const openedByOperatingSystem = useRef(false);
   const startupRef = useRef<{
-    request: Promise<[RecentFile[], AppPreferences, EditorFile | null]>;
+    request: Promise<[PromiseSettledResult<RecentFile[]>, PromiseSettledResult<AppPreferences>, PromiseSettledResult<EditorFile | null>]>;
     session: number;
     revision: number;
     applied: boolean;
@@ -226,6 +228,7 @@ export default function App() {
   fileRef.current = file;
   dirtyRef.current = dirty;
   sourceModeRef.current = sourceMode;
+  preferencesRef.current = preferences;
 
   const closeToolbarMenus = useCallback(() => {
     setRenameRequest(null);
@@ -298,10 +301,9 @@ export default function App() {
   }, [advanceRevision]);
 
   const flushCanvasChanges = useCallback(() => {
-    // CanvasEditor uses this callback to publish deferred document/comment
-    // updates. A clean canvas has nothing pending, and flushing it would emit
-    // an unchanged document through onChange and falsely mark the file dirty.
-    if (dirtyRef.current) canvasSearch.current?.flushCommentMapping?.();
+    // Formula composition can hold visible text before the canvas is dirty.
+    // CanvasEditor publishes only pending input/document/comment changes.
+    canvasSearch.current?.flushCommentMapping?.();
   }, []);
 
   const clearSourceCommentSync = useCallback(() => {
@@ -461,7 +463,7 @@ export default function App() {
   useEffect(() => {
     if (!startupRef.current) {
       startupRef.current = {
-        request: Promise.all([loadRecent(), loadPreferences(), loadDraft()]),
+        request: Promise.allSettled([loadRecent(), loadPreferences(), loadDraft()]),
         session: documentSessionRef.current,
         revision: editRevisionRef.current,
         applied: false,
@@ -471,16 +473,26 @@ export default function App() {
     if (startup.applied) return;
     let active = true;
     void startup.request
-      .then(([loadedRecent, loadedPreferences, draft]) => {
+      .then(([recentResult, preferencesResult, draftResult]) => {
         if (!active || startup.applied) return;
         startup.applied = true;
         const documentUntouched =
           documentSessionRef.current === startup.session && editRevisionRef.current === startup.revision;
+        const loadedRecent = recentResult.status === 'fulfilled' ? recentResult.value : [];
+        const loadedPreferences = preferencesResult.status === 'fulfilled' ? preferencesResult.value : { ...preferencesRef.current };
+        const draft = draftResult.status === 'fulfilled' ? draftResult.value : null;
+        const failed = [recentResult, preferencesResult, draftResult].find((result) => result.status === 'rejected');
+        const startupError = failed?.status === 'rejected'
+          ? failed.reason instanceof Error ? failed.reason.message : getMessages(loadedPreferences.language).loadSettingsFailed
+          : undefined;
         setCurrentLanguage(loadedPreferences.language);
         document.documentElement.lang = loadedPreferences.language;
         const loadedText = getMessages(loadedPreferences.language);
         if (!openedByOperatingSystem.current) setRecent(loadedRecent);
         preferencesLoaded.current = true;
+        // A failed settings read must not immediately overwrite the existing
+        // settings with defaults. Later explicit changes can still be saved.
+        skipInitialPreferenceSave.current = preferencesResult.status === 'rejected';
         setPreferences(loadedPreferences);
         setFontSizeInput(String(loadedPreferences.fontSize));
         setLineSpacingInput(String(loadedPreferences.lineSpacing));
@@ -495,9 +507,9 @@ export default function App() {
           dirtyRef.current = true;
           setDirty(true);
           setSaveStatus('draft');
-          setMessage(loadedText.restoredDraft);
+          setMessage(normalizedDraft.commentWarning ?? (startupError ? `${loadedText.restoredDraft} ${startupError}` : loadedText.restoredDraft));
         } else if (documentUntouched && !openedByOperatingSystem.current) {
-          setMessage(loadedText.localOnly);
+          setMessage(startupError ?? loadedText.localOnly);
         }
       })
       .catch((error: unknown) => {
@@ -510,6 +522,10 @@ export default function App() {
 
   useEffect(() => {
     if (!preferencesLoaded.current) return;
+    if (skipInitialPreferenceSave.current) {
+      skipInitialPreferenceSave.current = false;
+      return;
+    }
     let active = true;
     void savePreferences(preferences).catch((error: unknown) => {
       if (active) setMessage(error instanceof Error ? error.message : getMessages().loadSettingsFailed);

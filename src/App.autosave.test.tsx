@@ -64,7 +64,7 @@ const files = vi.hoisted(() => ({
   })),
   flushSettings: vi.fn<() => Promise<void>>(async () => undefined),
   loadDraft: vi.fn(),
-  loadPreferences: vi.fn(async () => ({
+  loadPreferences: vi.fn<() => Promise<FileLibrary.AppPreferences>>(async () => ({
     theme: 'light' as const,
     font: 'system' as const,
     fontSize: 18,
@@ -336,6 +336,60 @@ describe('App autosave cursor stability', () => {
     expect(files.loadPreferences).toHaveBeenCalledOnce();
     expect(files.loadRecent).toHaveBeenCalledOnce();
     expect(harness.canvasProps?.initialDocument).toEqual(savedDocument);
+  });
+
+  it.each(['history', 'preferences'] as const)('recovers available writing when startup %s is unavailable', async (unavailable) => {
+    await act(async () => root.unmount());
+    const failure = new Error(`${unavailable} unavailable`);
+    if (unavailable === 'history') files.loadRecent.mockRejectedValueOnce(failure);
+    else files.loadPreferences.mockRejectedValueOnce(failure);
+    files.savePreferences.mockClear();
+    root = createRoot(host);
+    await act(async () => { root.render(<App />); await flushEffects(); });
+    expect(harness.canvasProps?.initialDocument).toEqual(savedDocument);
+    expect(host.querySelector('.status-message')?.textContent).toContain(failure.message);
+    expect(host.querySelector('.dirty-dot')).not.toBeNull();
+    if (unavailable === 'preferences') expect(files.savePreferences).not.toHaveBeenCalled();
+  });
+
+  it('shows a recovery warning while retaining available writing', async () => {
+    await act(async () => root.unmount());
+    files.loadDraft.mockResolvedValueOnce({ name: 'Recovered.md', document: savedDocument, comments: [], commentWarning: 'Damaged comments preserved for recovery' });
+    root = createRoot(host);
+    await act(async () => { root.render(<App />); await flushEffects(); });
+    expect(harness.canvasProps?.initialDocument).toEqual(savedDocument);
+    expect(host.querySelector('.status-message')?.textContent).toBe('Damaged comments preserved for recovery');
+  });
+
+  it('retains an unread preferences file until the user explicitly changes a setting', async () => {
+    await act(async () => root.unmount());
+    files.loadPreferences.mockRejectedValueOnce(new Error('preferences unavailable'));
+    files.savePreferences.mockClear();
+    root = createRoot(host);
+    await act(async () => { root.render(<App />); await flushEffects(); });
+    expect(files.savePreferences).not.toHaveBeenCalled();
+    const font = host.querySelector<HTMLSelectElement>('.typography-popover select');
+    expect(font).not.toBeNull();
+    await act(async () => {
+      font!.value = 'mono';
+      font!.dispatchEvent(new Event('change', { bubbles: true }));
+      await flushEffects();
+    });
+    expect(files.savePreferences).toHaveBeenCalledWith(expect.objectContaining({ font: 'mono' }));
+  });
+
+  it('reports inaccessible recovery data while retaining successfully loaded preferences and history', async () => {
+    await act(async () => root.unmount());
+    files.loadDraft.mockRejectedValueOnce(new Error('Recovery data could not be read'));
+    files.loadRecent.mockResolvedValueOnce([{ path: '/tmp/available.md', name: 'available.md' }]);
+    files.loadPreferences.mockResolvedValueOnce({
+      theme: 'light', font: 'mono', fontSize: 15, lineSpacing: 1.62,
+      sidebarOpen: true, recentFilesExpanded: true, language: 'zh-Hant',
+    });
+    root = createRoot(host);
+    await act(async () => { root.render(<App />); await flushEffects(); });
+    expect(host.querySelector('.status-message')?.textContent).toBe('Recovery data could not be read');
+    expect(host.querySelector<HTMLSelectElement>('.typography-popover select')?.value).toBe('mono');
   });
 
   it('saves typing before the autosave delay when the native window closes', async () => {
@@ -689,6 +743,11 @@ describe('App autosave cursor stability', () => {
   });
 
   it('does not mark an unchanged canvas dirty when switching to Markdown mode', async () => {
+    const sourceMarkdown = '\uFEFF# Exact  source\r\n\r\n| A | B |\r\n| - | - |\r\n| First | Last |\r\n';
+    await act(async () => root.unmount());
+    files.loadDraft.mockResolvedValueOnce({ path: '/tmp/research.md', name: 'research.md', sourceMarkdown, document: markdownToDocument(sourceMarkdown) });
+    root = createRoot(host);
+    await act(async () => { root.render(<App />); await flushEffects(); });
     const save = documentAction('儲存');
     await act(async () => {
       save?.click();
@@ -697,10 +756,8 @@ describe('App autosave cursor stability', () => {
     expect(files.saveEditorFile).toHaveBeenCalledOnce();
     files.saveEditorFile.mockClear();
     harness.searchHandle.flushCommentMapping.mockClear();
-    harness.searchHandle.flushCommentMapping.mockImplementation(() => {
-      const props = harness.canvasProps;
-      if (props) props.onChange(props.initialDocument);
-    });
+    // A clean real canvas does not publish an unchanged snapshot when flushed.
+    harness.searchHandle.flushCommentMapping.mockImplementation(() => undefined);
     const showSource = readingModeButton('source');
 
     await act(async () => {
@@ -710,8 +767,21 @@ describe('App autosave cursor stability', () => {
       await flushEffects();
     });
 
-    expect(harness.searchHandle.flushCommentMapping).not.toHaveBeenCalled();
+    expect(harness.searchHandle.flushCommentMapping).toHaveBeenCalledOnce();
+    expect(harness.sourceProps?.value).toBe(sourceMarkdown);
     expect(files.saveEditorFile).not.toHaveBeenCalled();
+  });
+
+  it('publishes pending formula composition from a clean canvas before switching to source', async () => {
+    await act(async () => { documentAction(getMessages().save).click(); await flushEffects(); });
+    expect(host.querySelector('.dirty-dot')).toBeNull();
+    const composed = markdownToDocument('Value $\\theta$');
+    harness.searchHandle.flushCommentMapping.mockImplementation(() => {
+      harness.canvasProps?.onChange(composed);
+    });
+    await act(async () => { readingModeButton('source').click(); await flushEffects(); });
+    expect(harness.sourceProps?.value).toBe(documentToMarkdown(composed));
+    expect(host.querySelector('.dirty-dot')).not.toBeNull();
   });
 
   it.each(['new', 'open'] as const)('starts a fresh canvas session when %s replaces a document', async (action) => {

@@ -1,9 +1,11 @@
 import Link from "@tiptap/extension-link";
 import Code from "@tiptap/extension-code";
+import type { Attribute } from "@tiptap/core";
 
 export const PaperLink = Link.extend({
   addAttributes() {
-    return { ...this.parent?.(), title: { default: null } };
+    const inherited = this.parent?.() as Record<string, Attribute> | undefined;
+    return { ...inherited, href: { ...inherited?.href, validate: "string|null" }, title: { default: null } };
   },
 });
 

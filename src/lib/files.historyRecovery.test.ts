@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { getMessages } from "../i18n";
 import {
   hideRecentFile,
   loadDraft,
@@ -15,7 +16,7 @@ const harness = vi.hoisted(() => ({
 vi.mock("@tauri-apps/api/core", () => ({
   isTauri: () => harness.native,
   convertFileSrc: (path: string) => `asset:${path}`,
-  invoke: vi.fn(),
+  invoke: vi.fn(async () => undefined),
 }));
 vi.mock("@tauri-apps/plugin-store", () => ({
   Store: {
@@ -81,6 +82,13 @@ describe.each([
     expect(await loadRecent()).toEqual([valid, older]);
   });
 
+  it("limits extreme stored history to twelve distinct visible files in its original order", async () => {
+    const visible = Array.from({ length: 100000 }, (_, index) => ({ path: `/${index}.md`, name: "x" }));
+    write("recentFiles", [null, hidden, valid, { ...valid, name: "Duplicate filename" }, ...visible]);
+    write("hiddenRecentFiles", [hidden.path]);
+    expect(await loadRecent()).toEqual([valid, ...visible.slice(0, 11)]);
+  });
+
   it("does not let malformed history prevent recovering valid startup preferences and writing", async () => {
     write("recentFiles", [valid, null, unnamed]);
     write("hiddenRecentFiles", {});
@@ -94,6 +102,18 @@ describe.each([
     expect(recent).toEqual([valid, older]);
     expect(preferences.fontSize).toBe(19);
     expect(recovered).toEqual(draft);
+  });
+
+  it("keeps startup history and preferences available when a damaged draft reports recovery failure", async () => {
+    const damaged = { name: "Original.md", document: { type: "doc", content: [{ type: "unknownFutureNode" }] } };
+    write("recentFiles", [valid]);
+    write("preferences", { compactLayoutVersion: 1, fontSize: 19 });
+    write("unsavedDraft", damaged);
+    const [recent, preferences, recovered] = await Promise.allSettled([loadRecent(), loadPreferences(), loadDraft()]);
+    expect(recent).toEqual({ status: "fulfilled", value: [valid] });
+    expect(preferences).toEqual({ status: "fulfilled", value: expect.objectContaining({ fontSize: 19 }) });
+    expect(recovered).toEqual({ status: "rejected", reason: new Error(getMessages().draftRecoveryFailed) });
+    expect(read("unsavedDraft")).toEqual(damaged);
   });
 
   it("preserves recovered history when another file is remembered", async () => {

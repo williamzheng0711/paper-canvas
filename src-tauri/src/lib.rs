@@ -185,6 +185,53 @@ async fn write_markdown_file(app: AppHandle, path: String, contents: String) -> 
     .map_err(|error| error.to_string())?
 }
 
+fn recovery_draft_path(app: &AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_data_dir()
+        .map(|directory| directory.join("recovery-draft.json"))
+        .map_err(|error| error.to_string())
+}
+
+fn read_recovery_draft_file(path: &Path) -> Result<Option<String>, String> {
+    match std::fs::read_to_string(path) {
+        Ok(contents) => Ok(Some(contents)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn write_recovery_draft_file(path: &Path, contents: &str) -> Result<(), String> {
+    let directory = path.parent().ok_or("The recovery directory is invalid.")?;
+    std::fs::create_dir_all(directory).map_err(|error| error.to_string())?;
+    replace_file_atomically(path, |file| file.write_all(contents.as_bytes()))
+}
+
+#[tauri::command]
+async fn read_recovery_draft(app: AppHandle) -> Result<Option<String>, String> {
+    let path = recovery_draft_path(&app)?;
+    tauri::async_runtime::spawn_blocking(move || read_recovery_draft_file(&path))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn write_recovery_draft(app: AppHandle, contents: String) -> Result<(), String> {
+    let path = recovery_draft_path(&app)?;
+    tauri::async_runtime::spawn_blocking(move || write_recovery_draft_file(&path, &contents))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn clear_recovery_draft(app: AppHandle) -> Result<(), String> {
+    let path = recovery_draft_path(&app)?;
+    // A durable tombstone also suppresses an older legacy settings-store draft
+    // if its supplementary cleanup is interrupted or fails.
+    tauri::async_runtime::spawn_blocking(move || write_recovery_draft_file(&path, "null"))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
 fn document_asset_directory(path: &Path) -> Result<PathBuf, String> {
     if !path.is_absolute()
         || path
@@ -689,6 +736,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             take_opened_files,
             write_markdown_file,
+            read_recovery_draft,
+            write_recovery_draft,
+            clear_recovery_draft,
             allow_document_assets,
             allow_document_rename,
             rename_document_entry,
@@ -878,6 +928,49 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(std::fs::read_to_string(&target).unwrap(), original);
         assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn recovery_drafts_commit_exact_json_and_clear_with_a_durable_tombstone() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("new-app-data/recovery-draft.json");
+        assert_eq!(read_recovery_draft_file(&path).unwrap(), None);
+        let contents = r#"{"name":"中文 🧪.md","sourceMarkdown":"\ud800\r\nLatest writing"}"#;
+        write_recovery_draft_file(&path, contents).unwrap();
+        assert_eq!(
+            read_recovery_draft_file(&path).unwrap().as_deref(),
+            Some(contents)
+        );
+        let result = replace_file_atomically(&path, |file| {
+            file.write_all(b"{partial")?;
+            Err(std::io::Error::other(
+                "simulated interrupted recovery write",
+            ))
+        });
+        assert!(result.is_err());
+        assert_eq!(
+            read_recovery_draft_file(&path).unwrap().as_deref(),
+            Some(contents)
+        );
+        write_recovery_draft_file(&path, "null").unwrap();
+        assert_eq!(
+            read_recovery_draft_file(&path).unwrap().as_deref(),
+            Some("null")
+        );
+        assert_eq!(
+            std::fs::read_dir(path.parent().unwrap()).unwrap().count(),
+            1
+        );
+    }
+
+    #[test]
+    fn recovery_draft_read_errors_do_not_silently_mean_no_draft() {
+        let directory = tempfile::tempdir().unwrap();
+        assert!(read_recovery_draft_file(directory.path()).is_err());
+        let path = directory.path().join("recovery-draft.json");
+        std::fs::write(&path, [0xff]).unwrap();
+        assert!(read_recovery_draft_file(&path).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), [0xff]);
     }
 
     #[test]

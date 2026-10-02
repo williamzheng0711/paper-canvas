@@ -1,6 +1,7 @@
-import { getSchema, type JSONContent } from '@tiptap/core';
+import { getSchema, type Attribute, type JSONContent } from '@tiptap/core';
 import type { Schema } from '@tiptap/pm/model';
 import StarterKit from '@tiptap/starter-kit';
+import Heading from '@tiptap/extension-heading';
 import CodeBlockLowlight from '@tiptap/extension-code-block-lowlight';
 import { Table, TableRow } from '@tiptap/extension-table';
 import TaskItem from '@tiptap/extension-task-item';
@@ -18,6 +19,20 @@ import { PaperTrailingNode } from './PaperTrailingNode';
 import { UnsupportedMarkdown } from './UnsupportedMarkdown';
 
 const lowlight = createLowlight(common);
+const PaperHeading = Heading.extend({
+  addAttributes() {
+    const inherited = this.parent?.() as Record<string, Attribute> | undefined;
+    return { ...inherited, level: { ...inherited?.level, validate: (value: unknown) => {
+      if (typeof value !== 'number' || !Number.isInteger(value) || !this.options.levels.some((level) => level === value)) throw new RangeError('Invalid heading level');
+    } } };
+  },
+});
+const PaperCodeBlock = CodeBlockLowlight.extend({
+  addAttributes() {
+    const inherited = this.parent?.() as Record<string, Attribute> | undefined;
+    return { ...inherited, language: { ...inherited?.language, validate: 'string|null' } };
+  },
+});
 
 /** The persisted node/mark schema shared by the canvas and recovery validation. */
 export function canvasNodesAndMarks(
@@ -29,13 +44,14 @@ export function canvasNodesAndMarks(
     backlinkLabel: (number: string) => getText().footnoteBacklinkLabel(number),
   };
   return [
-    StarterKit.configure({ code: false, codeBlock: false, link: false, orderedList: false, trailingNode: false }),
+    StarterKit.configure({ code: false, codeBlock: false, heading: false, link: false, orderedList: false, trailingNode: false }),
+    PaperHeading,
     PaperTrailingNode.configure({ notAfter: ['footnoteDefinition', 'unsupportedMarkdown'] }),
     PaperOrderedList,
     FootnoteReference.configure(footnoteLabels),
     FootnoteDefinition.configure(footnoteLabels),
     PaperCode,
-    CodeBlockLowlight.configure({ lowlight }),
+    PaperCodeBlock.configure({ lowlight }),
     PaperLink.configure({ openOnClick: false, autolink: true, defaultProtocol: 'https' }),
     PaperImage.configure({
       getDocumentPath,

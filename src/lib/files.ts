@@ -552,13 +552,18 @@ function hiddenRecentPaths(value: unknown): Set<string> {
 function visibleRecentFiles(value: unknown, hiddenValue: unknown): RecentFile[] {
   if (!Array.isArray(value)) return [];
   const hidden = hiddenRecentPaths(hiddenValue);
-  return value.flatMap((item) => {
-    if (!item || typeof item !== 'object' || typeof item.path !== 'string' || !item.path.trim() || hidden.has(item.path)) return [];
-    return [{
+  const files: RecentFile[] = [];
+  const seen = new Set<string>();
+  for (const item of value) {
+    if (!item || typeof item !== 'object' || typeof item.path !== 'string' || !item.path.trim() || hidden.has(item.path) || seen.has(item.path)) continue;
+    seen.add(item.path);
+    files.push({
       path: item.path,
       name: typeof item.name === 'string' && item.name.trim() ? item.name : fileName(item.path),
-    }];
-  });
+    });
+    if (files.length === 12) break;
+  }
+  return files;
 }
 
 export async function loadRecent(): Promise<RecentFile[]> {
@@ -718,44 +723,74 @@ export async function openRecent(recent: RecentFile): Promise<EditorFile | null>
 function restoredDraft(value: unknown): EditorFile | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const draft = value as Partial<EditorFile>;
-  const name = typeof draft.name === 'string' && draft.name ? draft.name : getMessages().untitledFilename;
+  const name = typeof draft.name === 'string' && draft.name.trim() ? draft.name : getMessages().untitledFilename;
   // Exact source is authoritative. A stale or damaged cache must not turn a
   // recoverable draft into an empty editor, or carry invalid comments into it.
   if (typeof draft.sourceMarkdown === 'string') {
     return editorFileFromMarkdown(draft.sourceMarkdown, undefined, name);
   }
   if (!isValidCanvasDocument(draft.document)) return null;
-  let comments = draft.comments;
+  let markdown: string;
   try {
-    // Validate cached comments through their persisted format as well.
-    const markdown = documentToPortableMarkdown(draft.document, draft.comments);
-    const parsed = parseMarkdownComments(markdown);
-    if (parsed.status === 'invalid') return null;
-    if (comments !== undefined) comments = parsed.comments;
+    markdown = documentToPortableMarkdown(draft.document);
   } catch {
     return null;
   }
-  return { ...draft, path: undefined, name, ...(comments !== undefined ? { comments } : {}) } as EditorFile;
+  let comments = draft.comments;
+  let commentWarning = typeof draft.commentWarning === 'string' ? draft.commentWarning : undefined;
+  if (comments !== undefined) {
+    try {
+      const parsed = parseMarkdownComments(serializeMarkdownWithComments(markdown, comments));
+      if (parsed.status === 'invalid' || parsed.status === 'unknown-version') throw new Error('Invalid cached comments');
+      comments = parsed.comments;
+    } catch {
+      // Supplementary metadata damage must not abandon recoverable writing.
+      comments = [];
+      commentWarning = getMessages().commentDataWarning;
+    }
+  }
+  return { name, document: draft.document, ...(comments !== undefined ? { comments } : {}), ...(commentWarning !== undefined ? { commentWarning } : {}) };
 }
 
-export async function loadDraft(): Promise<EditorFile | null> {
-  if (isTauri()) {
-    const store = await Store.load(settingsKey, { autoSave: 200 });
-    return restoredDraft(await store.get<unknown>(draftKey));
-  }
-  try {
-    return restoredDraft(JSON.parse(localStorage.getItem(draftKey) ?? 'null'));
-  } catch {
-    return null;
-  }
+function restoreDraftOrThrow(value: unknown): EditorFile | null {
+  const draft = restoredDraft(value);
+  if (!draft && value !== undefined && value !== null) throw new Error(getMessages().draftRecoveryFailed);
+  return draft;
+}
+
+export function loadDraft(): Promise<EditorFile | null> {
+  return queueSettingsMutation(async () => {
+    if (isTauri()) {
+      const serialized = await invoke<string | null>('read_recovery_draft');
+      if (typeof serialized === 'string') {
+        try {
+          return restoreDraftOrThrow(JSON.parse(serialized));
+        } catch {
+          throw new Error(getMessages().draftRecoveryFailed);
+        }
+      }
+      const store = await Store.load(settingsKey, { autoSave: 200 });
+      const legacy = await store.get<unknown>(draftKey);
+      // Copy the original record, including damaged supplementary metadata.
+      // Migration failure must not prevent restoring readable legacy writing.
+      if (legacy !== undefined && legacy !== null) {
+        await invoke('write_recovery_draft', { contents: JSON.stringify(legacy) }).catch(() => undefined);
+      }
+      return restoreDraftOrThrow(legacy);
+    }
+    try {
+      return restoreDraftOrThrow(JSON.parse(localStorage.getItem(draftKey) ?? 'null'));
+    } catch {
+      throw new Error(getMessages().draftRecoveryFailed);
+    }
+  });
 }
 
 export function saveDraft(file: EditorFile): Promise<void> {
   const draft = { ...file, path: undefined };
   return queueSettingsMutation(async () => {
     if (isTauri()) {
-      const store = await Store.load(settingsKey, { autoSave: 200 });
-      await store.set(draftKey, draft);
+      await invoke('write_recovery_draft', { contents: JSON.stringify(draft) });
       return;
     }
     localStorage.setItem(draftKey, JSON.stringify(draft));
@@ -765,6 +800,7 @@ export function saveDraft(file: EditorFile): Promise<void> {
 export function clearDraft(): Promise<void> {
   return queueSettingsMutation(async () => {
     if (isTauri()) {
+      await invoke('clear_recovery_draft');
       const store = await Store.load(settingsKey, { autoSave: 200 });
       await store.delete(draftKey);
       return;

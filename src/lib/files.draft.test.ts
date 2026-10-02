@@ -5,12 +5,14 @@ import { markdownToDocument } from "../editor/markdown";
 const mocks = vi.hoisted(() => ({
   load: vi.fn(),
   save: vi.fn(),
+  invoke: vi.fn(),
+  recovery: null as string | null,
   entries: new Map<string, unknown>(),
 }));
 vi.mock("@tauri-apps/api/core", () => ({
   isTauri: () => true,
   convertFileSrc: vi.fn(),
-  invoke: vi.fn(),
+  invoke: mocks.invoke,
 }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn(), save: vi.fn() }));
 vi.mock("@tauri-apps/plugin-fs", () => ({
@@ -50,6 +52,12 @@ describe("ordered draft persistence", () => {
   beforeEach(() => {
     vi.resetAllMocks();
     mocks.entries.clear();
+    mocks.recovery = null;
+    mocks.invoke.mockImplementation(async (command: string, args?: { contents: string }) => {
+      if (command === "read_recovery_draft") return mocks.recovery;
+      if (command === "write_recovery_draft") mocks.recovery = args!.contents;
+      if (command === "clear_recovery_draft") mocks.recovery = "null";
+    });
     mocks.load.mockResolvedValue(store);
   });
 
@@ -69,18 +77,18 @@ describe("ordered draft persistence", () => {
     await expect(loadDraft()).resolves.toEqual(latest);
   });
 
-  it("does not resurrect an older draft after a later clear when the older native store load finishes last", async () => {
-    let finishSaveLoad!: (value: typeof store) => void;
-    mocks.load.mockImplementationOnce(
+  it("does not resurrect an older draft after a later clear when the older atomic write is delayed", async () => {
+    let finishSave!: () => void;
+    mocks.invoke.mockImplementationOnce(
       () =>
         new Promise((resolve) => {
-          finishSaveLoad = resolve;
+          finishSave = () => { mocks.recovery = JSON.stringify(latest); resolve(undefined); };
         }),
     );
     const saving = saveDraft(latest);
     const clearing = clearDraft();
     await flushAsyncLoading();
-    finishSaveLoad(store);
+    finishSave();
     await Promise.all([saving, clearing]);
     await expect(loadDraft()).resolves.toBeNull();
   });
@@ -95,16 +103,16 @@ describe("ordered draft persistence", () => {
   });
 
   it("flushes the native store only after the queued recovery draft reaches it", async () => {
-    let releaseLoad!: (value: typeof store) => void;
-    mocks.load.mockImplementationOnce(() => new Promise((resolve) => { releaseLoad = resolve; }));
+    let releaseWrite!: () => void;
+    mocks.invoke.mockImplementationOnce(() => new Promise((resolve) => { releaseWrite = () => { mocks.recovery = JSON.stringify(latest); resolve(undefined); }; }));
     mocks.save.mockImplementation(async () => {
-      expect(mocks.entries.get("unsavedDraft")).toEqual(latest);
+      expect(JSON.parse(mocks.recovery!)).toEqual(latest);
     });
     const saving = saveDraft(latest);
     const flushing = flushSettings();
     await flushAsyncLoading();
     expect(mocks.save).not.toHaveBeenCalled();
-    releaseLoad(store);
+    releaseWrite();
     await Promise.all([saving, flushing]);
     expect(mocks.save).toHaveBeenCalledOnce();
   });

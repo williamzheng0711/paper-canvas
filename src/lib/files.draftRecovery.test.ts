@@ -16,7 +16,7 @@ const harness = vi.hoisted(() => ({
 vi.mock("@tauri-apps/api/core", () => ({
   isTauri: () => harness.native,
   convertFileSrc: (path: string) => `asset://${encodeURIComponent(path)}`,
-  invoke: vi.fn(),
+  invoke: vi.fn(async () => undefined),
 }));
 vi.mock("@tauri-apps/plugin-store", () => ({
   Store: { load: async () => ({ get: async () => harness.draft }) },
@@ -117,6 +117,27 @@ describe.each([false, true])("draft recovery (native=%s)", (native) => {
     expect(draft?.comments?.[0].target).toEqual({ kind: "range", from: 0, to: body.length });
   });
 
+  it.each([null, {}, [null], [{ id: "damaged", content: "Original comment text" }]].map((comments) => ({ comments })))("recovers canvas writing when supplementary comments are damaged: %j", async ({ comments }) => {
+    const document = markdownToDocument("Recoverable canvas writing.\n");
+    const original = { name: "Canvas.md", document, comments };
+    store(original);
+    const serialized = localStorage.getItem("unsavedDraft");
+    const draft = await loadDraft();
+    expect(draft).toEqual({ name: "Canvas.md", document, comments: [], commentWarning: getMessages().commentDataWarning });
+    expect(harness.draft).toEqual(original);
+    expect(localStorage.getItem("unsavedDraft")).toBe(serialized);
+  });
+
+  it.each([{ sourceMarkdown: 123 }, { sourceMarkdown: {} }, { commentWarning: {} }, { name: "   " }])("strips malformed supplementary fields from a valid canvas draft: %j", async (fields) => {
+    const document = markdownToDocument("Recoverable canvas writing.\n");
+    store({ name: "Canvas.md", document, ...fields });
+    const draft = await loadDraft();
+    expect(draft?.document).toEqual(document);
+    expect(draft?.sourceMarkdown).toBeUndefined();
+    expect(draft?.commentWarning).toBeUndefined();
+    expect(draft?.name).toBe(fields.name === "   " ? getMessages().untitledFilename : "Canvas.md");
+  });
+
   it.each([
     null, "legacy", [], { name: "Broken.md" },
     { document: { type: "doc", content: "damaged" } },
@@ -127,11 +148,40 @@ describe.each([false, true])("draft recovery (native=%s)", (native) => {
     { document: { type: "doc", content: [{ type: "text", text: "Wrong position" }] } },
     { document: { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: "", marks: [] }] }] } },
     { document: { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: "Invalid mark", marks: [{ type: "unknownFutureMark" }] }] }] } },
+    { document: { type: "doc", content: [{ type: "codeBlock", attrs: { language: {} }, content: [{ type: "text", text: "Retained original code" }] }] } },
+    { document: { type: "doc", content: [{ type: "codeBlock", attrs: { language: 123 }, content: [{ type: "text", text: "Retained original code" }] }] } },
+    { document: { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: "Retained original link", marks: [{ type: "link", attrs: { href: {} } }] }] }] } },
+    { document: { type: "doc", content: [{ type: "heading", attrs: { level: 7 }, content: [{ type: "text", text: "Retained original heading" }] }] } },
+    { document: { type: "doc", content: [{ type: "heading", attrs: { level: 1.5 }, content: [{ type: "text", text: "Retained original heading" }] }] } },
+    { document: { type: "doc", content: [{ type: "heading", attrs: { level: {} }, content: [{ type: "text", text: "Retained original heading" }] }] } },
   ])(
-    "ignores a recovery record with no recoverable content: %j",
+    "reports a damaged recovery record while keeping its original data: %j",
     async (value) => {
       store(value);
-      expect(await loadDraft()).toBeNull();
+      if (value === null) await expect(loadDraft()).resolves.toBeNull();
+      else await expect(loadDraft()).rejects.toThrow(getMessages().draftRecoveryFailed);
+      expect(harness.draft).toBe(value);
+      expect(localStorage.getItem("unsavedDraft")).toBe(JSON.stringify(value));
     },
   );
+
+  it.each([
+    { colspan: 1000000000 }, { colspan: 0 }, { colspan: 1.5 }, { colspan: "2" },
+    { rowspan: -1 }, { rowspan: 1000000000 }, { colwidth: {} }, { colwidth: "damaged" }, { colwidth: [-1] }, { colwidth: ["80"] },
+  ])("rejects corrupt table attributes before serializing a recovery cache: %j", async (attrs) => {
+    const document = markdownToDocument("| A | B |\n| - | - |\n| 1 | 2 |\n");
+    document.content![0].content![0].content![0].attrs = attrs;
+    const original = { name: "Table.md", document };
+    store(original);
+    await expect(loadDraft()).rejects.toThrow(getMessages().draftRecoveryFailed);
+    expect(harness.draft).toBe(original);
+    expect(localStorage.getItem("unsavedDraft")).toBe(JSON.stringify(original));
+  });
+});
+
+it("reports malformed browser recovery JSON without deleting its original bytes", async () => {
+  harness.native = false;
+  localStorage.setItem("unsavedDraft", '{"sourceMarkdown":"unfinished');
+  await expect(loadDraft()).rejects.toThrow(getMessages().draftRecoveryFailed);
+  expect(localStorage.getItem("unsavedDraft")).toBe('{"sourceMarkdown":"unfinished');
 });
