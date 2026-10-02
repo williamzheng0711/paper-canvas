@@ -36,7 +36,7 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
 }));
 vi.mock("@tauri-apps/plugin-fs", () => ({
   exists: vi.fn(),
-  readTextFile: vi.fn(),
+  readFile: vi.fn(),
   rename: mocks.rename,
   writeTextFile: vi.fn(),
   writeFile: mocks.writeFile,

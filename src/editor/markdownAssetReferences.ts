@@ -2,7 +2,7 @@ import { unified } from "unified";
 import remarkParse from "remark-parse";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
-import { localAssetPath } from "../lib/localAssets";
+import { isWindowsFilePath, localAssetPath } from "../lib/localAssets";
 import { normalizeLatexDelimiters } from "./markdown";
 import {
   commentContext,
@@ -46,11 +46,11 @@ const rawTextTags = new Set([
 ]);
 
 function basename(path: string): string {
-  return path.split(/[\\/]/).at(-1) ?? "";
+  return path.split(path.startsWith("/") ? /\// : /[\\/]/).at(-1) ?? "";
 }
 
 function directory(path: string): string {
-  const index = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+  const index = path.startsWith("/") ? path.lastIndexOf("/") : Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
   if (index < 0) return ".";
   const parent = path.slice(0, index);
   return /^[A-Za-z]:$/.test(parent) ? parent + path[index] : parent || "/";
@@ -159,8 +159,8 @@ export function renameImageDestination(
     base,
     decodedDestination(raw, kind, false).text,
   ).path;
-  const separator = oldAssets.includes("\\") ? "\\" : "/";
-  const windows = separator === "\\" || /^[A-Za-z]:/.test(oldAssets);
+  const windows = isWindowsFilePath(oldAssets);
+  const separator = windows ? "\\" : "/";
   const equal = (left: string, right: string) =>
     windows ? left.toLowerCase() === right.toLowerCase() : left === right;
   if (!equal(target.slice(0, oldAssets.length + 1), oldAssets + separator))
@@ -168,7 +168,7 @@ export function renameImageDestination(
   // Keep ./, parent segments, absolute paths, suffixes, and the original encoded
   // separators. Only the directory name itself needs to change on rename.
   let replacement: { from: number; to: number } | undefined;
-  for (const match of decoded.text.matchAll(/[^/\\]+/g)) {
+  for (const match of decoded.text.matchAll(windows ? /[^/\\]+/g : /[^/]+/g)) {
     if (!equal(match[0], assetFolder(oldPath))) continue;
     const end = match.index + match[0].length;
     const prefix = encodeURI(decoded.text.slice(0, end))
@@ -191,7 +191,8 @@ export function renameImageDestination(
 }
 
 function normalizedDirectory(path: string): string {
-  return localAssetPath(directory(path), ".").path.replace(/\\/g, "/");
+  const resolved = localAssetPath(directory(path), ".").path;
+  return isWindowsFilePath(resolved) ? resolved.replace(/\\/g, "/") : resolved;
 }
 
 function encodedPathSegment(segment: string): string {
@@ -218,7 +219,8 @@ export function rebaseImageDestination(
   const decoded = decodedDestination(raw, kind);
   if (
     !decoded.text ||
-    /^(?:[A-Za-z][A-Za-z0-9+.-]*:|[\\/]|[?#])/.test(decoded.text)
+    /^(?:[A-Za-z][A-Za-z0-9+.-]*:|\/|[?#])/.test(decoded.text) ||
+    (windows && decoded.text.startsWith("\\"))
   )
     return raw;
 
@@ -264,10 +266,8 @@ export function rebaseImageDestination(
   } catch {
     // A malformed percent in the original filename prevents decoding an added
     // directory prefix too. Encode the actual local target so both survive.
-    oldParts = localAssetPath(oldDirectory, syntax.text)
-      .path.replace(/\\/g, "/")
-      .split("/")
-      .filter(Boolean);
+    const resolved = localAssetPath(oldDirectory, syntax.text).path;
+    oldParts = (windows ? resolved.replace(/\\/g, "/") : resolved).split("/").filter(Boolean);
     relative = suffix < 0 ? "" : raw.slice(syntax.ranges[suffix].from);
   }
   let common = 0;

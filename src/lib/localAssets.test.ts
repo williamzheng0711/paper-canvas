@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { localAssetPath, localAssetUrl } from "./localAssets";
+import { encodeLocalAssetPath, localAssetPath, localAssetUrl } from "./localAssets";
 
 describe("local Markdown resource paths", () => {
   it("normalizes parent-relative paths before handing them to the native asset protocol", () => {
@@ -47,5 +47,18 @@ describe("local Markdown resource paths", () => {
     expect(
       localAssetPath("C:\\Users\\example\\notes", "D:\\images\\figure.png"),
     ).toEqual({ path: "D:\\images\\figure.png", suffix: "" });
+  });
+
+  it("retains literal backslashes in POSIX directory and image names", () => {
+    expect(localAssetPath("/notes/Folder\\", "image%5Cname.png")).toEqual({ path: "/notes/Folder\\/image\\name.png", suffix: "" });
+    expect(localAssetPath("/notes", "%5Cleading.png")).toEqual({ path: "/notes/\\leading.png", suffix: "" });
+    expect(encodeLocalAssetPath("back\\slash.assets/image.png", false)).toBe("back%5Cslash.assets/image.png");
+    expect(encodeLocalAssetPath("C:\\notes\\image.png")).toBe("C:/notes/image.png");
+  });
+
+  it("treats a POSIX directory named like a Windows drive as an ordinary directory", () => {
+    expect(localAssetPath("/notes/C:", "../image.png")).toEqual({ path: "/notes/image.png", suffix: "" });
+    expect(localAssetPath("C:\\", "..\\image.png")).toEqual({ path: "C:\\image.png", suffix: "" });
+    expect(encodeLocalAssetPath("C:/image.png", false)).toBe("C%3A/image.png");
   });
 });

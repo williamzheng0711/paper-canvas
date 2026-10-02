@@ -5,6 +5,7 @@ import { documentsEqual } from '../editor/documentSync';
 import { documentToMarkdown, markdownToDocument } from '../editor/markdown';
 import {
   documentToPortableMarkdown,
+  fileName,
   hideRecentFile,
   hydrateDocumentAssets,
   isMarkdownFilePath,
@@ -139,6 +140,8 @@ describe('Markdown file associations', () => {
     expect(isMarkdownFilePath('C:\\notes\\proposal.MARKDOWN')).toBe(true);
     expect(isMarkdownFilePath('/Users/example/notes.md.bak')).toBe(false);
     expect(isMarkdownFilePath('/Users/example/notes.txt')).toBe(false);
+    expect(fileName('/notes/back\\slash.md')).toBe('back\\slash.md');
+    expect(fileName('C:\\notes\\research.md')).toBe('research.md');
   });
 });
 

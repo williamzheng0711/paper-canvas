@@ -21,6 +21,21 @@ const newPath = "/notes/renamed.md";
 const rename = (source: string) =>
   renameMarkdownImageAssets(source, oldPath, newPath);
 
+describe("POSIX filenames containing literal backslashes", () => {
+  it("renames the complete companion-folder name without interpreting its backslash as a separator", () => {
+    const source = "![Image](research%5Cdraft.assets/image%5Cname.png)\n";
+    expect(renameMarkdownImageAssets(source, "/notes/folder\\name/research\\draft.md", "/notes/folder\\name/copy.md")).toBe("![Image](copy.assets/image%5Cname.png)\n");
+  });
+
+  it("encodes a literal backslash in the original directory when rebasing Save As", () => {
+    const source = "![Image](research%5Cdraft.assets/image%5Cname.png)\n";
+    const rebased = rebaseMarkdownImageAssets(source, "/notes/folder\\name/research\\draft.md", "/exports/copy.md");
+    expect(rebased).toBe("![Image](../notes/folder%5Cname/research%5Cdraft.assets/image%5Cname.png)\n");
+    expect(localAssetPath("/exports", "../notes/folder%5Cname/research%5Cdraft.assets/image%5Cname.png").path).toBe("/notes/folder\\name/research\\draft.assets/image\\name.png");
+    expect(rebaseImageDestination("%5Cleading.png", "/notes/research.md", "/exports/copy.md")).toBe("../notes/%5Cleading.png");
+  });
+});
+
 describe("renaming local image destinations without rewriting document content", () => {
   it("preserves prose, links, code, comments, non-image HTML, and remote image URLs byte for byte", () => {
     const source = [

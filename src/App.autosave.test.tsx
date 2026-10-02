@@ -8,7 +8,7 @@ import { documentToMarkdown, markdownToDocument } from './editor/markdown';
 import type { SwitchableEditorHandle } from './editor/search';
 import type { EditorFile } from './lib/files';
 import type * as FileLibrary from './lib/files';
-import { rebaseEditorFileAssets } from './lib/files';
+import { FileRenameRecoveryError, rebaseEditorFileAssets } from './lib/files';
 import { getMessages } from './i18n';
 
 type CanvasProps = {
@@ -148,6 +148,7 @@ vi.mock('./lib/files', async (importOriginal) => {
   exportMarkdownFile: files.exportMarkdownFile,
   exportPdfFile: files.exportPdfFile,
   flushSettings: files.flushSettings,
+  FileRenameRecoveryError: actual.FileRenameRecoveryError,
   hideRecentFile: files.hideRecentFile,
   hydrateDocumentAssets: (document: JSONContent) => structuredClone(document),
   loadDraft: files.loadDraft,
@@ -1886,6 +1887,50 @@ describe('App autosave cursor stability', () => {
     expect(harness.canvasProps?.initialDocument).toEqual(markdownToDocument(rewritten));
     await act(async () => { await vi.advanceTimersByTimeAsync(1000); await flushEffects(); });
     expect(files.saveEditorFile).toHaveBeenCalledWith(expect.objectContaining({ path: '/tmp/renamed.md', document: markdownToDocument(rewritten) }), false, rewritten);
+  });
+
+  it.each([false, true])('adopts a surviving rename path and preserves late source typing (assets moved=%s)', async (assetsRenamed) => {
+    let rejectRename!: (error: Error) => void;
+    files.renameEditorFile.mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectRename = reject; }));
+    await act(async () => { readingModeButton('source').click(); await vi.advanceTimersByTimeAsync(50); });
+    const initial = '# Notes\r\n\r\n![Diagram](research.assets/diagram.png)\r\n';
+    await act(async () => { harness.sourceProps?.onChange(initial); });
+    await submitRename();
+    const latest = initial + '\r\nLatest unfinished * source.\r\n';
+    await act(async () => { harness.sourceProps?.onChange(latest); });
+    await act(async () => {
+      rejectRename(new FileRenameRecoveryError(new Error('Source write failed'), '/tmp/research.md', '/tmp/renamed.md', '/tmp/renamed.md', assetsRenamed));
+      await flushEffects();
+    });
+    const expected = assetsRenamed ? latest.replace('research.assets/', 'renamed.assets/') : latest;
+    expect(host.querySelector('.document-name')?.textContent).toContain('renamed.md');
+    expect(host.querySelector('.status-message')?.textContent).toBe('Source write failed');
+    expect(harness.sourceProps?.value).toBe(expected);
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); await vi.advanceTimersByTimeAsync(1000); await flushEffects(); });
+    expect(files.saveEditorFile).toHaveBeenCalledWith(expect.objectContaining({ path: '/tmp/renamed.md', sourceMarkdown: expected }), false, expected);
+    expect(files.saveEditorFile.mock.calls.every(([candidate]) => candidate.path !== '/tmp/research.md')).toBe(true);
+  });
+
+  it('flushes late canvas typing when rename rollback cannot restore the original path', async () => {
+    let rejectRename!: (error: Error) => void;
+    files.renameEditorFile.mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectRename = reject; }));
+    await submitRename();
+    let pending: JSONContent | undefined = markdownToDocument('# Latest typing\n');
+    harness.searchHandle.flushCommentMapping.mockImplementation(() => {
+      if (!pending) return;
+      const document = pending;
+      pending = undefined;
+      harness.canvasProps?.onChange(document);
+    });
+    await act(async () => { harness.canvasProps?.onEdit?.(); });
+    await act(async () => {
+      rejectRename(new FileRenameRecoveryError(new Error('Rename rollback collided'), '/tmp/research.md', '/tmp/renamed.md', '/tmp/renamed.md', false));
+      await flushEffects();
+    });
+    expect(harness.canvasProps?.initialDocument).toEqual(markdownToDocument('# Latest typing\n'));
+    expect(host.querySelector('.document-name')?.textContent).toContain('renamed.md');
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); await vi.advanceTimersByTimeAsync(1000); await flushEffects(); });
+    expect(files.saveEditorFile).toHaveBeenCalledWith(expect.objectContaining({ path: '/tmp/renamed.md', document: markdownToDocument('# Latest typing\n') }), false);
   });
 
   it('keeps the app interactive while preventing overlapping PDF exports', async () => {

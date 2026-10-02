@@ -109,6 +109,14 @@ describe.each([false, true])("draft recovery (native=%s)", (native) => {
     expect(() => node.check()).not.toThrow();
   });
 
+  it("returns normalized comment offsets from a canvas-only recovery cache", async () => {
+    const body = "Recovered canvas text.\n";
+    const comment = createMarkdownComment(body, { kind: "range", from: 0, to: body.length }, "Recovered note");
+    store({ name: "Canvas.md", document: markdownToDocument(body), comments: [{ ...comment, target: { kind: "range", from: -99, to: 99999 } }] });
+    const draft = await loadDraft();
+    expect(draft?.comments?.[0].target).toEqual({ kind: "range", from: 0, to: body.length });
+  });
+
   it.each([
     null, "legacy", [], { name: "Broken.md" },
     { document: { type: "doc", content: "damaged" } },

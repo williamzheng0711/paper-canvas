@@ -17,7 +17,7 @@ vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
 }));
 vi.mock("@tauri-apps/plugin-fs", () => ({
-  readTextFile: harness.read,
+  readFile: harness.read,
   exists: vi.fn(),
   rename: vi.fn(),
   mkdir: vi.fn(),
@@ -43,7 +43,7 @@ describe("opening Markdown when history persistence fails", () => {
         "Keep this note",
       );
       const sourceMarkdown = serializeMarkdownWithComments(body, [comment]);
-      harness.read.mockResolvedValue(sourceMarkdown);
+      harness.read.mockResolvedValue(new TextEncoder().encode(sourceMarkdown));
       if (failure === "load")
         harness.load.mockRejectedValueOnce(new Error("Settings unavailable"));
       else harness.set.mockRejectedValueOnce(new Error("Settings unavailable"));

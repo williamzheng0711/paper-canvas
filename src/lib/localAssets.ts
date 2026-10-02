@@ -1,10 +1,15 @@
+/** Recognize rooted Windows paths without treating POSIX filename characters as separators. */
+export function isWindowsFilePath(path: string): boolean {
+  return /^(?:[A-Za-z]:[\\/]|\\)/.test(path);
+}
+
 /** Encode a physical path as a Markdown destination without changing separators. */
-export function encodeLocalAssetPath(path: string): string {
-  const normalized = path.replace(/\\/g, "/");
+export function encodeLocalAssetPath(path: string, windows = isWindowsFilePath(path)): string {
+  const normalized = windows ? path.replace(/\\/g, "/") : path;
   return normalized
     .split("/")
     .map((segment, index) =>
-      index === 0 && /^[A-Za-z]:\//.test(normalized)
+      windows && index === 0 && /^[A-Za-z]:\//.test(normalized)
         ? segment
         : encodeURIComponent(segment).replace(
             /[!'()*]/g,
@@ -39,9 +44,9 @@ export function localAssetPath(
   } catch {
     // A literal percent in a filesystem name need not be valid URI encoding.
   }
-  const windows = basePath.includes("\\") || /^[A-Za-z]:[\\/]/.test(path);
-  path = path.replace(/\\/g, "/");
-  let base = basePath.replace(/\\/g, "/");
+  const windows = isWindowsFilePath(basePath) || /^[A-Za-z]:[\\/]/.test(path) || (!basePath.startsWith("/") && path.startsWith("\\"));
+  if (windows) path = path.replace(/\\/g, "/");
+  let base = windows ? basePath.replace(/\\/g, "/") : basePath;
   const absolute = path.startsWith("/") || /^[A-Za-z]:\//.test(path);
   if (!absolute) path = `${base.replace(/\/$/, "")}/${path}`;
   const prefix = path.startsWith("//") ? "//" : path.startsWith("/") ? "/" : "";
@@ -52,13 +57,13 @@ export function localAssetPath(
       segment === ".." &&
       segments.length &&
       segments.at(-1) !== ".." &&
-      !/^[A-Za-z]:$/.test(segments.at(-1)!)
+      !(windows && /^[A-Za-z]:$/.test(segments.at(-1)!))
     )
       segments.pop();
     else if (
       segment === ".." &&
       !prefix &&
-      !/^[A-Za-z]:$/.test(segments.at(-1) ?? "")
+      !(windows && /^[A-Za-z]:$/.test(segments.at(-1) ?? ""))
     )
       segments.push(segment);
     else if (segment !== "..") segments.push(segment);

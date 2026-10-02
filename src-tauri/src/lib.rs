@@ -634,6 +634,49 @@ pub fn run() {
         }));
     }
 
+    #[cfg(target_os = "macos")]
+    {
+        builder = builder
+            .menu(|app| {
+                let menu = tauri::menu::Menu::default(app)?;
+                // macOS's predefined Quit invokes NSApplication directly,
+                // bypassing both ExitRequested and the window close handler.
+                // Replace only that last item in the default application menu.
+                let application_menu = menu
+                    .items()?
+                    .into_iter()
+                    .next()
+                    .and_then(|item| item.as_submenu().cloned())
+                    .ok_or_else(|| std::io::Error::other("The application menu is missing."))?;
+                let quit = application_menu
+                    .items()?
+                    .pop()
+                    .ok_or_else(|| std::io::Error::other("The Quit menu item is missing."))?;
+                let label = quit
+                    .as_predefined_menuitem()
+                    .ok_or_else(|| std::io::Error::other("The default Quit menu item changed."))?
+                    .text()?;
+                application_menu.remove(&quit)?;
+                application_menu.append(&tauri::menu::MenuItem::with_id(
+                    app,
+                    "save-before-quit",
+                    label,
+                    true,
+                    Some("CmdOrCtrl+Q"),
+                )?)?;
+                Ok(menu)
+            })
+            .on_menu_event(|app, event| {
+                if event.id() == "save-before-quit" {
+                    if let Some(window) = app.get_webview_window("main") {
+                        let _ = window.close();
+                    } else {
+                        app.exit(0);
+                    }
+                }
+            });
+    }
+
     builder
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
@@ -655,13 +698,23 @@ pub fn run() {
         ])
         .build(tauri::generate_context!())
         .expect("error while building PaperCanvas")
-        .run(|app, event| {
+        .run(|app, event| match event {
+            tauri::RunEvent::ExitRequested { api, .. } => {
+                // Native Quit otherwise bypasses the frontend's close handler
+                // and can discard edits still waiting for autosave. Closing the
+                // window first lets that handler save before destroying it.
+                if let Some(window) = app.get_webview_window("main") {
+                    api.prevent_exit();
+                    let _ = window.close();
+                }
+            }
             #[cfg(any(target_os = "macos", target_os = "ios", target_os = "android"))]
-            if let tauri::RunEvent::Opened { urls } = event {
+            tauri::RunEvent::Opened { urls } => {
                 record_opened_files(app, markdown_paths_from_urls(urls));
                 #[cfg(desktop)]
                 focus_main_window(app);
             }
+            _ => {}
         });
 }
 
@@ -773,6 +826,40 @@ mod tests {
         }
         assert!((0..12)
             .any(|index| std::fs::read_to_string(&target).unwrap() == format!("Document {index}")));
+    }
+
+    #[test]
+    fn native_case_only_renames_preserve_document_and_asset_bytes() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("research.md");
+        let target = directory.path().join("Research.MD");
+        let source_assets = directory.path().join("research.assets");
+        let target_assets = directory.path().join("Research.assets");
+        std::fs::write(&source, "# 中文 🧪\r\nOriginal bytes\r\n").unwrap();
+        std::fs::create_dir(&source_assets).unwrap();
+        std::fs::write(source_assets.join("diagram.png"), b"original asset").unwrap();
+        rename_without_replacement(&source, &target).unwrap();
+        rename_without_replacement(&source_assets, &target_assets).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "# 中文 🧪\r\nOriginal bytes\r\n"
+        );
+        assert_eq!(
+            std::fs::read(target_assets.join("diagram.png")).unwrap(),
+            b"original asset"
+        );
+        let mut names: Vec<_> = std::fs::read_dir(directory.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            [
+                std::ffi::OsString::from("Research.MD"),
+                std::ffi::OsString::from("Research.assets")
+            ]
+        );
     }
 
     #[test]

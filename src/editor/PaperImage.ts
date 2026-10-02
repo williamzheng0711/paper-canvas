@@ -4,6 +4,7 @@ import type { DOMOutputSpec } from "@tiptap/pm/model";
 import { convertFileSrc, isTauri } from "@tauri-apps/api/core";
 import {
   encodeLocalAssetPath,
+  isWindowsFilePath,
   localAssetPath,
   localAssetUrl,
 } from "../lib/localAssets";
@@ -47,10 +48,10 @@ export const PaperImage = Image.extend<PaperImageOptions>({
           const documentPath = this.options.getDocumentPath();
           if (!original || !documentPath) return original;
           const resolved = localAssetPath("", original);
-          const filename = resolved.path.replace(/\\/g, "/").split("/").at(-1);
+          const filename = (isWindowsFilePath(resolved.path) ? resolved.path.replace(/\\/g, "/") : resolved.path).split("/").at(-1);
           if (!filename) return original;
           return rebaseImageDestination(
-            encodeLocalAssetPath(filename) + resolved.suffix,
+            encodeLocalAssetPath(filename, isWindowsFilePath(resolved.path)) + resolved.suffix,
             resolved.path,
             documentPath,
           );

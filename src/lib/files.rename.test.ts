@@ -6,7 +6,7 @@ import {
   markdownFingerprint,
 } from "../editor/comments";
 import { markdownToDocument } from "../editor/markdown";
-import { documentToPortableMarkdown, renameEditorFile } from "./files";
+import { documentToPortableMarkdown, FileRenameRecoveryError, renameEditorFile, saveEditorFile } from "./files";
 
 const mocks = vi.hoisted(() => ({
   entries: new Map<string, string | null>(),
@@ -25,10 +25,10 @@ vi.mock("@tauri-apps/api/core", () => ({
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn(), save: vi.fn() }));
 vi.mock("@tauri-apps/plugin-fs", () => ({
   exists: mocks.exists,
-  readTextFile: async (path: string) => {
+  readFile: async (path: string) => {
     const source = mocks.entries.get(path);
     if (typeof source !== "string") throw new Error(`File missing: ${path}`);
-    return source;
+    return new TextEncoder().encode(source);
   },
   rename: vi.fn(),
   writeTextFile: vi.fn(),
@@ -457,4 +457,112 @@ describe("native document rename", () => {
       expect(mocks.invoke).toHaveBeenCalledWith("rename_document_entry", expect.any(Object));
     },
   );
+
+  it("recovers the surviving target after the original filename is externally recreated during rollback", async () => {
+    const sourceMarkdown = "Original research.\n\n![Diagram](research.assets/diagram.png)\n";
+    const file = { path, name: "research.md", sourceMarkdown, document: markdownToDocument(sourceMarkdown) };
+    mocks.entries.set(path, sourceMarkdown);
+    mocks.entries.set("/notes/research.assets", null);
+    mocks.entries.set("/notes/research.assets/diagram.png", "original image");
+    mocks.writeMarkdown.mockImplementationOnce(async () => {
+      mocks.entries.set(path, "Unrelated recreated document.\n");
+      throw new Error("Atomic rewrite failed");
+    });
+    let failure: unknown;
+    try {
+      await renameEditorFile(file, "renamed.md");
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toBeInstanceOf(FileRenameRecoveryError);
+    const recovered = (failure as FileRenameRecoveryError).recover({
+      ...file,
+      sourceMarkdown: sourceMarkdown + "\nLatest mid-rename typing.\n",
+      document: markdownToDocument(sourceMarkdown + "\nLatest mid-rename typing.\n"),
+    });
+    expect(recovered.path).toBe(target);
+    expect(recovered.sourceMarkdown).toContain("Latest mid-rename typing.");
+    expect(recovered.sourceMarkdown).toContain("research.assets/diagram.png");
+    await saveEditorFile(recovered);
+    expect(mocks.entries.get(path)).toBe("Unrelated recreated document.\n");
+    expect(mocks.entries.get(target)).toBe(recovered.sourceMarkdown);
+    expect(mocks.entries.get("/notes/research.assets/diagram.png")).toBe("original image");
+  });
+
+  it("points recovered edits at a moved companion directory when only the asset rollback collides", async () => {
+    const sourceMarkdown = "![Diagram](research.assets/diagram.png)\n";
+    const file = { path, name: "research.md", sourceMarkdown, document: markdownToDocument(sourceMarkdown) };
+    mocks.entries.set(path, sourceMarkdown);
+    mocks.entries.set("/notes/research.assets", null);
+    mocks.entries.set("/notes/research.assets/diagram.png", "original image");
+    mocks.writeMarkdown.mockImplementationOnce(async () => {
+      mocks.entries.set("/notes/research.assets", "unrelated competing directory");
+      throw new Error("Atomic rewrite failed");
+    });
+    let failure: unknown;
+    try { await renameEditorFile(file, "renamed.md"); } catch (error) { failure = error; }
+    expect(failure).toBeInstanceOf(FileRenameRecoveryError);
+    const recovered = (failure as FileRenameRecoveryError).recover(file);
+    expect(recovered.path).toBe(path);
+    expect(recovered.sourceMarkdown).toBe("![Diagram](renamed.assets/diagram.png)\n");
+    expect(recovered.document.content?.[0].attrs?.src).toBe("asset:/notes/renamed.assets/diagram.png");
+    await saveEditorFile(recovered);
+    expect(mocks.entries.get(path)).toBe(recovered.sourceMarkdown);
+    expect(mocks.entries.get("/notes/research.assets")).toBe("unrelated competing directory");
+    expect(mocks.entries.get("/notes/renamed.assets/diagram.png")).toBe("original image");
+  });
+
+  it("retains the surviving filename after the rollback command itself fails", async () => {
+    const sourceMarkdown = "Original text.\n";
+    const file = { path, name: "research.md", sourceMarkdown, document: markdownToDocument(sourceMarkdown) };
+    mocks.entries.set(path, sourceMarkdown);
+    const entryRename = mocks.renameEntry.getMockImplementation()!;
+    mocks.entries.set("/notes/research.assets", null);
+    mocks.renameEntry.mockImplementationOnce(entryRename).mockRejectedValueOnce(new Error("Asset move failed")).mockRejectedValueOnce(new Error("Rollback denied"));
+    // The first move succeeds, the companion move fails, and filename rollback fails.
+    let failure: unknown;
+    try { await renameEditorFile(file, "renamed.md"); } catch (error) { failure = error; }
+    expect(failure).toBeInstanceOf(FileRenameRecoveryError);
+    const recovered = (failure as FileRenameRecoveryError).recover(file);
+    expect(recovered.path).toBe(target);
+    expect(mocks.entries.get(target)).toBe(sourceMarkdown);
+  });
+
+  it("renames a POSIX document and companion assets whose filenames contain backslashes", async () => {
+    const originalPath = "/notes/folder\\name/research\\draft.md";
+    const renamedPath = "/notes/folder\\name/renamed.md";
+    const sourceMarkdown = "![Image](research%5Cdraft.assets/image%5Cname.png)\n";
+    mocks.entries.set(originalPath, sourceMarkdown);
+    mocks.entries.set("/notes/folder\\name/research\\draft.assets", null);
+    mocks.entries.set("/notes/folder\\name/research\\draft.assets/image\\name.png", "image bytes");
+    const renamed = await renameEditorFile({ path: originalPath, name: "research\\draft.md", sourceMarkdown, document: markdownToDocument(sourceMarkdown) }, "renamed.md");
+    expect(renamed.path).toBe(renamedPath);
+    expect(renamed.sourceMarkdown).toBe("![Image](renamed.assets/image%5Cname.png)\n");
+    expect(renamed.document.content?.[0].attrs?.src).toBe("asset:/notes/folder\\name/renamed.assets/image\\name.png");
+    expect(mocks.entries.get("/notes/folder\\name/renamed.assets/image\\name.png")).toBe("image bytes");
+    expect(mocks.entries.get(renamedPath)).toBe(renamed.sourceMarkdown);
+  });
+
+  it("allows case-only document and companion-folder renames on a case-insensitive filesystem", async () => {
+    const sourceMarkdown = "![Image](research.assets/image.png)\n";
+    mocks.entries.set(path, sourceMarkdown);
+    mocks.entries.set("/notes/research.assets", null);
+    mocks.entries.set("/notes/research.assets/image.png", "image bytes");
+    mocks.exists.mockImplementation(async (checked: string) => [...mocks.entries.keys()].some((entry) => entry.toLowerCase() === checked.toLowerCase()));
+    const renamed = await renameEditorFile({ path, name: "research.md", sourceMarkdown, document: markdownToDocument(sourceMarkdown) }, "Research.md");
+    expect(renamed.path).toBe("/notes/Research.md");
+    expect(renamed.sourceMarkdown).toBe("![Image](Research.assets/image.png)\n");
+    expect(mocks.entries.get("/notes/Research.assets/image.png")).toBe("image bytes");
+    expect(mocks.entries.get("/notes/Research.md")).toBe(renamed.sourceMarkdown);
+  });
+
+  it("retains two distinct case-sensitive filenames when a case-only target is already occupied", async () => {
+    const sourceMarkdown = "Original document.\n";
+    mocks.entries.set(path, sourceMarkdown);
+    mocks.entries.set("/notes/Research.md", "Different existing document.\n");
+    await expect(renameEditorFile({ path, name: "research.md", sourceMarkdown, document: markdownToDocument(sourceMarkdown) }, "Research.md")).rejects.toThrow("Path already exists");
+    expect(mocks.entries.get(path)).toBe(sourceMarkdown);
+    expect(mocks.entries.get("/notes/Research.md")).toBe("Different existing document.\n");
+    expect(mocks.writeMarkdown).not.toHaveBeenCalled();
+  });
 });

@@ -35,6 +35,7 @@ import {
   exportMarkdownFile,
   exportPdfFile,
   flushSettings,
+  FileRenameRecoveryError,
   hideRecentFile,
   hydrateDocumentAssets,
   loadDraft,
@@ -1040,6 +1041,28 @@ export default function App() {
         setMessage(getMessages().renamedFile(renamed.name));
         setRecent(await loadRecent());
       } catch (error) {
+        if (documentSessionRef.current !== session) return;
+        if (error instanceof FileRenameRecoveryError) {
+          if (sourceModeRef.current) clearSourceCommentSync();
+          else flushCanvasChanges();
+          const liveFile = fileRef.current;
+          const latest = sourceModeRef.current
+            ? { ...liveFile, ...documentStateFromMarkdown(rawMarkdownRef.current, liveFile.path), sourceMarkdown: rawMarkdownRef.current }
+            : liveFile;
+          const recovered = error.recover(latest);
+          if (sourceModeRef.current && recovered.sourceMarkdown !== rawMarkdownRef.current) {
+            setExternalRawMarkdown(recovered.sourceMarkdown!, error.assetsRenamed
+              ? { oldPath: error.originalPath, newPath: error.targetPath, operation: 'rename' }
+              : undefined);
+          }
+          fileRef.current = recovered;
+          setFile(recovered);
+          if (!documentsEqual(liveFile.document, recovered.document)) setDocumentId((id) => id + 1);
+          // The source write failed while companion assets remained at their
+          // new name. Save the repaired references at the surviving file path.
+          if (error.assetsRenamed) markEdited();
+          await loadRecent().then(setRecent, () => undefined);
+        }
         if (documentSessionRef.current === session) setMessage(error instanceof Error ? error.message : getMessages().renameFailed);
       }
     });

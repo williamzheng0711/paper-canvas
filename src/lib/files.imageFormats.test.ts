@@ -21,7 +21,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 vi.mock("@tauri-apps/plugin-fs", () => ({
   exists: vi.fn(),
   mkdir: vi.fn(),
-  readTextFile: vi.fn(),
+  readFile: vi.fn(),
   rename: vi.fn(),
   writeFile: mocks.writeFile,
   writeTextFile: vi.fn(),
@@ -38,6 +38,10 @@ describe("saved embedded image formats", () => {
   it.each([
     "/notes/Literal %20 #?.md",
     "/notes/研究 (100%).md",
+    "/notes/Literal\\backslash.md",
+    "/notes/\\Leading.md",
+    "/notes/Folder\\name/Research.md",
+    "/notes/Folder\\/Research.md",
     "C:\\notes\\Literal %20 #.md",
   ])(
     "reloads the physical embedded image when its document name contains URL characters: %s",
@@ -68,7 +72,7 @@ describe("saved embedded image formats", () => {
           .replace(/\\/g, "/")
           .startsWith(path.replace(/\.md$/i, ".assets/").replace(/\\/g, "/")),
       ).toBe(true);
-      const physicalPath = path.includes("\\")
+      const physicalPath = /^[A-Za-z]:[\\/]/.test(path)
         ? String(writtenPath).replace(/\//g, "\\")
         : writtenPath;
       expect(saved.document.content?.[0].attrs?.src).toBe(
@@ -88,7 +92,7 @@ describe("saved embedded image formats", () => {
       });
       const parent = path.slice(
         0,
-        Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\")),
+        path.startsWith("/") ? path.lastIndexOf("/") : Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\")),
       );
       expect(
         localAssetPath(parent, reopened.content?.[0].attrs?.originalSrc),
