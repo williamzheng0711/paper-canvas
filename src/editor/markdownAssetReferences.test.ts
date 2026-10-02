@@ -139,6 +139,31 @@ describe("renaming local image destinations without rewriting document content",
     ).toBe("renamed.assets\\a.png");
   });
 
+  it("renames Windows asset paths regardless of directory-name casing", () => {
+    expect(
+      renameImageDestination(
+        "paper.assets/diagram.png",
+        "C:\\Notes\\Paper.md",
+        "C:\\Notes\\Renamed.md",
+      ),
+    ).toBe("Renamed.assets/diagram.png");
+    expect(
+      renameImageDestination(
+        "file:///c:/notes/PAPER.assets/diagram.png?size=2#preview",
+        "C:\\Notes\\Paper.md",
+        "C:\\Notes\\Renamed.md",
+      ),
+    ).toBe("file:///c:/notes/Renamed.assets/diagram.png?size=2#preview");
+    // POSIX paths retain their case-sensitive physical-directory semantics.
+    expect(
+      renameImageDestination(
+        "paper.assets/diagram.png",
+        "/notes/Paper.md",
+        "/notes/Renamed.md",
+      ),
+    ).toBe("paper.assets/diagram.png");
+  });
+
   it("rewrites only actual HTML img src attributes, including entities and unquoted values", () => {
     const source =
       '<div title="research.assets/">\n<IMG alt="research.assets/" SRC="research&#46;assets/a.png?x=1&amp;y=2">\n<img src=./research.assets/b.png>\n<img data-src="research.assets/c.png" src="https://example.com/research.assets/c.png">\n<img src="research.assets/d.png" src="research.assets/e.png">\n<!-- <img src="research.assets/comment.png"> -->\n<script>const literal = \'<img src="research.assets/script.png">\';</script>\n<textarea><img src="research.assets/textarea.png"></textarea>\n</div>';

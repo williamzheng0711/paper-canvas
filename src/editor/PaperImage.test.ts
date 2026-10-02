@@ -3,6 +3,7 @@ import StarterKit from "@tiptap/starter-kit";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { PaperImage } from "./PaperImage";
 import { documentToMarkdown, markdownToDocument } from "./markdown";
+import { sanitizePastedHtml } from "./paste";
 
 let editor: Editor | undefined;
 
@@ -24,6 +25,7 @@ function createEditor(source: string): Editor {
         resize: { enabled: true, minWidth: 80, minHeight: 60 },
       }),
     ],
+    editorProps: { transformPastedHTML: sanitizePastedHtml },
     content: markdownToDocument(source),
   });
 }
@@ -107,5 +109,50 @@ describe("image reading fidelity", () => {
     expect(serialized).toContain(
       '[![Diagram](diagram.png "Figure title")](https://example.com/guide "Read the guide")',
     );
+  });
+
+  it("retains linked images and separate image/link titles through sanitized HTML copy and paste", () => {
+    editor = createEditor(
+      '[![Diagram](diagram.png "Figure title")](https://example.com/guide "Read the guide")',
+    );
+    const copied = editor.getHTML();
+    const destination = createEditor("replace me");
+    try {
+      destination.commands.selectAll();
+      destination.view.pasteHTML(copied, new Event("paste") as ClipboardEvent);
+      expect(destination.getJSON().content?.[0]).toMatchObject({
+        type: "image",
+        attrs: {
+          src: "diagram.png",
+          title: "Figure title",
+          linkHref: "https://example.com/guide",
+          linkTitle: "Read the guide",
+        },
+      });
+      expect(documentToMarkdown(destination.getJSON())).toContain(
+        '[![Diagram](diagram.png "Figure title")](https://example.com/guide "Read the guide")',
+      );
+    } finally {
+      destination.destroy();
+    }
+  });
+
+  it("imports an external image hyperlink title independently from its caption", () => {
+    editor = createEditor("replace me");
+    editor.commands.selectAll();
+    editor.view.pasteHTML(
+      '<a href="https://example.com/guide" title="Read the guide"><img src="diagram.png" alt="Diagram" title="Figure title" width="240" height="120"></a>',
+      new Event("paste") as ClipboardEvent,
+    );
+    expect(editor.getJSON().content?.[0]).toMatchObject({
+      type: "image",
+      attrs: {
+        title: "Figure title",
+        linkHref: "https://example.com/guide",
+        linkTitle: "Read the guide",
+        width: 240,
+        height: 120,
+      },
+    });
   });
 });

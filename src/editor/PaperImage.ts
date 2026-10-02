@@ -1,4 +1,6 @@
 import Image from "@tiptap/extension-image";
+import { mergeAttributes } from "@tiptap/core";
+import type { DOMOutputSpec } from "@tiptap/pm/model";
 
 export const PaperImage = Image.extend({
   addAttributes() {
@@ -19,8 +21,34 @@ export const PaperImage = Image.extend({
           element.closest("a")?.getAttribute("href") ||
           null,
       },
-      linkTitle: { default: null, rendered: false },
+      linkTitle: {
+        default: null,
+        rendered: false,
+        parseHTML: (element) =>
+          element.closest("a[href]")?.getAttribute("title") ?? null,
+      },
     };
+  },
+
+  renderHTML({ node, HTMLAttributes }) {
+    // The live resize view uses the link title as its tooltip. Clipboard HTML
+    // needs an actual anchor and separate titles so sanitization and other
+    // editors can preserve both the link and the image's authored caption.
+    const image: DOMOutputSpec = [
+      "img",
+      mergeAttributes(this.options.HTMLAttributes, HTMLAttributes, {
+        title: node.attrs.title,
+      }),
+    ];
+    if (!node.attrs.linkHref) return image;
+    return [
+      "a",
+      {
+        href: node.attrs.linkHref,
+        ...(node.attrs.linkTitle ? { title: node.attrs.linkTitle } : {}),
+      },
+      image,
+    ];
   },
 
   addNodeView() {

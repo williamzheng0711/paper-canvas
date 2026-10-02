@@ -160,17 +160,21 @@ export function renameImageDestination(
     decodedDestination(raw, kind, false).text,
   ).path;
   const separator = oldAssets.includes("\\") ? "\\" : "/";
-  if (!target.startsWith(oldAssets + separator)) return raw;
+  const windows = separator === "\\" || /^[A-Za-z]:/.test(oldAssets);
+  const equal = (left: string, right: string) =>
+    windows ? left.toLowerCase() === right.toLowerCase() : left === right;
+  if (!equal(target.slice(0, oldAssets.length + 1), oldAssets + separator))
+    return raw;
   // Keep ./, parent segments, absolute paths, suffixes, and the original encoded
   // separators. Only the directory name itself needs to change on rename.
   let replacement: { from: number; to: number } | undefined;
   for (const match of decoded.text.matchAll(/[^/\\]+/g)) {
-    if (match[0] !== assetFolder(oldPath)) continue;
+    if (!equal(match[0], assetFolder(oldPath))) continue;
     const end = match.index + match[0].length;
     const prefix = encodeURI(decoded.text.slice(0, end))
       .replace(/#/g, "%23")
       .replace(/\?/g, "%3F");
-    if (localAssetPath(base, prefix).path !== oldAssets) continue;
+    if (!equal(localAssetPath(base, prefix).path, oldAssets)) continue;
     replacement = {
       from: decoded.ranges[match.index].from,
       to: decoded.ranges[end - 1].to,

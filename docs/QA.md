@@ -55,6 +55,17 @@ Use a temporary copy for intentional edits.
 - Copy and paste numbered tasks, footnotes with math, merged table cells, and
   resized images between documents; numbering, checked states, note bodies,
   alignment, cell spans, and dimensions must survive.
+- Copy a linked image with separate image and link titles; its link and both
+  titles must survive. Save or export immediately after pasting an image;
+  the completed image must be included. Switching documents while waiting
+  must cancel that document's delayed save or export.
+- Save and reopen a rich table containing footnotes, numbered tasks, code with
+  blank lines, and formulas. The table must remain one block. Copy its HTML
+  back into Canvas; note IDs, checkbox states, formula sources, and code
+  languages must survive without duplicate checkbox labels.
+- Search a visible phrase crossing inline HTML such as `Press <kbd>Command</kbd>`
+  or an HTML comment. Selecting that phrase before Command-F must prefill its
+  visible text; selected hard breaks must retain their line boundaries.
 - Import display TeX inside list or footnote continuation paragraphs. The formula
   and following text must remain within the same item or note; indented code
   examples must remain literal.

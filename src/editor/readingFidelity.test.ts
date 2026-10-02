@@ -171,7 +171,7 @@ describe("reading fixtures in the real editor schema", () => {
     [{ type: "text", text: "a\\|b", marks: [{ type: "code" }] }, "a\\|b"],
     [{ type: "inlineFormula", attrs: { latex: "a|b" } }, "a|b"],
     [{ type: "inlineFormula", attrs: { latex: "a\\\\|b" } }, "a\\\\|b"],
-    [{ type: "inlineFormula", attrs: { latex: "x\ny" } }, "x\ny"],
+    [{ type: "inlineFormula", attrs: { latex: "x\ny" } }, "x&#10;y"],
     [
       {
         type: "inlineHtmlPreview",

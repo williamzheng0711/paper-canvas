@@ -24,6 +24,7 @@ import { markdownToDocumentWithSelection, type DocumentSelectionAnchor } from '.
 import { getMessages, setCurrentLanguage, type Language } from './i18n';
 import { maximumFontSize, minimumFontSize, normalizeFontSize } from './lib/fontSize';
 import { maximumLineSpacing, minimumLineSpacing, normalizeLineSpacing } from './lib/lineSpacing';
+import { waitForRenderedImages } from './lib/renderedImages';
 import {
   chooseMarkdownFile,
   clearDraft,
@@ -67,6 +68,12 @@ type PendingModeTransition = {
 };
 
 const emptyComments: readonly MarkdownComment[] = [];
+
+function waitForCanvasRender(): Promise<void> {
+  return new Promise((resolve) =>
+    window.requestAnimationFrame(() => window.requestAnimationFrame(() => resolve())),
+  );
+}
 
 function ToolbarIcon({ name }: { name: 'sidebar' | 'search' | 'comments' | 'more' | 'theme' }) {
   const paths = {
@@ -620,13 +627,17 @@ export default function App() {
     const saveSession = documentSessionRef.current;
     if (!forceSaveAs && pendingSave.current && pendingSaveSession.current === saveSession) return pendingSave.current;
     if (sourceModeRef.current) clearSourceCommentSync();
-    else flushCanvasChanges();
     setSaveStatus('saving');
     let succeeded = false;
     const operation = queueFileOperation(async () => {
       try {
         let shouldSaveAs = forceSaveAs;
         while (documentSessionRef.current === saveSession) {
+          if (!sourceModeRef.current) {
+            const pendingImages = canvasSearch.current?.waitForPendingImages?.();
+            if (pendingImages) await pendingImages;
+          }
+          if (documentSessionRef.current !== saveSession) return;
           if (!sourceModeRef.current) flushCanvasChanges();
           const revision = editRevisionRef.current;
           const editingSource = sourceModeRef.current;
@@ -1272,26 +1283,45 @@ export default function App() {
   };
 
   const exportMarkdown = useCallback(async () => {
+    const exportSession = documentSessionRef.current;
     closeExportMenu();
     try {
+      if (!sourceModeRef.current) {
+        const pendingImages = canvasSearch.current?.waitForPendingImages?.();
+        if (pendingImages) await pendingImages;
+      }
+      if (documentSessionRef.current !== exportSession) return;
       if (!sourceModeRef.current) flushCanvasChanges();
       const markdown = sourceModeRef.current
         ? rawMarkdownRef.current
         : fileRef.current.sourceMarkdown ?? documentToPortableMarkdown(fileRef.current.document, fileRef.current.comments ?? []);
       const exportedName = await exportMarkdownFile(markdown, fileRef.current.name);
-      if (exportedName) setMessage(getMessages().exportedFile(exportedName));
+      if (exportedName && documentSessionRef.current === exportSession) setMessage(getMessages().exportedFile(exportedName));
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : getMessages().markdownExportFailed);
+      if (documentSessionRef.current === exportSession) setMessage(error instanceof Error ? error.message : getMessages().markdownExportFailed);
     }
   }, [flushCanvasChanges]);
 
   const exportPdf = useCallback(async () => {
     if (pdfExportingRef.current) return;
+    const exportSession = documentSessionRef.current;
     pdfExportingRef.current = true;
     setPdfExporting(true);
     closeExportMenu();
     setMessage(getMessages().pdfExporting);
     try {
+      if (!sourceModeRef.current) {
+        const pendingImages = canvasSearch.current?.waitForPendingImages?.();
+        if (pendingImages) {
+          await pendingImages;
+          if (documentSessionRef.current !== exportSession) return;
+          flushCanvasChanges();
+          // Let the newly inserted images reach the rendered canvas before
+          // the native PDF command captures it.
+          await waitForCanvasRender();
+        }
+      }
+      if (documentSessionRef.current !== exportSession) return;
       // PDF should always contain the rendered document, even if the author is
       // currently editing its Markdown source.
       if (sourceModeRef.current) {
@@ -1309,24 +1339,29 @@ export default function App() {
         resetCommentHistory();
         sourceModeRef.current = false;
         setSourceMode(false);
-        await new Promise<void>((resolve) =>
-          window.requestAnimationFrame(() => window.requestAnimationFrame(() => resolve())),
-        );
+        await waitForCanvasRender();
       }
+      if (documentSessionRef.current !== exportSession) return;
+      if (canvasArea.current) {
+        const renderedImages = waitForRenderedImages(canvasArea.current);
+        if (renderedImages) await renderedImages;
+      }
+      if (documentSessionRef.current !== exportSession) return;
       if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
       const result = await exportPdfFile(fileRef.current.name);
+      if (documentSessionRef.current !== exportSession) return;
       if (result.type === 'saved') {
         setMessage(getMessages().exportedFile(result.name));
       } else if (result.type === 'print') {
         setMessage(getMessages().pdfInstruction);
       }
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : getMessages().pdfExportFailed);
+      if (documentSessionRef.current === exportSession) setMessage(error instanceof Error ? error.message : getMessages().pdfExportFailed);
     } finally {
       pdfExportingRef.current = false;
       setPdfExporting(false);
     }
-  }, [resetCommentHistory]);
+  }, [flushCanvasChanges, resetCommentHistory]);
 
   const handleCanvasContextMenu = useCallback((placement: CommentPlacement, coordinates: { x: number; y: number }) => {
     const menuWidth = 190;

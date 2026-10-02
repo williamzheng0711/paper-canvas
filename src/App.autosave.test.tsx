@@ -572,6 +572,85 @@ describe('App autosave cursor stability', () => {
     expect(harness.canvasProps?.initialDocument).toEqual(withImage);
   });
 
+  it.each(['save', 'markdown', 'pdf'] as const)('waits for pending images before %s captures the document', async (action) => {
+    let finishImage!: () => void;
+    harness.searchHandle.waitForPendingImages.mockReturnValue(new Promise<void>((resolve) => { finishImage = resolve; }));
+    const withImage = markdownToDocument('Original text\n\n![sample.png](data:image/png;base64,dGVzdA==)\n');
+    await act(async () => {
+      if (action === 'save') documentAction(getMessages().save).click();
+      else exportAction(action === 'markdown' ? 'Markdown (.md)' : 'PDF (.pdf)').click();
+      await flushEffects();
+    });
+    expect(files.saveEditorFile).not.toHaveBeenCalled();
+    expect(files.exportMarkdownFile).not.toHaveBeenCalled();
+    expect(files.exportPdfFile).not.toHaveBeenCalled();
+    await act(async () => {
+      harness.canvasProps?.onChange(withImage);
+      finishImage();
+      await flushEffects();
+      await vi.advanceTimersByTimeAsync(50);
+    });
+    if (action === 'save') expect(files.saveEditorFile).toHaveBeenCalledWith(expect.objectContaining({ document: withImage }), false);
+    else if (action === 'markdown') expect(files.exportMarkdownFile).toHaveBeenCalledWith(documentToMarkdown(withImage), 'research.md');
+    else expect(files.exportPdfFile).toHaveBeenCalledWith('research.md');
+  });
+
+  it.each(['save', 'markdown', 'pdf'] as const)('cancels a waiting %s when another document replaces the canvas', async (action) => {
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    let finishImage!: () => void;
+    harness.searchHandle.waitForPendingImages.mockReturnValue(new Promise<void>((resolve) => { finishImage = resolve; }));
+    try {
+      await act(async () => {
+        if (action === 'save') documentAction(getMessages().save).click();
+        else exportAction(action === 'markdown' ? 'Markdown (.md)' : 'PDF (.pdf)').click();
+        await flushEffects();
+      });
+      await act(async () => { documentAction(getMessages().new).click(); await flushEffects(); });
+      await act(async () => { finishImage(); await flushEffects(); await vi.advanceTimersByTimeAsync(50); });
+      expect(files.saveEditorFile).not.toHaveBeenCalled();
+      expect(files.exportMarkdownFile).not.toHaveBeenCalled();
+      expect(files.exportPdfFile).not.toHaveBeenCalled();
+      expect(host.querySelector('.document-name')?.textContent).toBe('Untitled.md');
+    } finally {
+      confirm.mockRestore();
+    }
+  });
+
+  it.each(['save', 'markdown', 'pdf'] as const)('keeps a failed image read visible and cancels %s', async (action) => {
+    let failImage!: (error: Error) => void;
+    harness.searchHandle.waitForPendingImages.mockReturnValue(new Promise<void>((_, reject) => { failImage = reject; }));
+    await act(async () => {
+      if (action === 'save') documentAction(getMessages().save).click();
+      else exportAction(action === 'markdown' ? 'Markdown (.md)' : 'PDF (.pdf)').click();
+      await flushEffects();
+    });
+    await act(async () => { failImage(new Error('Cannot read pasted image')); await flushEffects(); });
+    expect(files.saveEditorFile).not.toHaveBeenCalled();
+    expect(files.exportMarkdownFile).not.toHaveBeenCalled();
+    expect(files.exportPdfFile).not.toHaveBeenCalled();
+    expect(host.textContent).toContain('Cannot read pasted image');
+  });
+
+  it.each([false, true])('waits for PDF image decoding and guards document replacement (replace=%s)', async (replace) => {
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const image = document.createElement('img');
+    image.src = 'data:image/png;base64,dGVzdA==';
+    let finishDecode!: () => void;
+    image.decode = vi.fn(() => new Promise<void>((resolve) => { finishDecode = resolve; }));
+    host.querySelector('.editor-mode-pane--canvas')!.append(image);
+    try {
+      await act(async () => { exportAction('PDF (.pdf)').click(); await flushEffects(); });
+      expect(image.decode).toHaveBeenCalledOnce();
+      expect(files.exportPdfFile).not.toHaveBeenCalled();
+      if (replace) await act(async () => { documentAction(getMessages().new).click(); await flushEffects(); });
+      await act(async () => { finishDecode(); await flushEffects(); });
+      if (replace) expect(files.exportPdfFile).not.toHaveBeenCalled();
+      else expect(files.exportPdfFile).toHaveBeenCalledWith('research.md');
+    } finally {
+      confirm.mockRestore();
+    }
+  });
+
   it.each(['new', 'open'] as const)('drops a pending source-mode switch when %s replaces its document', async (replacement) => {
     const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
     let finishImage!: () => void;

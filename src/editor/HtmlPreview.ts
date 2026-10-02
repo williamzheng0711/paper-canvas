@@ -1,8 +1,4 @@
-import {
-  Node,
-  mergeAttributes,
-  type NodeViewRendererProps,
-} from "@tiptap/core";
+import { Node, type NodeViewRendererProps } from "@tiptap/core";
 import { convertFileSrc, isTauri } from "@tauri-apps/api/core";
 import DOMPurify from "dompurify";
 import { localAssetUrl } from "../lib/localAssets";
@@ -12,6 +8,7 @@ import {
   previewHtmlAttributes,
   previewHtmlTags,
 } from "./htmlSafety";
+import { sanitizePastedHtml } from "./paste";
 
 type PreviewKind = "block" | "inline";
 type LocalFileConverter = (path: string) => string;
@@ -156,7 +153,11 @@ const previewBlockTags = new Set([
 ]);
 
 /** Read the displayed body without searching HTML tags, attributes, or comments. */
-export function htmlPreviewText(source: string, kind: PreviewKind): string {
+export function htmlPreviewText(
+  source: string,
+  kind: PreviewKind,
+  options: { preserveEdges?: boolean } = {},
+): string {
   const preview = createHtmlPreview(source, { kind });
   if (preview.hidden) return "";
   // Unsupported HTML is intentionally displayed as inert source text.
@@ -188,11 +189,11 @@ export function htmlPreviewText(source: string, kind: PreviewKind): string {
     if (block) text.push("\n");
   }
   preview.childNodes.forEach((child) => visit(child));
-  return text
+  const readable = text
     .join("")
     .replace(/ *\n */g, "\n")
-    .replace(/\n+/g, "\n")
-    .trim();
+    .replace(/\n+/g, "\n");
+  return options.preserveEdges ? readable : readable.trim();
 }
 
 class HtmlPreviewView {
@@ -261,6 +262,20 @@ const htmlPreviewAttributes = {
   basePath: { default: null, rendered: false },
 };
 
+function clipboardHtml(source: string, kind: PreviewKind): HTMLElement {
+  const wrapper = document.createElement(kind === "block" ? "div" : "span");
+  if (isHtmlCommentOnly(source)) return wrapper;
+  if (!isHtmlPreviewCandidate(source)) {
+    wrapper.textContent = source;
+    return wrapper;
+  }
+  // Serialize the actual body, rather than an empty atom marker. The clipboard
+  // sanitizer retains inert formula, footnote, and task metadata; the visual
+  // preview sanitizer intentionally removes it and cannot serve this path.
+  wrapper.innerHTML = sanitizePastedHtml(source);
+  return wrapper;
+}
+
 export const HtmlPreview = Node.create({
   name: "htmlPreview",
   group: "block",
@@ -275,11 +290,12 @@ export const HtmlPreview = Node.create({
     return [{ tag: "div[data-html-preview]" }];
   },
 
-  renderHTML({ HTMLAttributes }) {
-    return [
-      "div",
-      mergeAttributes(HTMLAttributes, { "data-html-preview": "" }),
-    ];
+  renderHTML({ node }) {
+    return clipboardHtml(String(node.attrs.source ?? ""), "block");
+  },
+
+  renderText({ node }) {
+    return htmlPreviewText(String(node.attrs.source ?? ""), "block");
   },
 
   addNodeView() {
@@ -302,11 +318,14 @@ export const InlineHtmlPreview = Node.create({
     return [{ tag: "span[data-inline-html-preview]" }];
   },
 
-  renderHTML({ HTMLAttributes }) {
-    return [
-      "span",
-      mergeAttributes(HTMLAttributes, { "data-inline-html-preview": "" }),
-    ];
+  renderHTML({ node }) {
+    return clipboardHtml(String(node.attrs.source ?? ""), "inline");
+  },
+
+  renderText({ node }) {
+    return htmlPreviewText(String(node.attrs.source ?? ""), "inline", {
+      preserveEdges: true,
+    });
   },
 
   addNodeView() {

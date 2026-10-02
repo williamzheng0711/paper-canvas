@@ -446,3 +446,63 @@ it.each([false, true])('replaces only unchanged selected content after an image 
     Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: false });
   }
 });
+
+it.each([
+  { waiting: false, replacing: false },
+  { waiting: true, replacing: false },
+  { waiting: true, replacing: true },
+])('handles failed image reads without unhandled rejection (waiting: $waiting, replacement: $replacing)', async ({ waiting, replacing }) => {
+  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+  const failure = new Error('Image could not be read');
+  let failRead: (() => void) | undefined;
+  vi.stubGlobal('FileReader', class {
+    error = failure;
+    onerror: (() => void) | null = null;
+    readAsDataURL() { failRead = () => this.onerror?.(); }
+  });
+  const host = document.createElement('div');
+  document.body.append(host);
+  const root = createRoot(host);
+  const handle = createRef<SwitchableEditorHandle>();
+  const onChange = vi.fn();
+  const onEdit = vi.fn();
+  const onLinkError = vi.fn();
+  try {
+    await act(async () => root.render(
+      <CanvasEditor ref={handle} language="en" documentId={1} initialDocument={markdownConversion.markdownToDocument('Original text')} onChange={onChange} onEdit={onEdit} onLinkError={onLinkError} />,
+    ));
+    const editor = harness.editor!;
+    let before = editor.getJSON();
+    const event = new Event('paste', { cancelable: true });
+    Object.defineProperty(event, 'clipboardData', {
+      value: { files: [new File(['image'], 'sample.png', { type: 'image/png' })] },
+    });
+    editor.view.someProp('handlePaste', (handler) => handler(editor.view, event as ClipboardEvent, null!));
+    const completion = waiting ? handle.current?.waitForPendingImages?.()?.catch((error: unknown) => error) : undefined;
+    if (replacing) {
+      await act(async () => root.render(
+        <CanvasEditor ref={handle} language="en" documentId={2} initialDocument={markdownConversion.markdownToDocument('Next document')} onChange={onChange} onEdit={onEdit} onLinkError={onLinkError} />,
+      ));
+      before = editor.getJSON();
+    }
+    let outcome: unknown;
+    await act(async () => {
+      failRead?.();
+      outcome = await completion;
+      await Promise.resolve();
+    });
+    if (waiting && !replacing) expect(outcome).toBe(failure);
+    else expect(outcome).toBeUndefined();
+    if (replacing) expect(onLinkError).not.toHaveBeenCalled();
+    else expect(onLinkError).toHaveBeenCalledExactlyOnceWith(failure.message);
+    expect(onChange).not.toHaveBeenCalled();
+    expect(onEdit).not.toHaveBeenCalled();
+    expect(editor.getJSON()).toEqual(before);
+    expect(handle.current?.waitForPendingImages?.()).toBeUndefined();
+  } finally {
+    await act(async () => root.unmount());
+    host.remove();
+    vi.unstubAllGlobals();
+    Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: false });
+  }
+});

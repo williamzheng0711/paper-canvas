@@ -10,6 +10,7 @@ import {
   DocumentSearch,
   findDocumentMatches,
   findTextMatches,
+  getSelectedDocumentText,
   searchDocument,
 } from "./search";
 
@@ -64,6 +65,7 @@ describe("document search", () => {
       anchor: 7,
       head: 8,
     });
+    expect(getSelectedDocumentText(editor)).toBe("Command");
     expect(
       editor.view.dom
         .querySelector(".html-preview--inline")
@@ -103,6 +105,7 @@ describe("document search", () => {
     expect((editor.state.selection as NodeSelection).node.type.name).toBe(
       "htmlPreview",
     );
+    expect(getSelectedDocumentText(editor)).toBe("Command\nCommand");
     expect(
       editor.view.dom
         .querySelector(".html-preview--block")
@@ -288,6 +291,129 @@ describe("document search", () => {
       current: 0,
       total: 0,
     });
+  });
+
+  it("finds visible phrases that cross inline HTML without selecting unrelated atoms", () => {
+    const editor = new Editor({
+      extensions: [StarterKit, InlineHtmlPreview, DocumentSearch],
+      content: {
+        type: "doc",
+        content: [
+          {
+            type: "paragraph",
+            content: [
+              { type: "text", text: "Press " },
+              {
+                type: "inlineHtmlPreview",
+                attrs: { source: "<kbd>Command</kbd>" },
+              },
+              { type: "text", text: " to continue." },
+            ],
+          },
+        ],
+      },
+    });
+    editors.push(editor);
+    const before = editor.getJSON();
+    expect(findDocumentMatches(editor.state.doc, "Press Command")).toEqual([
+      { from: 1, to: 8 },
+    ]);
+    expect(findDocumentMatches(editor.state.doc, "Command to")).toEqual([
+      { from: 7, to: 11 },
+    ]);
+    expect(findDocumentMatches(editor.state.doc, "continue")).toEqual([
+      { from: 12, to: 20 },
+    ]);
+    expect(searchDocument(editor, "Press Command to", "reset")).toEqual({
+      current: 1,
+      total: 1,
+    });
+    expect(editor.state.selection.toJSON()).toMatchObject({
+      anchor: 1,
+      head: 11,
+    });
+    expect(getSelectedDocumentText(editor)).toBe("Press Command to");
+    expect(editor.getJSON()).toEqual(before);
+  });
+
+  it("keeps search text continuous across hidden inline comments and separates hard breaks", () => {
+    const editor = new Editor({
+      extensions: [StarterKit, InlineHtmlPreview, DocumentSearch],
+      content: {
+        type: "doc",
+        content: [
+          {
+            type: "paragraph",
+            content: [
+              { type: "text", text: "Alpha" },
+              {
+                type: "inlineHtmlPreview",
+                attrs: { source: "<!-- Invisible -->" },
+              },
+              { type: "text", text: "Beta" },
+              { type: "hardBreak" },
+              { type: "text", text: "Gamma" },
+            ],
+          },
+        ],
+      },
+    });
+    editors.push(editor);
+    expect(findDocumentMatches(editor.state.doc, "AlphaBeta")).toEqual([
+      { from: 1, to: 11 },
+    ]);
+    expect(findDocumentMatches(editor.state.doc, "BetaGamma")).toEqual([]);
+    expect(findDocumentMatches(editor.state.doc, "Beta\nGamma")).toEqual([
+      { from: 7, to: 17 },
+    ]);
+    editor.commands.setTextSelection({ from: 1, to: 17 });
+    expect(getSelectedDocumentText(editor)).toBe("AlphaBeta\nGamma");
+  });
+
+  it("preserves visible spaces at inline HTML edges and UTF-16 positions around emoji", () => {
+    const editor = new Editor({
+      extensions: [StarterKit, InlineHtmlPreview, DocumentSearch],
+      content: {
+        type: "doc",
+        content: [
+          {
+            type: "paragraph",
+            content: [
+              { type: "text", text: "😀before" },
+              {
+                type: "inlineHtmlPreview",
+                attrs: { source: "<b> after </b>" },
+              },
+              { type: "text", text: "next 😀target" },
+            ],
+          },
+        ],
+      },
+    });
+    editors.push(editor);
+    expect(findDocumentMatches(editor.state.doc, "before after next")).toEqual([
+      { from: 3, to: 14 },
+    ]);
+    expect(findDocumentMatches(editor.state.doc, "beforeafter")).toEqual([]);
+    expect(searchDocument(editor, "😀target", "reset")).toEqual({
+      current: 1,
+      total: 1,
+    });
+    expect(editor.state.selection.toJSON()).toMatchObject({
+      anchor: 15,
+      head: 23,
+    });
+  });
+
+  it("keeps selected paragraph boundaries so Find does not prefill a nonexistent phrase", () => {
+    const editor = new Editor({
+      extensions: [StarterKit, DocumentSearch],
+      content: "<p>First</p><p>Second</p>",
+    });
+    editors.push(editor);
+    editor.commands.setTextSelection({ from: 1, to: 14 });
+    expect(getSelectedDocumentText(editor)).toBe("First\nSecond");
+    expect(findDocumentMatches(editor.state.doc, "First Second")).toEqual([]);
   });
 
   it("refreshes matches after editing without selecting or scrolling", () => {

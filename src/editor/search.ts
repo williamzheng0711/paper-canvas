@@ -88,43 +88,80 @@ export function findTextMatches(text: string, query: string): SearchMatch[] {
   return matches;
 }
 
-type TextSegment = { from: number; to?: number; text: string };
+type TextSpan = {
+  from: number;
+  to: number;
+  textFrom: number;
+  textTo: number;
+  atom: boolean;
+};
+type TextSegment = { text: string; spans: TextSpan[] };
 
 // ProseMirror nodes are immutable: edits create a new identity, while search
 // navigation reuses the sanitized text for unchanged HTML atoms.
 const htmlTextCache = new WeakMap<ProseMirrorNode, string>();
 
+function readableHtml(node: ProseMirrorNode): string {
+  let text = htmlTextCache.get(node);
+  if (text === undefined) {
+    text = htmlPreviewText(
+      String(node.attrs.source ?? ""),
+      node.isInline ? "inline" : "block",
+      { preserveEdges: node.isInline },
+    );
+    htmlTextCache.set(node, text);
+  }
+  return text;
+}
+
 function collectTextSegments(document: ProseMirrorNode): TextSegment[] {
   const segments: TextSegment[] = [];
 
+  function append(
+    segment: TextSegment,
+    text: string,
+    node: ProseMirrorNode,
+    from: number,
+  ): void {
+    if (!text) return;
+    const textFrom = segment.text.length;
+    segment.text += text;
+    segment.spans.push({
+      from,
+      to: from + node.nodeSize,
+      textFrom,
+      textTo: segment.text.length,
+      atom: !node.isText,
+    });
+  }
+
   document.descendants((node, position) => {
-    if (
-      node.type.name === "htmlPreview" ||
-      node.type.name === "inlineHtmlPreview"
-    ) {
-      let text = htmlTextCache.get(node);
-      if (text === undefined) {
-        text = htmlPreviewText(
-          String(node.attrs.source ?? ""),
-          node.isInline ? "inline" : "block",
-        );
-        htmlTextCache.set(node, text);
-      }
-      if (text)
-        segments.push({ from: position, to: position + node.nodeSize, text });
+    if (node.type.name === "htmlPreview") {
+      const segment: TextSegment = { text: "", spans: [] };
+      append(segment, readableHtml(node), node, position);
+      if (segment.text) segments.push(segment);
       return false;
     }
-    if (!node.isText || !node.text) return;
-    const previous = segments.at(-1);
-    if (
-      previous &&
-      previous.to === undefined &&
-      previous.from + previous.text.length === position
-    ) {
-      previous.text += node.text;
-      return;
-    }
-    segments.push({ from: position, text: node.text });
+    if (!node.isTextblock) return;
+
+    let segment: TextSegment = { text: "", spans: [] };
+    node.forEach((child, offset) => {
+      const from = position + 1 + offset;
+      if (child.isText) {
+        append(segment, child.text ?? "", child, from);
+      } else if (child.type.name === "inlineHtmlPreview") {
+        append(segment, readableHtml(child), child, from);
+      } else if (child.type.name === "hardBreak") {
+        append(segment, "\n", child, from);
+      } else {
+        // Formulas and other visible atoms cannot disappear from a matched
+        // phrase. A hidden HTML comment, handled above, adds no visible text.
+        if (segment.text) segments.push(segment);
+        segment = { text: "", spans: [] };
+      }
+    });
+    if (segment.text) segments.push(segment);
+    return false;
   });
 
   return segments;
@@ -135,12 +172,26 @@ export function findDocumentMatches(
   query: string,
 ): SearchMatch[] {
   if (!query) return [];
-  return collectTextSegments(document).flatMap((segment) =>
-    findTextMatches(segment.text, query).map((match) => ({
-      from: segment.to === undefined ? segment.from + match.from : segment.from,
-      to: segment.to ?? segment.from + match.to,
-    })),
-  );
+  return collectTextSegments(document).flatMap((segment) => {
+    let firstIndex = 0;
+    let lastIndex = 0;
+    return findTextMatches(segment.text, query).map((match) => {
+      // A preview may contain many characters in one ProseMirror atom. Project
+      // each edge separately so a phrase can span editable text and a preview,
+      // while a match wholly inside a preview selects only that atom.
+      while (segment.spans[firstIndex].textTo <= match.from) firstIndex += 1;
+      lastIndex = Math.max(firstIndex, lastIndex);
+      while (segment.spans[lastIndex].textTo < match.to) lastIndex += 1;
+      const first = segment.spans[firstIndex];
+      const last = segment.spans[lastIndex];
+      return {
+        from: first.atom
+          ? first.from
+          : first.from + match.from - first.textFrom,
+        to: last.atom ? last.to : last.from + match.to - last.textFrom,
+      };
+    });
+  });
 }
 
 function buildDecorations(
@@ -331,5 +382,11 @@ export function clearDocumentSearch(editor: Editor): void {
 
 export function getSelectedDocumentText(editor: Editor): string {
   const { from, to, empty } = editor.state.selection;
-  return empty ? "" : editor.state.doc.textBetween(from, to, " ");
+  return empty
+    ? ""
+    : editor.state.doc.textBetween(from, to, "\n", (node) => {
+        if (["htmlPreview", "inlineHtmlPreview"].includes(node.type.name))
+          return readableHtml(node);
+        return node.type.name === "hardBreak" ? "\n" : "";
+      });
 }

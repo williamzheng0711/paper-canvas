@@ -91,6 +91,31 @@ describe("HTML paste sanitization", () => {
     destination.destroy();
   });
 
+  it("removes preview checkbox labels only when native task metadata renders the checkbox", () => {
+    const sanitized = sanitizePastedHtml(
+      '<ul data-type="taskList"><li data-type="taskItem" data-checked="true"><span data-papercanvas-task-marker="">[x] </span><div><p>Done</p></div></li></ul>' +
+        '<p><span data-papercanvas-task-marker="">Keep this text</span></p><script>discard()</script>',
+    );
+    const editor = clipboardEditor(markdownToDocument("replace me"));
+    editor.commands.selectAll();
+    pasteHtml(editor, sanitized);
+    expect(editor.getJSON().content?.[0]).toMatchObject({
+      type: "taskList",
+      content: [
+        {
+          type: "taskItem",
+          attrs: { checked: true },
+          content: [
+            { type: "paragraph", content: [{ type: "text", text: "Done" }] },
+          ],
+        },
+      ],
+    });
+    expect(editor.state.doc.textContent).toBe("DoneKeep this text");
+    expect(sanitized).not.toContain("discard");
+    editor.destroy();
+  });
+
   it("retains merged cell geometry, alignment, and image dimensions through HTML paste", () => {
     const destination = clipboardEditor(markdownToDocument("replace me"));
     destination.commands.selectAll();

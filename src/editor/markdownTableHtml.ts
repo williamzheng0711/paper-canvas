@@ -50,7 +50,7 @@ export function requiresHtmlTable(table: JSONContent): boolean {
 
 function escapeHtml(value: unknown): string {
   return String(value ?? "").replace(
-    /[&<>"']/g,
+    /[&<>"'\r\n]/g,
     (character) =>
       ({
         "&": "&amp;",
@@ -58,7 +58,28 @@ function escapeHtml(value: unknown): string {
         ">": "&gt;",
         '"': "&quot;",
         "'": "&#39;",
+        // Blank lines end a CommonMark HTML block even inside <pre> or an
+        // attribute. Entities keep the whole table in one block and restore
+        // the source's line breaks when the HTML is rendered or copied.
+        "\r": "&#13;",
+        "\n": "&#10;",
       })[character]!,
+  );
+}
+
+function singleLineHtml(source: string): string {
+  const encodeBreaks = (value: string) =>
+    value.replace(/[\r\n]/g, (character) =>
+      character === "\r" ? "&#13;" : "&#10;",
+    );
+  return source.replace(
+    /<!--[\s\S]*?-->|<\/?[A-Za-z][A-Za-z0-9:-]*(?:[^"'<>]|"[^"]*"|'[^']*')*>|[^<]+|</g,
+    (token) =>
+      /^<\/?[A-Za-z]/.test(token)
+        ? token.replace(/"[^"]*"|'[^']*'|[\r\n]+/g, (value) =>
+            value[0] === '"' || value[0] === "'" ? encodeBreaks(value) : " ",
+          )
+        : encodeBreaks(token),
   );
 }
 
@@ -106,16 +127,17 @@ export function tableToHtml(node: JSONContent): string {
     case "blockquote":
       return `<blockquote>${children()}</blockquote>`;
     case "bulletList":
-    case "taskList":
       return `<ul>${children()}</ul>`;
+    case "taskList":
+      return `<ul data-type="taskList">${children()}</ul>`;
     case "orderedList":
       return `<ol${attribute("start", node.attrs?.start)}>${children()}</ol>`;
     case "listItem":
       return `<li>${children()}</li>`;
     case "taskItem":
-      return `<li>${node.attrs?.checked ? "[x]" : "[ ]"} ${children()}</li>`;
+      return `<li data-type="taskItem" data-checked="${Boolean(node.attrs?.checked)}"><span data-papercanvas-task-marker="">${node.attrs?.checked ? "[x]" : "[ ]"} </span><div>${children()}</div></li>`;
     case "codeBlock":
-      return `<pre><code${attribute("lang", node.attrs?.language)}>${escapeHtml((node.content ?? []).map((child) => child.text ?? "").join(""))}</code></pre>`;
+      return `<pre><code${attribute("lang", node.attrs?.language)}${node.attrs?.language ? attribute("class", `language-${node.attrs.language}`) : ""}>${escapeHtml((node.content ?? []).map((child) => child.text ?? "").join(""))}</code></pre>`;
     case "horizontalRule":
       return "<hr>";
     case "hardBreak":
@@ -129,10 +151,17 @@ export function tableToHtml(node: JSONContent): string {
     case "inlineFormula":
       return markedHtml(
         node,
-        `<span>${escapeHtml(`$${node.attrs?.latex ?? ""}$`)}</span>`,
+        `<span data-formula-kind="inline"${attribute("latex", node.attrs?.latex)}${attribute("data-latex", node.attrs?.latex)}>${escapeHtml(`$${node.attrs?.latex ?? ""}$`)}</span>`,
       );
     case "blockFormula":
-      return `<pre>${escapeHtml(`$$\n${node.attrs?.latex ?? ""}\n$$`)}</pre>`;
+      return `<div data-formula-kind="block"${attribute("latex", node.attrs?.latex)}${attribute("data-latex", node.attrs?.latex)}><pre>${escapeHtml(`$$\n${node.attrs?.latex ?? ""}\n$$`)}</pre></div>`;
+    case "footnoteReference":
+      return markedHtml(
+        node,
+        `<sup data-footnote-reference=""${attribute("data-footnote-identifier", node.attrs?.identifier)}${attribute("data-footnote-label", node.attrs?.label)}>${escapeHtml(node.attrs?.label || node.attrs?.identifier)}</sup>`,
+      );
+    case "footnoteDefinition":
+      return `<div data-footnote-definition=""${attribute("data-footnote-identifier", node.attrs?.identifier)}${attribute("data-footnote-label", node.attrs?.label)}><span>${escapeHtml(node.attrs?.label || node.attrs?.identifier)} ↩</span><div class="footnote-content">${children()}</div></div>`;
     case "table":
       return `<table>${children()}</table>`;
     case "tableRow":
@@ -147,7 +176,7 @@ export function tableToHtml(node: JSONContent): string {
     }
     case "htmlPreview":
     case "inlineHtmlPreview":
-      return markedHtml(node, String(node.attrs?.source ?? ""));
+      return markedHtml(node, singleLineHtml(String(node.attrs?.source ?? "")));
     case "unsupportedMarkdown":
       return `<pre>${escapeHtml(node.attrs?.source)}</pre>`;
     default:

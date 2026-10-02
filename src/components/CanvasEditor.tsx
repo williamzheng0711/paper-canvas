@@ -93,6 +93,7 @@ type PendingImageInsertion = {
   documentId: number;
   target: ImageInsertionTarget;
   completion?: Promise<void>;
+  error?: Error;
 };
 
 function insertImage(view: EditorView, src: string, alt: string, target: ImageInsertionTarget): void {
@@ -431,7 +432,10 @@ export const CanvasEditor = memo(
       const view = currentView();
       if (view) insertImage(view, src, image.name, insertion.target);
     }).catch((error: unknown) => {
-      if (currentView()) onLinkErrorRef.current?.(error instanceof Error ? error.message : getMessages().imageReadFailed);
+      // Keep the completion handled when no save or mode switch is awaiting
+      // it, but let an active waiter cancel rather than report success.
+      insertion.error = error instanceof Error ? error : new Error(getMessages().imageReadFailed);
+      if (currentView()) onLinkErrorRef.current?.(insertion.error.message);
     }).finally(() => { pendingImagesRef.current.delete(insertion); });
   }, []);
 
@@ -794,6 +798,9 @@ export const CanvasEditor = memo(
             const insertions = pending();
             if (insertions.length === 0) return;
             await Promise.all(insertions.map((insertion) => insertion.completion));
+            if (!componentMountedRef.current || documentSnapshot.current.id !== originatingDocumentId) return;
+            const failed = insertions.find((insertion) => insertion.error);
+            if (failed?.error) throw failed.error;
           }
         })();
       },

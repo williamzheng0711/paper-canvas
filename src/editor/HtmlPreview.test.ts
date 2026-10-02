@@ -7,6 +7,7 @@ import {
   HtmlPreview,
   InlineHtmlPreview,
 } from "./HtmlPreview";
+import { sanitizePastedHtml } from "./paste";
 
 describe("sanitized HTML previews", () => {
   afterEach(() => {
@@ -234,5 +235,93 @@ describe("sanitized HTML previews", () => {
         ?.classList.contains("is-selected"),
     ).toBe(true);
     editor.destroy();
+  });
+
+  it("copies visible block and inline previews through the actual editor HTML and plain-text clipboard paths", () => {
+    const source = new Editor({
+      extensions: [StarterKit, HtmlPreview, InlineHtmlPreview],
+      content: {
+        type: "doc",
+        content: [
+          {
+            type: "htmlPreview",
+            attrs: {
+              source:
+                '<p onclick="discard()">Block <strong>content</strong></p>',
+            },
+          },
+          {
+            type: "paragraph",
+            content: [
+              { type: "text", text: "Use " },
+              {
+                type: "inlineHtmlPreview",
+                attrs: { source: "<kbd>Command</kbd>" },
+              },
+              { type: "text", text: " now." },
+            ],
+          },
+        ],
+      },
+    });
+    const destination = new Editor({
+      extensions: [StarterKit, HtmlPreview, InlineHtmlPreview],
+      editorProps: { transformPastedHTML: sanitizePastedHtml },
+      content: "<p>replace me</p>",
+    });
+    try {
+      source.commands.selectAll();
+      const copied = source.view.serializeForClipboard(
+        source.state.selection.content(),
+      );
+      expect(copied.text).toContain("Block content");
+      expect(copied.text).toContain("Use Command now.");
+      expect(source.getHTML()).not.toContain("onclick");
+      destination.commands.selectAll();
+      destination.view.pasteHTML(
+        source.getHTML(),
+        new Event("paste") as ClipboardEvent,
+      );
+      expect(destination.state.doc.textContent).toBe(
+        "Block contentUse Command now.",
+      );
+      expect(destination.getJSON().content?.[0].content?.[1]).toMatchObject({
+        type: "text",
+        text: "content",
+        marks: [{ type: "bold" }],
+      });
+    } finally {
+      source.destroy();
+      destination.destroy();
+    }
+  });
+
+  it("copies blocked previews as literal text and leaves hidden comments invisible", () => {
+    const blocked =
+      '<script>discard()</script><iframe src="https://example.com"></iframe>';
+    const source = new Editor({
+      extensions: [StarterKit, HtmlPreview, InlineHtmlPreview],
+      content: {
+        type: "doc",
+        content: [
+          { type: "htmlPreview", attrs: { source: blocked } },
+          { type: "htmlPreview", attrs: { source: "<!-- hidden source -->" } },
+        ],
+      },
+    });
+    try {
+      source.commands.selectAll();
+      expect(
+        source.view.serializeForClipboard(source.state.selection.content())
+          .text,
+      ).toContain(blocked);
+      const copied = document.createElement("div");
+      copied.innerHTML = source.getHTML();
+      expect(copied.querySelector("script,iframe")).toBeNull();
+      expect(copied.textContent).toBe(blocked);
+      expect(copied.textContent).not.toContain("hidden source");
+    } finally {
+      source.destroy();
+    }
   });
 });

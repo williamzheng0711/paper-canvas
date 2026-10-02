@@ -108,7 +108,7 @@ export function insertPastedFormula(view: EditorView, text: string): boolean {
  * browser attributes need to survive a paste.
  */
 export function sanitizePastedHtml(html: string): string {
-  return DOMPurify.sanitize(html, {
+  const sanitized = DOMPurify.sanitize(html, {
     ALLOWED_TAGS: [
       "p",
       "div",
@@ -153,6 +153,7 @@ export function sanitizePastedHtml(html: string): string {
       "start",
       "data-type",
       "data-checked",
+      "data-papercanvas-task-marker",
       "data-footnote-reference",
       "data-footnote-definition",
       "data-footnote-identifier",
@@ -172,4 +173,15 @@ export function sanitizePastedHtml(html: string): string {
     ],
     ALLOW_DATA_ATTR: false,
   });
+  if (!sanitized.includes("data-papercanvas-task-marker")) return sanitized;
+  const template = document.createElement("template");
+  template.innerHTML = sanitized;
+  // Rich-table source carries a readable checkbox for HTML previews. Native
+  // task nodes already render their own checkbox when that source is pasted.
+  template.content
+    .querySelectorAll(
+      'li[data-type="taskItem"][data-checked] span[data-papercanvas-task-marker]',
+    )
+    .forEach((marker) => marker.remove());
+  return template.innerHTML;
 }
