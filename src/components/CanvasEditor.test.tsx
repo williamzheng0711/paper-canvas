@@ -866,6 +866,16 @@ it.each([
       transaction.setSelection(TextSelection.create(transaction.doc, position + closing.length));
       editor.view.dispatch(transaction);
     });
+    if (node === 'inlineFormula') await act(async () => {
+      // jsdom does not provide Range geometry after the formula receives focus.
+      vi.spyOn(editor.view, 'coordsAtPos').mockReturnValue({ top: 0, bottom: 0, left: 0, right: 0 });
+      // The formula view consumes its initial focus request on an animation
+      // frame. Compare stable content after that request has been handled.
+      await vi.waitFor(() => {
+        const formula = editor.getJSON().content?.[0].content?.find((content) => content.type === node);
+        expect(formula && 'attrs' in formula ? formula.attrs : undefined).toMatchObject({ autoEdit: false, sourceCaret: null });
+      });
+    });
     const beforeImage = editor.getJSON();
     expect(beforeImage.content?.[0].content?.some((content) => content.type === node)).toBe(true);
     await act(async () => { finishRead?.(); });

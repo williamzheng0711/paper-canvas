@@ -170,7 +170,7 @@ and complete multi-page PDF export while Source stayed active. The seeded
 Canvas history probe exercised 70,000 actions; a browser probe accepted 4,000
 nested HTML blockquotes without a parser or traversal error. Native oversized
 paste followed by Undo/Redo/Undo and Save preserved mixed CRLF/LF/CR bytes.
-The final automated run passed 1,243 tests across 70 frontend test files and
+The final automated run passed 1,249 tests across 70 frontend test files and
 31 native tests, along with lint, type checking, and production/native builds.
 Composition and delayed-operation regressions are
 also exercised by the automated editor and application suites. Real IME

@@ -217,10 +217,11 @@ export function rebaseImageDestination(
     windows ? left.toLowerCase() === right.toLowerCase() : left === right;
   if (equal(oldDirectory, newDirectory)) return raw;
   const decoded = decodedDestination(raw, kind);
+  const rootRelative = windows && /^[\\/](?![\\/])/.test(decoded.text);
   if (
     !decoded.text ||
-    /^(?:[A-Za-z][A-Za-z0-9+.-]*:|\/|[?#])/.test(decoded.text) ||
-    (windows && decoded.text.startsWith("\\"))
+    /^(?:[A-Za-z][A-Za-z0-9+.-]*:|[?#])/.test(decoded.text) ||
+    (!rootRelative && (decoded.text.startsWith("/") || (windows && decoded.text.startsWith("\\"))))
   )
     return raw;
 
@@ -237,7 +238,7 @@ export function rebaseImageDestination(
     // Different Windows drives cannot share a relative path. A file URL still
     // points at the existing image; originals are never copied or moved.
     const syntax = decodedDestination(raw, kind, false);
-    const target = localAssetPath(oldDirectory, syntax.text).path.replace(
+    const target = localAssetPath(oldDirectory.replace(/\//g, "\\"), syntax.text).path.replace(
       /\\/g,
       "/",
     );
@@ -258,6 +259,7 @@ export function rebaseImageDestination(
       originalSuffix
     );
   }
+  if (rootRelative) return raw;
   let relative = raw;
   const syntax = decodedDestination(raw, kind, false);
   const suffix = syntax.text.search(/[?#]/);

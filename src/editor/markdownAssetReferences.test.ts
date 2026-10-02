@@ -461,4 +461,27 @@ describe("rebasing local images after cross-directory Save As", () => {
       ),
     );
   });
+
+  it.each([
+    ['C:\\notes\\paper.md', 'D:\\copies\\copy.md', '/images/My%20figure.svg?view=1#diagram', 'file:///C:/images/My%20figure.svg?view=1#diagram'],
+    ['C:\\notes\\paper.md', 'D:\\copies\\copy.md', '\\images\\My%20figure.svg?view=1#diagram', 'file:///C:/images/My%20figure.svg?view=1#diagram'],
+    ['\\\\server\\share\\notes\\paper.md', '\\\\server\\other\\copies\\copy.md', '/images/a.svg', 'file://server/share/images/a.svg'],
+    ['\\\\server\\share\\notes\\paper.md', '\\\\other\\share\\copies\\copy.md', '\\images\\a.svg', 'file://server/share/images/a.svg'],
+  ])('keeps a Windows root-relative image at its original drive or share: %s → %s', (oldPath, newPath, destination, expected) => {
+    const rebased = rebaseImageDestination(destination, oldPath, newPath);
+    expect(rebased).toBe(expected);
+    const parent = (path: string) => path.slice(0, path.lastIndexOf('\\'));
+    expect(localAssetPath(parent(newPath), rebased)).toEqual(localAssetPath(parent(oldPath), destination));
+    expect(rebaseMarkdownImageAssets(`![Diagram](${destination})\r\n`, oldPath, newPath)).toBe(`![Diagram](${expected})\r\n`);
+    expect(rebaseHtmlImageAssets(`<img src="${destination}">`, oldPath, newPath)).toBe(`<img src="${expected}">`);
+  });
+
+  it.each([
+    ['C:\\notes\\paper.md', 'c:\\copies\\copy.md'],
+    ['\\\\server\\share\\notes\\paper.md', '\\\\SERVER\\SHARE\\copies\\copy.md'],
+  ])('retains original single-root image bytes within the same Windows root: %s → %s', (oldPath, newPath) => {
+    for (const destination of ['/images/a.svg?view=1#diagram', '\\images\\a.svg?view=1#diagram']) {
+      expect(rebaseImageDestination(destination, oldPath, newPath)).toBe(destination);
+    }
+  });
 });
