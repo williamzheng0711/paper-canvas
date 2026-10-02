@@ -1,14 +1,8 @@
-import CodeBlockLowlight from '@tiptap/extension-code-block-lowlight';
 import Placeholder from '@tiptap/extension-placeholder';
-import { Table, TableRow } from '@tiptap/extension-table';
-import TaskItem from '@tiptap/extension-task-item';
-import TaskList from '@tiptap/extension-task-list';
 import { EditorContent, useEditor } from '@tiptap/react';
-import StarterKit from '@tiptap/starter-kit';
-import { common, createLowlight } from 'lowlight';
 import { forwardRef, memo, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useRef } from 'react';
 import type { Editor, JSONContent } from '@tiptap/core';
-import type { Slice } from '@tiptap/pm/model';
+import { Fragment, Slice } from '@tiptap/pm/model';
 import { Selection, TextSelection, type SelectionBookmark } from '@tiptap/pm/state';
 import type { EditorView } from '@tiptap/pm/view';
 import {
@@ -23,20 +17,16 @@ import {
   createCommentDecorationsExtension,
   type CanvasCommentPosition,
 } from '../editor/commentDecorations';
-import { BlockFormula, InlineFormula, focusedFormulaSelection, focusFormulaSource } from '../editor/Formula';
+import { focusedFormulaSelection, focusFormulaSource, updateFormulaLabels } from '../editor/Formula';
 import { MarkdownTyping } from '../editor/markdownTyping';
 import { QuoteTyping } from '../editor/quoteTyping';
 import { IndentedListInput } from '../editor/indentedListInput';
 import { TaskListInput } from '../editor/taskListInput';
-import { FootnoteReference, FootnoteDefinition } from '../editor/Footnote';
-import { PaperOrderedList } from '../editor/PaperOrderedList';
-import { HtmlPreview, InlineHtmlPreview } from '../editor/HtmlPreview';
+import { updateFootnoteLabels } from '../editor/Footnote';
+import { canvasNodesAndMarks } from '../editor/canvasSchema';
 import { replaceDocumentPreservingSelection } from '../editor/documentSync';
 import { documentToMarkdown } from '../editor/markdown';
 import { insertPastedFormula, insertPastedMarkdown, sanitizePastedHtml } from '../editor/paste';
-import { PaperImage } from '../editor/PaperImage';
-import { PaperCode, PaperLink } from '../editor/PaperLink';
-import { PaperTableCell, PaperTableHeader } from '../editor/PaperTable';
 import { activateDocumentLink, documentLinkTarget } from '../editor/linkNavigation';
 import { scrollToOutlineHeading } from '../editor/outline';
 import {
@@ -45,7 +35,7 @@ import {
   positionFromDocumentAnchor,
   selectionMarker,
 } from '../editor/selectionMapping';
-import { UnsupportedMarkdown } from '../editor/UnsupportedMarkdown';
+import { updateUnsupportedMarkdownLabels } from '../editor/UnsupportedMarkdown';
 import {
   clearDocumentSearch,
   DocumentSearch,
@@ -55,8 +45,6 @@ import {
   type SwitchableEditorHandle,
 } from '../editor/search';
 import { getMessages, type Language } from '../i18n';
-
-const lowlight = createLowlight(common);
 
 type Props = {
   language: Language;
@@ -82,6 +70,7 @@ function readImage(file: File): Promise<string> {
     const reader = new FileReader();
     reader.onload = () => resolve(String(reader.result));
     reader.onerror = () => reject(reader.error ?? new Error(getMessages().imageReadFailed));
+    reader.onabort = () => reject(new Error(getMessages().imageReadFailed));
     reader.readAsDataURL(file);
   });
 }
@@ -97,10 +86,10 @@ type PendingImageInsertion = {
   error?: Error;
 };
 
-function insertImage(view: EditorView, src: string, alt: string, target: ImageInsertionTarget): void {
+function insertImages(view: EditorView, images: readonly { src: string; alt: string }[], target: ImageInsertionTarget): void {
   const imageNode = view.state.schema.nodes.image;
   if (!imageNode) return;
-  const image = imageNode.create({ src, alt });
+  const content = new Slice(Fragment.fromArray(images.map(({ src, alt }) => imageNode.create({ src, alt }))), 0, 0);
   const currentSelection = view.state.selection.getBookmark();
   let pasteSelection: Selection | undefined;
   if (target.kind === 'paste') {
@@ -113,8 +102,8 @@ function insertImage(view: EditorView, src: string, alt: string, target: ImageIn
   }
   const transaction =
     target.kind === 'paste'
-      ? view.state.tr.setSelection(pasteSelection!).replaceSelectionWith(image)
-      : view.state.tr.replaceRangeWith(target.position, target.position, image);
+      ? view.state.tr.setSelection(pasteSelection!).replaceSelection(content)
+      : view.state.tr.replaceRange(target.position, target.position, content);
   transaction.setSelection(currentSelection.map(transaction.mapping).resolve(transaction.doc));
   const restoreFocus = view.hasFocus();
   view.dispatch(transaction.scrollIntoView());
@@ -330,6 +319,8 @@ export const CanvasEditor = memo(
   ref,
 ) {
   const text = getMessages(language);
+  const textRef = useRef(text);
+  textRef.current = text;
   // Keep the live immutable document across editor recreation. Parent snapshots
   // may lag behind typing while the debounced change notification is pending.
   const documentSnapshot = useRef<{
@@ -414,7 +405,7 @@ export const CanvasEditor = memo(
     }, 400);
   }, [flushCommentMapping]);
 
-  const readAndInsertImage = useCallback((image: File, position?: number) => {
+  const readAndInsertImages = useCallback((images: readonly File[], position?: number) => {
     const originatingEditor = editorRef.current;
     if (!originatingEditor) return;
     const originatingDocumentId = documentSnapshot.current.id;
@@ -428,15 +419,18 @@ export const CanvasEditor = memo(
           }
         : { kind: 'drop', position },
     };
+    const previousInsertion = [...pendingImagesRef.current].filter((pending) => pending.documentId === originatingDocumentId).at(-1)?.completion;
     pendingImagesRef.current.add(insertion);
     const currentView = () => {
       const currentEditor = editorRef.current;
       return componentMountedRef.current && currentEditor && !currentEditor.isDestroyed && documentSnapshot.current.id === originatingDocumentId
         ? currentEditor.view : undefined;
     };
-    insertion.completion = readImage(image).then((src) => {
+    insertion.completion = Promise.all(images.map(async (image) => ({ src: await readImage(image), alt: image.name }))).then(async (readImages) => {
+      // Reading is concurrent, but consecutive pastes retain the user's order.
+      await previousInsertion;
       const view = currentView();
-      if (view) insertImage(view, src, image.name, insertion.target);
+      if (view) insertImages(view, readImages, insertion.target);
     }).catch((error: unknown) => {
       // Keep the completion handled when no save or mode switch is awaiting
       // it, but let an active waiter cancel rather than report success.
@@ -448,46 +442,12 @@ export const CanvasEditor = memo(
   const editor = useEditor(
     {
       extensions: [
-        StarterKit.configure({ code: false, codeBlock: false, link: false, orderedList: false, trailingNode: { notAfter: ['footnoteDefinition'] } }),
-        PaperOrderedList,
-        FootnoteReference.configure({ referenceLabel: text.footnoteReferenceLabel, backlinkLabel: text.footnoteBacklinkLabel }),
-        FootnoteDefinition.configure({ referenceLabel: text.footnoteReferenceLabel, backlinkLabel: text.footnoteBacklinkLabel }),
-        PaperCode,
-        CodeBlockLowlight.configure({ lowlight }),
-        PaperLink.configure({
-          openOnClick: false,
-          autolink: true,
-          defaultProtocol: 'https',
-        }),
-        PaperImage.configure({
-          getDocumentPath,
-          allowBase64: true,
-          resize: {
-            enabled: true,
-            directions: ['top-left', 'top-right', 'bottom-left', 'bottom-right'],
-            minWidth: 80,
-            minHeight: 60,
-            // Tiptap locks the ratio temporarily while Shift is pressed, which
-            // matches desktop-document editors without forcing it by default.
-            alwaysPreserveAspectRatio: false,
-          },
-        }),
-        Table.configure({ resizable: true }),
-        TableRow,
-        PaperTableHeader,
-        PaperTableCell,
-        TaskList,
-        TaskItem.configure({ nested: true }),
+        ...canvasNodesAndMarks(() => textRef.current, getDocumentPath),
         TaskListInput,
-        Placeholder.configure({ placeholder: text.canvasPlaceholder }),
-        InlineFormula,
-        BlockFormula,
+        Placeholder.configure({ placeholder: () => textRef.current.canvasPlaceholder }),
         MarkdownTyping,
         QuoteTyping,
         IndentedListInput,
-        HtmlPreview,
-        InlineHtmlPreview,
-        UnsupportedMarkdown,
         createCommentDecorationsExtension(markerClickRef),
         DocumentSearch,
       ],
@@ -517,9 +477,9 @@ export const CanvasEditor = memo(
           return true;
         },
         handlePaste: (view, event) => {
-          const image = Array.from(event.clipboardData?.files ?? []).find((file) => file.type.startsWith('image/'));
-          if (image) {
-            readAndInsertImage(image);
+          const images = Array.from(event.clipboardData?.files ?? []).filter((file) => file.type.startsWith('image/'));
+          if (images.length) {
+            readAndInsertImages(images);
             return true;
           }
           const plainText = event.clipboardData?.getData('text/plain') ?? '';
@@ -539,13 +499,13 @@ export const CanvasEditor = memo(
         handleDrop: (view, event) => {
           // Tauri's native file-drop interceptor is disabled in tauri.conf.json
           // so desktop image files reach this standard DataTransfer handler.
-          const image = Array.from(event.dataTransfer?.files ?? []).find((file) => file.type.startsWith('image/'));
-          if (!image) return false;
+          const images = Array.from(event.dataTransfer?.files ?? []).filter((file) => file.type.startsWith('image/'));
+          if (!images.length) return false;
           const position = view.posAtCoords({
             left: event.clientX,
             top: event.clientY,
           })?.pos;
-          readAndInsertImage(image, position);
+          readAndInsertImages(images, position);
           return true;
         },
         handleDOMEvents: {
@@ -575,6 +535,7 @@ export const CanvasEditor = memo(
           },
           keydown: (_view, event) => {
             if (!(event instanceof KeyboardEvent)) return false;
+            if (event.isComposing || event.keyCode === 229) return false;
             if (!(event.metaKey || event.ctrlKey) || event.altKey) return false;
             const key = event.key.toLowerCase();
             if (key === 'z' && event.shiftKey && canRedoCommentRef.current) {
@@ -621,9 +582,22 @@ export const CanvasEditor = memo(
         documentSnapshot.current.selection = currentEditor.state.selection.getBookmark();
       },
     },
-    [language],
+    [],
   );
   editorRef.current = editor;
+
+  useEffect(() => {
+    if (!editor) return;
+    // Locale changes update labels in place. Recreating the editor discards its
+    // undo/redo history and can interrupt an active input composition.
+    updateFootnoteLabels(editor.view, {
+      referenceLabel: textRef.current.footnoteReferenceLabel,
+      backlinkLabel: textRef.current.footnoteBacklinkLabel,
+    });
+    updateFormulaLabels(editor.view, language);
+    updateUnsupportedMarkdownLabels(editor.view, textRef.current.unsupportedMarkdownTitle);
+    editor.view.dispatch(editor.state.tr.setSelection(editor.state.selection).setMeta('skipTrailingNode', true));
+  }, [editor, language]);
 
   useLayoutEffect(() => {
     if (!editor || (appliedDocument.current?.id === documentId && appliedDocument.current.editor === editor)) return;

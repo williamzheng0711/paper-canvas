@@ -1,5 +1,12 @@
+/* eslint-disable react-refresh/only-export-components */
 import { Node, mergeAttributes, type NodeViewRendererProps } from '@tiptap/core';
 import { getMessages } from '../i18n';
+
+export function updateUnsupportedMarkdownLabels(view: NodeViewRendererProps['view'], title: string): void {
+  view.dom.querySelectorAll<HTMLElement>('.unsupported-markdown > strong').forEach((label) => {
+    label.textContent = title;
+  });
+}
 
 class UnsupportedMarkdownView {
   dom: HTMLElement;

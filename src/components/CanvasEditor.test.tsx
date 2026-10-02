@@ -86,6 +86,32 @@ it('does not publish an unchanged document when reading tools flush the canvas',
   }
 });
 
+it('does not mark a standalone image document edited while setting up its labels', async () => {
+  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+  const host = document.createElement('div');
+  document.body.append(host);
+  const root = createRoot(host);
+  const onChange = vi.fn();
+  const onEdit = vi.fn();
+  const initialDocument = markdownConversion.markdownToDocument('![Image](https://example.com/a.png)');
+  try {
+    await act(async () => root.render(
+      <CanvasEditor language="en" documentId={1} initialDocument={initialDocument} onChange={onChange} onEdit={onEdit} />,
+    ));
+    expect(harness.editor!.getJSON().content?.map((node) => node.type)).toEqual(['image']);
+    await act(async () => root.render(
+      <CanvasEditor language="zh-Hant" documentId={1} initialDocument={initialDocument} onChange={onChange} onEdit={onEdit} />,
+    ));
+    expect(harness.editor!.getJSON().content?.map((node) => node.type)).toEqual(['image']);
+    expect(onEdit).not.toHaveBeenCalled();
+    expect(onChange).not.toHaveBeenCalled();
+  } finally {
+    await act(async () => root.unmount());
+    host.remove();
+    Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: false });
+  }
+});
+
 it('keeps comment anchors and publishes pending typing after a language change', async () => {
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
   const host = document.createElement('div');
@@ -224,6 +250,158 @@ it('retains unpublished typing when recreating the editor, but accepts a new doc
   }
 });
 
+it('preserves undo and redo when changing language', async () => {
+  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+  const host = document.createElement('div');
+  document.body.append(host);
+  const root = createRoot(host);
+  const initialDocument = markdownConversion.markdownToDocument('Original text');
+  const onChange = vi.fn();
+  const render = (language: 'en' | 'zh-Hant') => root.render(
+    <CanvasEditor language={language} documentId={1} initialDocument={initialDocument} onChange={onChange} />,
+  );
+  try {
+    await act(async () => render('en'));
+    const editor = harness.editor!;
+    await act(async () => { harness.editor!.commands.insertContent('Typed '); });
+    await act(async () => render('zh-Hant'));
+    expect(harness.editor).toBe(editor);
+    await act(async () => { expect(harness.editor!.commands.undo()).toBe(true); });
+    expect(harness.editor!.getText()).toBe('Original text');
+    await act(async () => render('en'));
+    await act(async () => { expect(harness.editor!.commands.redo()).toBe(true); });
+    expect(harness.editor!.getText()).toBe('Typed Original text');
+  } finally {
+    await act(async () => root.unmount());
+    host.remove();
+    Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: false });
+  }
+});
+
+it('updates placeholder and footnote labels without replacing the editing state', async () => {
+  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+  const host = document.createElement('div');
+  document.body.append(host);
+  const root = createRoot(host);
+  const onChange = vi.fn();
+  const initialDocument = markdownConversion.markdownToDocument('Reference[^a]\n\n[^a]: Note');
+  const render = (language: 'en' | 'zh-Hant', documentId = 1, document = initialDocument) => root.render(
+    <CanvasEditor language={language} documentId={documentId} initialDocument={document} onChange={onChange} />,
+  );
+  try {
+    await act(async () => render('en'));
+    const editor = harness.editor!;
+    expect(host.querySelector('[data-footnote-reference] button')?.getAttribute('aria-label')).toBe(getMessages('en').footnoteReferenceLabel('1'));
+    await act(async () => render('zh-Hant'));
+    expect(harness.editor).toBe(editor);
+    expect(host.querySelector('[data-footnote-reference] button')?.getAttribute('aria-label')).toBe(getMessages('zh-Hant').footnoteReferenceLabel('1'));
+    expect(host.querySelector('[data-footnote-definition] button')?.getAttribute('aria-label')).toBe(getMessages('zh-Hant').footnoteBacklinkLabel('1'));
+    await act(async () => render('zh-Hant', 2, markdownConversion.markdownToDocument('')));
+    expect(host.querySelector('[data-placeholder]')?.getAttribute('data-placeholder')).toBe(getMessages('zh-Hant').canvasPlaceholder);
+    await act(async () => render('en', 2, markdownConversion.markdownToDocument('')));
+    expect(host.querySelector('[data-placeholder]')?.getAttribute('data-placeholder')).toBe(getMessages('en').canvasPlaceholder);
+    expect(onChange).not.toHaveBeenCalled();
+  } finally {
+    await act(async () => root.unmount());
+    host.remove();
+    Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: false });
+  }
+});
+
+it('keeps a preserved source document byte-for-byte through canvas setup and language changes', async () => {
+  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+  const host = document.createElement('div');
+  document.body.append(host);
+  const root = createRoot(host);
+  const source = 'Original\0source\r\nwith mixed\nseparators\r';
+  const initialDocument = markdownConversion.markdownToDocument(source);
+  try {
+    await act(async () => root.render(
+      <CanvasEditor language="en" documentId={1} initialDocument={initialDocument} onChange={() => {}} />,
+    ));
+    expect(markdownConversion.documentToMarkdown(harness.editor!.getJSON())).toBe(source);
+    expect(host.querySelector('.unsupported-markdown > strong')?.textContent).toBe(getMessages('en').unsupportedMarkdownTitle);
+    await act(async () => root.render(
+      <CanvasEditor language="zh-Hant" documentId={1} initialDocument={initialDocument} onChange={() => {}} />,
+    ));
+    expect(markdownConversion.documentToMarkdown(harness.editor!.getJSON())).toBe(source);
+    expect(host.querySelector('.unsupported-markdown > strong')?.textContent).toBe(getMessages('zh-Hant').unsupportedMarkdownTitle);
+  } finally {
+    await act(async () => root.unmount());
+    host.remove();
+    Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: false });
+  }
+});
+
+it('keeps the same formula textarea and active composition while refreshing language labels', async () => {
+  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+  const host = document.createElement('div');
+  document.body.append(host);
+  const root = createRoot(host);
+  const initialDocument = markdownConversion.markdownToDocument('Value $x$');
+  const onChange = vi.fn();
+  const render = (language: 'en' | 'zh-Hant') => root.render(
+    <CanvasEditor language={language} documentId={1} initialDocument={initialDocument} onChange={onChange} />,
+  );
+  try {
+    await act(async () => render('en'));
+    expect(host.querySelector('.formula-render')?.getAttribute('title')).toBe(getMessages('en').formulaInspect);
+    expect(host.querySelector('.formula-copy')?.getAttribute('aria-label')).toBe(getMessages('en').copyLatex);
+    await act(async () => { host.querySelector<HTMLElement>('.formula-render')!.click(); });
+    const source = host.querySelector<HTMLTextAreaElement>('.formula-editor__textarea')!;
+    source.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+    source.value = String.raw`\text{中文}`;
+    source.setSelectionRange(1, 1);
+    source.dispatchEvent(new InputEvent('input', { bubbles: true, isComposing: true }));
+    await act(async () => render('zh-Hant'));
+    expect(host.querySelector('.formula-editor__textarea')).toBe(source);
+    expect(source.value).toBe(String.raw`\text{中文}`);
+    expect(source.selectionStart).toBe(1);
+    expect(source.getAttribute('aria-label')).toBe(getMessages('zh-Hant').formulaSource('inline'));
+    expect(host.querySelector('.formula-editor__done')?.getAttribute('aria-label')).toBe(getMessages('zh-Hant').finishFormula);
+    expect(host.querySelector('.formula-editor__header > span')?.textContent).toBe(getMessages('zh-Hant').inlineMath);
+    await act(async () => { source.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true })); });
+    expect(harness.editor!.getJSON().content?.[0].content?.[1]).toMatchObject({ attrs: { latex: String.raw`\text{中文}` } });
+    vi.spyOn(harness.editor!.view, 'coordsAtPos').mockReturnValue({ left: 0, right: 0, top: 0, bottom: 0 });
+    expect(harness.editor!.commands.undo()).toBe(true);
+    expect(harness.editor!.getJSON().content?.[0].content?.[1]).toMatchObject({ attrs: { latex: 'x' } });
+  } finally {
+    await act(async () => root.unmount());
+    host.remove();
+    Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: false });
+  }
+});
+
+it.each([
+  { isComposing: true, keyCode: 90 },
+  { isComposing: false, keyCode: 229 },
+])('does not run comment history shortcuts during composition ($isComposing, $keyCode)', async (input) => {
+  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+  const host = document.createElement('div');
+  document.body.append(host);
+  const root = createRoot(host);
+  const onUndoComment = vi.fn();
+  const onRedoComment = vi.fn();
+  try {
+    await act(async () => root.render(
+      <CanvasEditor language="en" documentId={1} initialDocument={markdownConversion.markdownToDocument('Original text')} onChange={() => {}} canUndoComment canRedoComment onUndoComment={onUndoComment} onRedoComment={onRedoComment} />,
+    ));
+    const editor = harness.editor!;
+    for (const shortcut of [{ key: 'z' }, { key: 'z', shiftKey: true }, { key: 'y' }]) {
+      const event = new KeyboardEvent('keydown', { ...shortcut, ...input, ctrlKey: true, cancelable: true });
+      const handlers = editor.options.editorProps?.handleDOMEvents;
+      expect(handlers?.keydown?.(editor.view, event)).toBe(false);
+      expect(event.defaultPrevented).toBe(false);
+    }
+    expect(onUndoComment).not.toHaveBeenCalled();
+    expect(onRedoComment).not.toHaveBeenCalled();
+  } finally {
+    await act(async () => root.unmount());
+    host.remove();
+    Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: false });
+  }
+});
+
 it('starts a new file session with fresh undo history and preserves undo across Save As', async () => {
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
   const host = document.createElement('div');
@@ -328,6 +506,62 @@ it.each(['paste', 'drop'] as const)('does not insert a delayed %s image into a d
     await act(async () => { readers[0].onload?.(); });
     expect(harness.editor!.getJSON()).toEqual(nextDocument);
     expect(onChange).not.toHaveBeenCalled();
+  } finally {
+    await act(async () => root.unmount());
+    host.remove();
+    vi.unstubAllGlobals();
+    Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: false });
+  }
+});
+
+it.each([
+  { action: 'paste', grouped: true },
+  { action: 'drop', grouped: true },
+  { action: 'paste', grouped: false },
+  { action: 'drop', grouped: false },
+] as const)('inserts every $action image in request order even when reads finish in reverse order (grouped: $grouped)', async ({ action, grouped }) => {
+  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+  const readers: Array<{ result: string; onload: (() => void) | null }> = [];
+  vi.stubGlobal('FileReader', class {
+    result = 'data:image/png;base64,dGVzdA==';
+    onload: (() => void) | null = null;
+    readAsDataURL() { readers.push(this); }
+  });
+  const host = document.createElement('div');
+  document.body.append(host);
+  const root = createRoot(host);
+  const handle = createRef<SwitchableEditorHandle>();
+  try {
+    await act(async () => root.render(
+      <CanvasEditor ref={handle} language="en" documentId={1} initialDocument={markdownConversion.markdownToDocument('Original text')} onChange={() => {}} />,
+    ));
+    const editor = harness.editor!;
+    const images = ['first.png', 'second.png', 'third.png'].map((name) => new File(['image'], name, { type: 'image/png' }));
+    if (action === 'drop') vi.spyOn(editor.view, 'posAtCoords').mockReturnValue({ pos: 1, inside: 0 });
+    for (const files of grouped ? [images] : images.map((image) => [image])) {
+      const event = new Event(action, { cancelable: true });
+      Object.defineProperty(event, action === 'paste' ? 'clipboardData' : 'dataTransfer', { value: { files } });
+      if (action === 'paste') {
+        expect(editor.view.someProp('handlePaste', (handler) => handler(editor.view, event as ClipboardEvent, null!))).toBe(true);
+      } else {
+        expect(editor.view.someProp('handleDrop', (handler) => handler(editor.view, event as DragEvent, null!, false))).toBe(true);
+      }
+    }
+    expect(readers).toHaveLength(3);
+    const completion = handle.current?.waitForPendingImages?.();
+    await act(async () => {
+      readers[2].onload?.();
+      readers[1].onload?.();
+      readers[0].onload?.();
+      await completion;
+    });
+    expect(editor.getJSON().content?.filter((node) => node.type === 'image').map((node) => node.attrs?.alt)).toEqual(['first.png', 'second.png', 'third.png']);
+    expect(editor.state.doc.textContent).toBe('Original text');
+    await act(async () => { expect(editor.commands.undo()).toBe(true); });
+    expect(editor.getJSON().content?.filter((node) => node.type === 'image')).toHaveLength(0);
+    expect(editor.getText()).toBe('Original text');
+    await act(async () => { expect(editor.commands.redo()).toBe(true); });
+    expect(editor.getJSON().content?.filter((node) => node.type === 'image').map((node) => node.attrs?.alt)).toEqual(['first.png', 'second.png', 'third.png']);
   } finally {
     await act(async () => root.unmount());
     host.remove();
@@ -575,6 +809,42 @@ it.each([
     expect(onEdit).not.toHaveBeenCalled();
     expect(editor.getJSON()).toEqual(before);
     expect(handle.current?.waitForPendingImages?.()).toBeUndefined();
+  } finally {
+    await act(async () => root.unmount());
+    host.remove();
+    vi.unstubAllGlobals();
+    Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: false });
+  }
+});
+
+it('settles an aborted image read so saving does not wait forever', async () => {
+  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+  let abortRead: (() => void) | undefined;
+  vi.stubGlobal('FileReader', class {
+    onabort: (() => void) | null = null;
+    readAsDataURL() { abortRead = () => this.onabort?.(); }
+  });
+  const host = document.createElement('div');
+  document.body.append(host);
+  const root = createRoot(host);
+  const handle = createRef<SwitchableEditorHandle>();
+  const onLinkError = vi.fn();
+  try {
+    await act(async () => root.render(
+      <CanvasEditor ref={handle} language="en" documentId={1} initialDocument={markdownConversion.markdownToDocument('Original text')} onChange={() => {}} onLinkError={onLinkError} />,
+    ));
+    const editor = harness.editor!;
+    const event = new Event('paste', { cancelable: true });
+    Object.defineProperty(event, 'clipboardData', {
+      value: { files: [new File(['image'], 'sample.png', { type: 'image/png' })] },
+    });
+    editor.view.someProp('handlePaste', (handler) => handler(editor.view, event as ClipboardEvent, null!));
+    const completion = handle.current?.waitForPendingImages?.()?.catch((error: unknown) => error);
+    await act(async () => { abortRead?.(); });
+    expect(await completion).toEqual(new Error(getMessages().imageReadFailed));
+    expect(onLinkError).toHaveBeenCalledExactlyOnceWith(getMessages().imageReadFailed);
+    expect(handle.current?.waitForPendingImages?.()).toBeUndefined();
+    expect(editor.state.doc.textContent).toBe('Original text');
   } finally {
     await act(async () => root.unmount());
     host.remove();

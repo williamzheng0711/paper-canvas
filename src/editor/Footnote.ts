@@ -158,7 +158,7 @@ function activateFootnote(
   return true;
 }
 
-function updateMarkers(view: EditorView, options: FootnoteOptions): void {
+export function updateFootnoteLabels(view: EditorView, options: FootnoteOptions): void {
   const index = footnoteIndex(view.state.doc);
   view.dom
     .querySelectorAll<HTMLElement>(
@@ -378,11 +378,11 @@ export const FootnoteReference = Node.create<FootnoteOptions>({
           },
         },
         view(view) {
-          updateMarkers(view, options);
+          updateFootnoteLabels(view, options);
           return {
             update(current, previous) {
               if (current.state.doc !== previous.doc)
-                updateMarkers(current, options);
+                updateFootnoteLabels(current, options);
             },
           };
         },

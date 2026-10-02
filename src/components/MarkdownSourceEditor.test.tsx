@@ -1,5 +1,5 @@
 import { act, createRef } from "react";
-import { redo, undo, undoDepth } from "@codemirror/commands";
+import { isolateHistory, redo, undo, undoDepth } from "@codemirror/commands";
 import { EditorView } from "@codemirror/view";
 import { createRoot, type Root } from "react-dom/client";
 import {
@@ -739,4 +739,57 @@ describe("MarkdownSourceEditor search", () => {
       find.mockRestore();
     }
   });
+
+  it.each([1, 29, 730, 4501, 99173])(
+    "preserves arbitrary edits and complete undo/redo with mixed separators (seed %s)",
+    async (seed) => {
+      let randomState = seed;
+      const random = (limit: number) => {
+        randomState = (Math.imul(randomState, 1664525) + 1013904223) >>> 0;
+        return randomState % limit;
+      };
+      const initial = "Start\r\nEmoji 😀 e\u0301\nNUL \0\r中文\r\nEnd";
+      const normalize = (value: string) => value.replace(/\r\n?/g, "\n");
+      const rawPosition = (value: string, normalizedPosition: number) => {
+        let sourcePosition = 0;
+        for (let index = 0; index < normalizedPosition; index += 1) {
+          sourcePosition += value.slice(sourcePosition, sourcePosition + 2) === "\r\n" ? 2 : 1;
+        }
+        return sourcePosition;
+      };
+      const onChange = vi.fn();
+      await act(async () => root.render(
+        <MarkdownSourceEditor language="en" value={initial} valueRevision={0} onChange={onChange} />,
+      ));
+      const editor = EditorView.findFromDOM(host.querySelector<HTMLElement>(".cm-editor")!)!;
+      const snapshots = [initial];
+      const inserts = ["", "\n", "\n\n", "A\nB", "😀", "\0", "中文", "e\u0301", "\r\n", "\r", "\u2028"];
+      for (let index = 0; index < 60; index += 1) {
+        const before = snapshots.at(-1)!;
+        const length = normalize(before).length;
+        const start = random(length + 1);
+        const end = Math.min(length, start + random(8));
+        const inserted = normalize(inserts[random(inserts.length)]);
+        if (start === end && !inserted) continue;
+        const expected = before.slice(0, rawPosition(before, start)) + inserted.replace(/\n/g, "\r\n") + before.slice(rawPosition(before, end));
+        editor.dispatch({
+          changes: { from: start, to: end, insert: inserted },
+          annotations: isolateHistory.of("full"),
+        });
+        expect(onChange.mock.lastCall?.[0], `edit ${index}`).toBe(expected);
+        expect(editor.state.doc.toString(), `edit ${index}`).toBe(normalize(expected));
+        snapshots.push(expected);
+      }
+      for (let index = snapshots.length - 2; index >= 0; index -= 1) {
+        expect(undo(editor), `undo ${index}`).toBe(true);
+        expect(onChange.mock.lastCall?.[0], `undo ${index}`).toBe(snapshots[index]);
+      }
+      expect(undo(editor)).toBe(false);
+      for (let index = 1; index < snapshots.length; index += 1) {
+        expect(redo(editor), `redo ${index}`).toBe(true);
+        expect(onChange.mock.lastCall?.[0], `redo ${index}`).toBe(snapshots[index]);
+      }
+      expect(redo(editor)).toBe(false);
+    },
+  );
 });
