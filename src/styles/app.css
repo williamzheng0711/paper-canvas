@@ -348,6 +348,30 @@ button {
   top: 0;
   right: calc(100% + 9px);
 }
+.rename-form {
+  display: grid;
+  gap: 8px;
+  width: 260px;
+  padding: 8px 10px;
+}
+.rename-form label {
+  display: grid;
+  gap: 5px;
+  font-size: 12px;
+}
+.rename-form input {
+  width: 100%;
+  padding: 6px 8px;
+  color: inherit;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+}
+.rename-form-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
 .compact-control {
   display: flex;
   align-items: center;

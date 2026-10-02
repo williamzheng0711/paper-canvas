@@ -29,6 +29,7 @@ import { waitForRenderedImages } from './lib/renderedImages';
 import {
   chooseMarkdownFile,
   clearDraft,
+  confirmDiscardChanges,
   documentToPortableMarkdown,
   exportMarkdownFile,
   exportPdfFile,
@@ -155,6 +156,7 @@ export default function App() {
   }>();
   const [sourceMode, setSourceMode] = useState(false);
   const [modeTransitioning, setModeTransitioning] = useState(false);
+  const [renameRequest, setRenameRequest] = useState<{ name: string; session: number } | null>(null);
   const [rawMarkdownRevision, setRawMarkdownRevision] = useState(0);
   const rawMarkdownChangesRef = useRef<ReturnType<typeof imagePathSourceChanges>>(undefined);
   const [searchOpen, setSearchOpen] = useState(false);
@@ -199,6 +201,7 @@ export default function App() {
   const recentExternalOpen = useRef(new Map<string, number>());
   const exportMenu = useRef<HTMLDetailsElement>(null);
   const documentActionsMenu = useRef<HTMLDetailsElement>(null);
+  const renameInput = useRef<HTMLInputElement>(null);
   const readingSettingsMenu = useRef<HTMLDetailsElement>(null);
   const sidebarTabs = useRef<HTMLDivElement>(null);
   const searchInput = useRef<HTMLInputElement>(null);
@@ -222,6 +225,7 @@ export default function App() {
   sourceModeRef.current = sourceMode;
 
   const closeToolbarMenus = useCallback(() => {
+    setRenameRequest(null);
     if (documentActionsMenu.current) documentActionsMenu.current.open = false;
     if (readingSettingsMenu.current) readingSettingsMenu.current.open = false;
     if (exportMenu.current) exportMenu.current.open = false;
@@ -233,6 +237,7 @@ export default function App() {
       for (const menu of [documentActionsMenu.current, readingSettingsMenu.current]) {
         if (menu?.open && !menu.contains(event.target)) {
           menu.open = false;
+          if (menu === documentActionsMenu.current) setRenameRequest(null);
           if (menu === documentActionsMenu.current && exportMenu.current) exportMenu.current.open = false;
         }
       }
@@ -253,6 +258,12 @@ export default function App() {
       document.removeEventListener('keydown', closeOnEscape);
     };
   }, [closeToolbarMenus]);
+
+  useEffect(() => {
+    if (!renameRequest) return;
+    renameInput.current?.focus();
+    renameInput.current?.select();
+  }, [renameRequest]);
 
   const setExternalRawMarkdown = useCallback((value: string, imagePaths?: {
     oldPath: string;
@@ -594,12 +605,15 @@ export default function App() {
 
   const replaceWithOpenedFile = useCallback(
     async (nextFile: EditorFile) => {
+      const request = openRequest.current;
+      const session = documentSessionRef.current;
       if (
         dirtyRef.current &&
-        !window.confirm(getMessages().confirmDiscardAndOpen)
+        !(await confirmDiscardChanges(getMessages().confirmDiscardAndOpen))
       ) {
         return false;
       }
+      if (request !== openRequest.current || session !== documentSessionRef.current) return false;
       loadFile(nextFile);
       setRecent(await loadRecent());
       return true;
@@ -889,16 +903,20 @@ export default function App() {
     };
   }, [openExternalMarkdownFiles]);
 
-  const newFile = useCallback(() => {
-    if (dirty && !window.confirm(getMessages().confirmDiscardAndNew)) return;
-    openRequest.current += 1;
-    loadFile(newEditorFile());
-  }, [dirty, loadFile]);
-
-  const renameFile = useCallback(async () => {
-    const nextName = window.prompt(getMessages().newFilenamePrompt, fileRef.current.name);
-    if (!nextName) return;
+  const newFile = useCallback(async () => {
+    const request = ++openRequest.current;
     const session = documentSessionRef.current;
+    try {
+      if (dirtyRef.current && !(await confirmDiscardChanges(getMessages().confirmDiscardAndNew))) return;
+      if (request !== openRequest.current || session !== documentSessionRef.current) return;
+      loadFile(newEditorFile());
+    } catch (error) {
+      if (request === openRequest.current && session === documentSessionRef.current) setMessage(error instanceof Error ? error.message : String(error));
+    }
+  }, [loadFile]);
+
+  const renameFile = useCallback(async (nextName: string, session: number) => {
+    if (!nextName.trim() || documentSessionRef.current !== session) return;
     const precedingSave = pendingSaveSession.current === session ? pendingSave.current : undefined;
     await queueFileOperation(async () => {
       if (documentSessionRef.current !== session) return;
@@ -1317,7 +1335,7 @@ export default function App() {
       const markdown = sourceModeRef.current
         ? rawMarkdownRef.current
         : fileRef.current.sourceMarkdown ?? documentToPortableMarkdown(fileRef.current.document, fileRef.current.comments ?? []);
-      const exportedName = await exportMarkdownFile(markdown, fileRef.current.name);
+      const exportedName = await exportMarkdownFile(markdown, fileRef.current.name, fileRef.current.path);
       if (exportedName && documentSessionRef.current === exportSession) setMessage(getMessages().exportedFile(exportedName));
     } catch (error) {
       if (documentSessionRef.current === exportSession) setMessage(error instanceof Error ? error.message : getMessages().markdownExportFailed);
@@ -1587,6 +1605,7 @@ export default function App() {
             onToggle={(event) => {
               if (event.currentTarget.open && readingSettingsMenu.current) readingSettingsMenu.current.open = false;
               if (!event.currentTarget.open && exportMenu.current) exportMenu.current.open = false;
+              if (!event.currentTarget.open) setRenameRequest(null);
             }}
           >
             <summary className="icon-button" role="button" aria-label={text.fileActions} title={text.fileActions}><ToolbarIcon name="more" /></summary>
@@ -1595,7 +1614,30 @@ export default function App() {
               <button onClick={() => { closeToolbarMenus(); void openFile(); }}>{text.open}</button>
               <button onClick={() => { closeToolbarMenus(); void saveCurrent(); }}>{text.save}</button>
               <button onClick={() => { closeToolbarMenus(); void saveCurrent(true); }}>{text.saveAs}</button>
-              <button onClick={() => { closeToolbarMenus(); void renameFile(); }}>{text.rename}</button>
+              {renameRequest ? (
+                <form className="rename-form" aria-label={text.rename} onSubmit={(event) => {
+                  event.preventDefault();
+                  const name = renameInput.current?.value.trim();
+                  if (!name) return;
+                  const session = renameRequest.session;
+                  closeToolbarMenus();
+                  void renameFile(name, session);
+                }}>
+                  <label>
+                    {text.newFilenamePrompt}
+                    <input ref={renameInput} name="filename" defaultValue={renameRequest.name} required autoComplete="off" />
+                  </label>
+                  <div className="rename-form-actions">
+                    <button type="button" onClick={() => {
+                      closeToolbarMenus();
+                      documentActionsMenu.current?.querySelector<HTMLElement>('summary')?.focus();
+                    }}>{text.commentCancel}</button>
+                    <button type="submit">{text.rename}</button>
+                  </div>
+                </form>
+              ) : (
+                <button onClick={() => setRenameRequest({ name: fileRef.current.name, session: documentSessionRef.current })}>{text.rename}</button>
+              )}
               <details ref={exportMenu} className="export-menu">
                 <summary>{text.export}</summary>
                 <div className="export-options" role="menu" aria-label={text.chooseExportFormat}>
@@ -1748,6 +1790,7 @@ export default function App() {
         >
           <div className="editor-mode-pane editor-mode-pane--canvas" hidden={sourceMode}>
             <CanvasEditor
+              key={documentSessionRef.current}
               ref={canvasSearch}
               language={preferences.language}
               documentId={documentId}

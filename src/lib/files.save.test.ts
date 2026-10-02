@@ -1,8 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { saveEditorFile } from './files';
+import { chooseSavePath, confirmDiscardChanges, saveEditorFile } from './files';
 
 const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
+  confirm: vi.fn(),
   save: vi.fn(),
   mkdir: vi.fn(),
   writeFile: vi.fn(),
@@ -13,7 +14,7 @@ vi.mock('@tauri-apps/api/core', () => ({
   convertFileSrc: (path: string) => `asset:${path}`,
   invoke: mocks.invoke,
 }));
-vi.mock('@tauri-apps/plugin-dialog', () => ({ open: vi.fn(), save: mocks.save }));
+vi.mock('@tauri-apps/plugin-dialog', () => ({ confirm: mocks.confirm, open: vi.fn(), save: mocks.save }));
 vi.mock('@tauri-apps/plugin-fs', () => ({
   exists: vi.fn(),
   readTextFile: vi.fn(),
@@ -52,12 +53,30 @@ describe('saving documents', () => {
     expect(file.document.content[0].attrs.src).toBe('data:image/png;base64,aGVsbG8=');
   });
 
+  it.each([false, true])('awaits the supported native confirmation command (answer=%s)', async (answer) => {
+    const browserConfirm = vi.spyOn(window, 'confirm');
+    mocks.confirm.mockResolvedValue(answer);
+    try {
+      await expect(confirmDiscardChanges('Discard changes?')).resolves.toBe(answer);
+      expect(mocks.confirm).toHaveBeenCalledWith('Discard changes?', { kind: 'warning' });
+      expect(browserConfirm).not.toHaveBeenCalled();
+    } finally {
+      browserConfirm.mockRestore();
+    }
+  });
+
   it('does not overwrite the original file when Save As is cancelled', async () => {
     mocks.save.mockResolvedValue(null);
     const textFile = { ...file, document: { type: 'doc', content: [{ type: 'paragraph' }] } };
     await expect(saveEditorFile(textFile, true)).rejects.toThrow();
     expect(mocks.invoke).not.toHaveBeenCalled();
     expect(mocks.writeTextFile).not.toHaveBeenCalled();
+  });
+
+  it.each(['Research.MD', 'Research.markdown', 'Research.MARKDOWN'])('keeps the existing supported extension in the Save As default: %s', async (name) => {
+    mocks.save.mockResolvedValue(null);
+    await chooseSavePath(name);
+    expect(mocks.save).toHaveBeenCalledWith(expect.objectContaining({ defaultPath: name }));
   });
 
   it('authorizes the selected destination when saving an image document as a new file', async () => {

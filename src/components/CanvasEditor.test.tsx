@@ -224,6 +224,46 @@ it('retains unpublished typing when recreating the editor, but accepts a new doc
   }
 });
 
+it('starts a new file session with fresh undo history and preserves undo across Save As', async () => {
+  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+  const host = document.createElement('div');
+  document.body.append(host);
+  const root = createRoot(host);
+  const onChange = vi.fn();
+  const first = markdownConversion.markdownToDocument('First file');
+  const second = markdownConversion.markdownToDocument('Second file');
+  try {
+    await act(async () => root.render(
+      <CanvasEditor key={1} language="en" documentId={1} documentPath="/notes/first.md" initialDocument={first} onChange={onChange} />,
+    ));
+    const previousEditor = harness.editor!;
+    await act(async () => { previousEditor.commands.insertContent('Latest '); });
+    expect(previousEditor.can().undo()).toBe(true);
+    await act(async () => root.render(
+      <CanvasEditor key={2} language="en" documentId={2} documentPath="/notes/second.md" initialDocument={second} onChange={onChange} />,
+    ));
+    const editor = harness.editor!;
+    expect(editor).not.toBe(previousEditor);
+    expect(editor.getText()).toBe('Second file');
+    expect(editor.commands.undo()).toBe(false);
+    expect(editor.commands.redo()).toBe(false);
+    expect(editor.getText()).toBe('Second file');
+    await act(async () => { editor.commands.insertContent('Fresh '); });
+    await act(async () => root.render(
+      <CanvasEditor key={2} language="en" documentId={2} documentPath="/exports/second.md" initialDocument={second} onChange={onChange} />,
+    ));
+    expect(harness.editor).toBe(editor);
+    await act(async () => { expect(editor.commands.undo()).toBe(true); });
+    expect(editor.getText()).toBe('Second file');
+    await act(async () => { expect(editor.commands.redo()).toBe(true); });
+    expect(editor.getText()).toBe('Fresh Second file');
+  } finally {
+    await act(async () => root.unmount());
+    host.remove();
+    Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: false });
+  }
+});
+
 it('blocks unsupported relative links from navigating away from the editor', async () => {
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
   const host = document.createElement('div');

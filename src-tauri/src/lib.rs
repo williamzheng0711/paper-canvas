@@ -144,6 +144,76 @@ fn allow_document_assets(app: AppHandle, path: String) -> Result<(), String> {
     Ok(())
 }
 
+fn document_rename_asset_directories(
+    source: &Path,
+    target: &Path,
+    source_allowed: bool,
+) -> Result<[PathBuf; 2], String> {
+    if !source_allowed {
+        return Err("The document path is outside the granted file scope.".into());
+    }
+    for path in [source, target] {
+        if !path.is_absolute()
+            || path
+                .components()
+                .any(|part| matches!(part, std::path::Component::ParentDir))
+            || !path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| {
+                    extension.eq_ignore_ascii_case("md")
+                        || extension.eq_ignore_ascii_case("markdown")
+                })
+        {
+            return Err("Rename requires absolute Markdown paths without parent traversal.".into());
+        }
+    }
+    if source.parent() != target.parent() {
+        return Err("A document can only be renamed within its current directory.".into());
+    }
+    match std::fs::symlink_metadata(target) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err("The renamed document path must not be a symlink.".into());
+        }
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error.to_string()),
+        _ => {}
+    }
+    Ok([
+        document_asset_directory(source)?,
+        document_asset_directory(target)?,
+    ])
+}
+
+#[tauri::command]
+fn allow_document_rename(app: AppHandle, source: String, target: String) -> Result<(), String> {
+    let source = PathBuf::from(source);
+    let target = PathBuf::from(target);
+    let fs_scope = app.fs_scope();
+    let directories =
+        document_rename_asset_directories(&source, &target, fs_scope.is_allowed(&source))?;
+    fs_scope
+        .allow_file(&target)
+        .map_err(|error| error.to_string())?;
+    // Rename and exists need access only to these directory entries, not their
+    // children or the document's parent directory.
+    for directory in &directories {
+        fs_scope
+            .allow_file(directory)
+            .map_err(|error| error.to_string())?;
+    }
+    let scopes = app.state::<tauri::scope::Scopes>();
+    scopes
+        .allow_file(&target)
+        .map_err(|error| error.to_string())?;
+    // Keep local images readable after their derived companion folder moves.
+    for directory in &directories {
+        scopes
+            .allow_directory(directory, false)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
 #[tauri::command]
 fn show_in_folder(path: String) -> Result<(), String> {
     let target = supported_markdown_path(PathBuf::from(path))
@@ -411,6 +481,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             take_opened_files,
             allow_document_assets,
+            allow_document_rename,
             show_in_folder,
             open_external_url,
             export_pdf
@@ -480,6 +551,54 @@ mod tests {
         std::fs::remove_file(directory).unwrap();
         std::fs::remove_dir(root).unwrap();
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn rename_authorizes_only_a_granted_markdown_documents_siblings() {
+        let root = std::env::temp_dir();
+        let source = root.join("research.md");
+        for (name, assets) in [
+            ("renamed.MD", "renamed.assets"),
+            ("renamed.markdown", "renamed.markdown.assets"),
+        ] {
+            assert_eq!(
+                document_rename_asset_directories(&source, &root.join(name), true).unwrap(),
+                [root.join("research.assets"), root.join(assets)]
+            );
+        }
+        assert!(
+            document_rename_asset_directories(&source, &root.join("renamed.md"), false).is_err()
+        );
+        for target in [
+            PathBuf::from("relative.md"),
+            root.join("../outside.md"),
+            root.join("other/renamed.md"),
+            root.join("renamed.txt"),
+        ] {
+            assert!(document_rename_asset_directories(&source, &target, true).is_err());
+        }
+        assert!(document_rename_asset_directories(
+            &root.join("../research.md"),
+            &root.join("renamed.md"),
+            true
+        )
+        .is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rename_rejects_symlinked_companion_folders_and_target_documents() {
+        let root = std::env::temp_dir().join(format!("papercanvas-rename-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let source = root.join("research.md");
+        let target = root.join("renamed.md");
+        for name in ["research.assets", "renamed.assets", "renamed.md"] {
+            let link = root.join(name);
+            std::os::unix::fs::symlink(std::env::temp_dir(), &link).unwrap();
+            assert!(document_rename_asset_directories(&source, &target, true).is_err());
+            std::fs::remove_file(link).unwrap();
+        }
+        std::fs::remove_dir(root).unwrap();
     }
 
     #[test]

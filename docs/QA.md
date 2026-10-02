@@ -38,10 +38,18 @@ Use a temporary copy for intentional edits.
 - Rename a copy with a companion image folder, then Save As into another directory.
   Confirm images still display, only actual local image destinations change, and
   literal paths in prose/code/titles remain intact. Selections and comment anchors
-  before, between, and after images should stay on their original text.
+  before, between, and after images should stay on their original text. Export
+  Markdown into another directory and reopen it; images and comments must remain
+  valid. Renaming or saving files ending in `.MD` or `.markdown` must not append
+  a duplicate extension. In the native app, Rename must show a filename input;
+  Cancel and Escape must leave the original filename intact.
 - Type while saving, renaming, switching files, or completing an image paste/drop.
   Confirm the latest edits stay with their originating file. A history-settings
   failure after a successful save or rename must not restore the previous path.
+  After New or Open, undo/redo must never restore the previous file's content;
+  ordinary typing and Save As within the same file must retain undo/redo.
+  With unsaved edits, New and Open must wait for the discard dialog; Cancel
+  must retain those edits, and a delayed answer must not replace a newer file.
 - In a table cell, press Enter and Shift+Enter, then add formatted text and a
   formula. Switch modes and save/reopen; every paragraph and line break must
   remain. Richer tables that GFM cannot represent retain their content as HTML previews.

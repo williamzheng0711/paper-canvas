@@ -13,15 +13,17 @@ const mocks = vi.hoisted(() => ({
   rename: vi.fn(),
   writeTextFile: vi.fn(),
   storeSet: vi.fn(),
+  invoke: vi.fn(),
+  exists: vi.fn(),
 }));
 vi.mock("@tauri-apps/api/core", () => ({
   isTauri: () => true,
   convertFileSrc: (path: string) => `asset:${path}`,
-  invoke: vi.fn(),
+  invoke: mocks.invoke,
 }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn(), save: vi.fn() }));
 vi.mock("@tauri-apps/plugin-fs", () => ({
-  exists: async (path: string) => mocks.entries.has(path),
+  exists: mocks.exists,
   readTextFile: async (path: string) => {
     const source = mocks.entries.get(path);
     if (typeof source !== "string") throw new Error(`File missing: ${path}`);
@@ -43,6 +45,9 @@ describe("native document rename", () => {
   beforeEach(() => {
     vi.resetAllMocks();
     mocks.entries.clear();
+    mocks.exists.mockImplementation(async (path: string) =>
+      mocks.entries.has(path),
+    );
     mocks.rename.mockImplementation(async (from: string, to: string) => {
       if (!mocks.entries.has(from)) throw new Error(`Path missing: ${from}`);
       for (const [key, value] of [...mocks.entries]) {
@@ -57,6 +62,102 @@ describe("native document rename", () => {
         mocks.entries.set(filePath, source);
       },
     );
+  });
+
+  it("grants the sibling target before checking or moving it", async () => {
+    mocks.entries.set(path, "Original source\n");
+    await renameEditorFile(
+      {
+        path,
+        name: "research.md",
+        document: markdownToDocument("Original source\n"),
+      },
+      "renamed.md",
+    );
+    expect(mocks.invoke).toHaveBeenCalledWith("allow_document_rename", {
+      source: path,
+      target,
+    });
+    expect(mocks.invoke.mock.invocationCallOrder[0]).toBeLessThan(
+      mocks.exists.mock.invocationCallOrder[0],
+    );
+    expect(mocks.exists.mock.invocationCallOrder[0]).toBeLessThan(
+      mocks.rename.mock.invocationCallOrder[0],
+    );
+  });
+
+  it("leaves the document intact when the target cannot be authorized", async () => {
+    mocks.entries.set(path, "Original source\n");
+    mocks.invoke.mockRejectedValueOnce(new Error("Rename scope denied"));
+    await expect(
+      renameEditorFile(
+        {
+          path,
+          name: "research.md",
+          document: markdownToDocument("Original source\n"),
+        },
+        "renamed.md",
+      ),
+    ).rejects.toThrow("Rename scope denied");
+    expect(mocks.exists).not.toHaveBeenCalled();
+    expect(mocks.rename).not.toHaveBeenCalled();
+    expect(mocks.entries.get(path)).toBe("Original source\n");
+    expect(mocks.entries.has(target)).toBe(false);
+  });
+
+  it("leaves an unchanged uppercase Markdown filename alone", async () => {
+    const file = {
+      path: "/notes/Research.MD",
+      name: "Research.MD",
+      document: markdownToDocument("Original source\n"),
+    };
+    mocks.entries.set(file.path, "Original source\n");
+    expect(await renameEditorFile(file, file.name)).toBe(file);
+    expect(mocks.rename).not.toHaveBeenCalled();
+    expect(mocks.writeTextFile).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["Reading.MD", "Reading.MD"],
+    ["Reading.markdown", "Reading.markdown"],
+    ["Reading.MARKDOWN", "Reading.MARKDOWN"],
+    ["Reading", "Reading.md"],
+  ])(
+    "keeps the requested supported extension when naming an unnamed draft: %s",
+    async (requested, expected) => {
+      const file = {
+        name: "Untitled.md",
+        document: markdownToDocument("Draft source\n"),
+      };
+      const renamed = await renameEditorFile(file, requested);
+      expect(renamed.name).toBe(expected);
+      expect(renamed.document).toBe(file.document);
+      expect(mocks.rename).not.toHaveBeenCalled();
+    },
+  );
+
+  it("retains the supported .markdown extension when renaming a saved document and its assets", async () => {
+    const sourceMarkdown = "![Diagram](research.assets/diagram.png)\n";
+    mocks.entries.set(path, sourceMarkdown);
+    mocks.entries.set("/notes/research.assets", null);
+    mocks.entries.set("/notes/research.assets/diagram.png", "image bytes");
+    const renamed = await renameEditorFile(
+      {
+        path,
+        name: "research.md",
+        sourceMarkdown,
+        document: markdownToDocument(sourceMarkdown),
+      },
+      "reading.markdown",
+    );
+    expect(renamed.path).toBe("/notes/reading.markdown");
+    expect(renamed.name).toBe("reading.markdown");
+    expect(mocks.entries.get("/notes/reading.markdown")).toBe(
+      "![Diagram](reading.markdown.assets/diagram.png)\n",
+    );
+    expect(
+      mocks.entries.get("/notes/reading.markdown.assets/diagram.png"),
+    ).toBe("image bytes");
   });
 
   it("keeps disk source, cache and rendered images consistent while preserving literal paths and comments", async () => {
@@ -149,27 +250,42 @@ describe("native document rename", () => {
   });
 
   it("returns the completed rename when persisting recent history fails", async () => {
-    const sourceMarkdown = "# Reading\n\n![Diagram](research.assets/diagram.png)\n";
-    const expectedSource = sourceMarkdown.replace("research.assets/", "renamed.assets/");
+    const sourceMarkdown =
+      "# Reading\n\n![Diagram](research.assets/diagram.png)\n";
+    const expectedSource = sourceMarkdown.replace(
+      "research.assets/",
+      "renamed.assets/",
+    );
     mocks.entries.set(path, sourceMarkdown);
     mocks.entries.set("/notes/research.assets", null);
     mocks.entries.set("/notes/research.assets/diagram.png", "image bytes");
     mocks.storeSet.mockRejectedValueOnce(new Error("Settings write failed"));
 
-    const renamed = await renameEditorFile({
-      path,
-      name: "research.md",
-      document: markdownToDocument(sourceMarkdown),
-      sourceMarkdown,
-    }, "renamed.md");
+    const renamed = await renameEditorFile(
+      {
+        path,
+        name: "research.md",
+        document: markdownToDocument(sourceMarkdown),
+        sourceMarkdown,
+      },
+      "renamed.md",
+    );
 
     expect(mocks.entries.has(path)).toBe(false);
     expect(mocks.entries.get(target)).toBe(expectedSource);
-    expect(mocks.entries.get("/notes/renamed.assets/diagram.png")).toBe("image bytes");
-    expect(renamed).toEqual(expect.objectContaining({
-      path: target, name: "renamed.md", sourceMarkdown: expectedSource,
-    }));
-    expect(renamed.document.content?.find((node) => node.type === "image")?.attrs).toEqual(
+    expect(mocks.entries.get("/notes/renamed.assets/diagram.png")).toBe(
+      "image bytes",
+    );
+    expect(renamed).toEqual(
+      expect.objectContaining({
+        path: target,
+        name: "renamed.md",
+        sourceMarkdown: expectedSource,
+      }),
+    );
+    expect(
+      renamed.document.content?.find((node) => node.type === "image")?.attrs,
+    ).toEqual(
       expect.objectContaining({
         src: "asset:/notes/renamed.assets/diagram.png",
         originalSrc: "renamed.assets/diagram.png",

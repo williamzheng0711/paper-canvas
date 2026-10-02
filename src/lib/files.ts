@@ -1,6 +1,6 @@
 import type { JSONContent } from '@tiptap/core';
 import { convertFileSrc, invoke, isTauri } from '@tauri-apps/api/core';
-import { open, save } from '@tauri-apps/plugin-dialog';
+import { confirm, open, save } from '@tauri-apps/plugin-dialog';
 import { exists, mkdir, readTextFile, rename, writeFile, writeTextFile } from '@tauri-apps/plugin-fs';
 import { Store } from '@tauri-apps/plugin-store';
 import {
@@ -251,6 +251,10 @@ export async function chooseMarkdownFile(): Promise<EditorFile | null> {
   return openMarkdownFile(selected);
 }
 
+export async function confirmDiscardChanges(message: string): Promise<boolean> {
+  return isTauri() ? confirm(message, { kind: 'warning' }) : window.confirm(message);
+}
+
 function editorFileFromMarkdown(markdown: string, path?: string, name = path ? fileName(path) : getMessages().untitledFilename): EditorFile {
   const parsed = parseMarkdownComments(markdown);
   const document = hydrateDocumentAssets(markdownToDocument(parsed.body), path);
@@ -284,7 +288,7 @@ export async function chooseSavePath(defaultName: string): Promise<string | null
   if (!isTauri()) throw new Error(text.saveAsDesktopOnly);
   const selected = await save({
     title: text.saveDocumentDialog,
-    defaultPath: defaultName.endsWith('.md') ? defaultName : `${defaultName}.md`,
+    defaultPath: isMarkdownFilePath(defaultName) ? defaultName : `${defaultName}.md`,
     filters: [{ name: 'Markdown', extensions: ['md'] }],
   });
   return selected;
@@ -308,7 +312,7 @@ function downloadTextFile(contents: string, name: string): void {
 }
 
 /** Exports a Markdown copy without changing the active document path. */
-export async function exportMarkdownFile(markdown: string, defaultName: string): Promise<string | null> {
+export async function exportMarkdownFile(markdown: string, defaultName: string, sourcePath?: string): Promise<string | null> {
   const text = getMessages();
   const name = markdownExportName(defaultName);
   if (!isTauri()) {
@@ -322,7 +326,8 @@ export async function exportMarkdownFile(markdown: string, defaultName: string):
     filters: [{ name: 'Markdown', extensions: ['md'] }],
   });
   if (!selected) return null;
-  await writeTextFile(selected, markdown);
+  const exportedMarkdown = sourcePath ? rebaseMarkdownImageAssets(markdown, sourcePath, selected) : markdown;
+  await writeTextFile(selected, exportedMarkdown);
   return fileName(selected);
 }
 
@@ -406,10 +411,11 @@ export async function renameEditorFile(file: EditorFile, newName: string): Promi
   if (!file.path)
     return {
       ...file,
-      name: cleanName.endsWith('.md') ? cleanName : `${cleanName}.md`,
+      name: isMarkdownFilePath(cleanName) ? cleanName : `${cleanName}.md`,
     };
-  const target = joinPath(parentPath(file.path), cleanName.endsWith('.md') ? cleanName : `${cleanName}.md`);
+  const target = joinPath(parentPath(file.path), isMarkdownFilePath(cleanName) ? cleanName : `${cleanName}.md`);
   if (target === file.path) return file;
+  if (isTauri()) await invoke('allow_document_rename', { source: file.path, target });
   if (await exists(target)) throw new Error(text.filenameExists);
 
   const oldAssets = assetDirectory(file.path);
