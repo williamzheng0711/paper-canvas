@@ -1,6 +1,7 @@
 import { Editor } from "@tiptap/core";
 import { NodeSelection } from "@tiptap/pm/state";
 import StarterKit from "@tiptap/starter-kit";
+import DOMPurify from "dompurify";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createHtmlPreview,
@@ -9,10 +10,36 @@ import {
   InlineHtmlPreview,
 } from "./HtmlPreview";
 import { sanitizePastedHtml } from "./paste";
+import { documentToMarkdown } from "./markdown";
+import { findDocumentMatches } from "./search";
 
 describe("sanitized HTML previews", () => {
   afterEach(() => {
     document.body.replaceChildren();
+    vi.restoreAllMocks();
+  });
+
+  it("keeps source, search, clipboard text and serialization available when sanitization fails", () => {
+    const source = '<span onclick="bad()">Visible</span>';
+    vi.spyOn(DOMPurify, "sanitize").mockImplementation(() => {
+      throw new TypeError("The DOM cannot be safely sanitized");
+    });
+    const preview = createHtmlPreview(source, { kind: "block" });
+    expect(preview.classList.contains("html-preview--blocked")).toBe(true);
+    expect(preview.textContent).toBe(source);
+    expect(preview.querySelector("span")).toBeNull();
+    expect(htmlPreviewText(source, "block")).toBe(source);
+    const editor = new Editor({
+      extensions: [StarterKit, HtmlPreview],
+      content: { type: "doc", content: [{ type: "htmlPreview", attrs: { source } }] },
+    });
+    try {
+      expect(editor.getText()).toBe(source);
+      expect(findDocumentMatches(editor.state.doc, "Visible")).toEqual([{ from: 0, to: 1 }]);
+      expect(documentToMarkdown(editor.getJSON())).toBe(`${source}\n`);
+    } finally {
+      editor.destroy();
+    }
   });
 
   it("reads extremely nested safe HTML without overflowing the text walker", () => {

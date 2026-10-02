@@ -120,10 +120,24 @@ const processor = unified()
     emphasis: "_",
     unsafe: [{ character: "\\", inConstruct: "phrasing" }],
     handlers: {
-      text(node, _parent, state, info) {
+      text(node, parent, state, info) {
         // Attention handlers may entity-encode the neighboring character.
         // Encode literal backslashes so they cannot escape that new entity.
-        return state.safe(node.value, { ...info, encode: ["\\"] });
+        const value = state
+          .safe(node.value, { ...info, encode: ["\\"] })
+          .replace(/^[\r\n]+|[\r\n]+$/g, (lineEndings) =>
+            Array.from(
+              lineEndings,
+              (character) => `&#${character.charCodeAt(0)};`,
+            ).join(""),
+          );
+        // Splitting an image out of a paragraph can leave [^note]: at the
+        // start of a new block. Keep the colon as text rather than turning a
+        // footnote reference into a new (possibly nested) definition.
+        const previous = parent?.children?.[state.indexStack.at(-1)! - 1];
+        return previous?.type === "footnoteReference" && value.startsWith(":")
+          ? `&#58;${value.slice(1)}`
+          : value;
       },
       delete: serializeStrike,
     },
@@ -216,7 +230,12 @@ export function normalizeLatexDelimiters(markdown: string): string {
   // Markdown's parser knows where nested fences, multiline code spans and
   // paired HTML end. Line-based fence detection alone rewrites literal TeX in
   // quoted/list code and changes the source of supposedly lossless previews.
-  const literalRoot = processor.parse(markdown) as unknown as MdRoot;
+  let literalRoot: MdRoot;
+  try {
+    literalRoot = processor.parse(markdown) as unknown as MdRoot;
+  } catch {
+    return markdown;
+  }
   if (hasExtremeNesting(literalRoot)) return markdown;
   groupInlineHtml(literalRoot, markdown);
   const literalRanges: SourceRange[] = [];
@@ -394,6 +413,22 @@ function resolveReferences(root: MdRoot, source: string): void {
   const used = new Set<string>();
   const retained = new Set<string>();
   const collect = (node: MdNode) => {
+    const first = node.children?.[0]?.children?.[0];
+    const firstOffset = first?.position?.start.offset;
+    // GFM removes only the CR from an empty task marker's CRLF separator,
+    // leaving a spurious LF in the following paragraph. Keep source offsets
+    // intact while removing that dependency artifact from the parsed text.
+    if (
+      node.type === "listItem" &&
+      typeof node.checked === "boolean" &&
+      first?.type === "text" &&
+      first.value?.startsWith("\n") &&
+      firstOffset !== undefined &&
+      source.slice(firstOffset - 1, firstOffset + 1) === "\r\n"
+    ) {
+      first.value = first.value.slice(1);
+      if (!first.value) node.children![0].children!.shift();
+    }
     if (["link", "linkReference", "definition"].includes(node.type)) {
       const start = node.position?.start.offset;
       const end = node.position?.end.offset;
@@ -439,9 +474,82 @@ function resolveReferences(root: MdRoot, source: string): void {
   removeConsumedDefinitions(root);
 }
 
+type ContainerPrefix = { quote: true } | { indent: number };
+
+function expandedColumn(value: string, column = 0): number {
+  for (const character of value)
+    column += character === "\t" ? 4 - (column % 4) : 1;
+  return column;
+}
+
+function withoutContainerPrefixes(
+  value: string,
+  prefixes: ContainerPrefix[],
+): string {
+  if (!prefixes.length) return value;
+  return value.replace(
+    /(\r\n|\r|\n)([^\r\n]*)/g,
+    (_match, ending: string, sourceLine: string) => {
+      let line = sourceLine;
+      let column = 0;
+      for (const prefix of prefixes) {
+        if ("quote" in prefix) {
+          const quote = /^[ \t]{0,3}>[ \t]?/.exec(line);
+          if (quote) {
+            column = expandedColumn(quote[0], column);
+            line = line.slice(quote[0].length);
+          }
+        } else {
+          let width = 0;
+          let index = 0;
+          while (width < prefix.indent && /^[ \t]$/.test(line[index] ?? "")) {
+            width += line[index] === "\t" ? 4 - ((column + width) % 4) : 1;
+            index += 1;
+          }
+          // Lazy continuation lines can omit a container's indentation.
+          if (width >= prefix.indent) {
+            line = " ".repeat(width - prefix.indent) + line.slice(index);
+            column += prefix.indent;
+          }
+        }
+      }
+      return ending + line;
+    },
+  );
+}
+
 /** Keep paired inline HTML together so tags such as kbd/sup actually render. */
-function groupInlineHtml(node: MdNode, source: string): void {
-  node.children?.forEach((child) => groupInlineHtml(child, source));
+function groupInlineHtml(
+  node: MdNode,
+  source: string,
+  prefixes: ContainerPrefix[] = [],
+  safety?: { preserve: boolean },
+): void {
+  let childPrefixes = prefixes;
+  if (node.type === "blockquote")
+    childPrefixes = [...prefixes, { quote: true }];
+  if (node.type === "footnoteDefinition")
+    childPrefixes = [...prefixes, { indent: 4 }];
+  if (node.type === "listItem") {
+    const start = node.position?.start.offset;
+    const marker =
+      start !== undefined
+        ? /^([*+-]|\d+[.)])([ \t]+)/.exec(source.slice(start))
+        : null;
+    if (marker && start !== undefined) {
+      const lineStart = source.lastIndexOf("\n", start - 1) + 1;
+      const column =
+        expandedColumn(source.slice(lineStart, start)) + marker[1].length;
+      const padding = expandedColumn(marker[2], column) - column;
+      childPrefixes = [
+        ...prefixes,
+        { indent: marker[1].length + (padding > 4 ? 1 : padding) },
+      ];
+    }
+  }
+  node.children?.forEach((child) =>
+    groupInlineHtml(child, source, childPrefixes, safety),
+  );
   if (
     !node.children ||
     ![
@@ -503,12 +611,31 @@ function groupInlineHtml(node: MdNode, source: string): void {
           type: "underline",
           children: node.children.slice(index + 1, closingIndex),
         };
-        groupInlineHtml(underlined, source);
+        groupInlineHtml(underlined, source, prefixes, safety);
         children.push(underlined);
       } else {
+        const value = withoutContainerPrefixes(
+          source.slice(start, end),
+          prefixes,
+        );
+        if (safety && prefixes.length && /[\r\n]/.test(value)) {
+          try {
+            const standalone = processor.parse(value) as unknown as MdRoot;
+            // Explicit container prefixes added on save can turn a lazy
+            // continuation's literal setext/definition line into a block.
+            if (
+              standalone.children.length !== 1 ||
+              !["paragraph", "html"].includes(standalone.children[0].type)
+            ) {
+              safety.preserve = true;
+            }
+          } catch {
+            safety.preserve = true;
+          }
+        }
         children.push({
           type: "html",
-          value: source.slice(start, end),
+          value,
           position: { start: { offset: start }, end: { offset: end } },
         });
       }
@@ -702,9 +829,38 @@ function tableCellContent(node: MdNode): JSONContent[] {
   return [{ type: "paragraph", content: content(children, "inline") }];
 }
 
+function paragraphContent(
+  children: JSONContent[],
+  taskParagraph = false,
+): JSONContent[] {
+  const only = children.length === 1 ? children[0] : undefined;
+  if (
+    !taskParagraph &&
+    only?.type === "inlineHtmlPreview" &&
+    !only.marks?.length
+  ) {
+    const source = String(only.attrs?.source ?? "");
+    try {
+      const standalone = processor.parse(source) as unknown as MdRoot;
+      if (
+        standalone.children.length === 1 &&
+        standalone.children[0].type === "html"
+      ) {
+        // Image/reference splitting can leave an incomplete tag as an entire
+        // paragraph. Classify it as the same HTML block that a save reopens.
+        return fromMdast({ ...standalone.children[0], value: source }, "block");
+      }
+    } catch {
+      // Keep the already parsed inline source if a standalone parse fails.
+    }
+  }
+  return [{ type: "paragraph", content: children }];
+}
+
 function fromMdast(
   node: MdNode,
   context: MarkdownContext = "block",
+  taskParagraph = false,
 ): JSONContent[] {
   switch (node.type) {
     case "text":
@@ -765,7 +921,7 @@ function fromMdast(
     case "paragraph": {
       const children = content(node.children, "inline");
       if (!children.some((child) => child.type === "image")) {
-        return [{ type: "paragraph", content: children }];
+        return paragraphContent(children, taskParagraph);
       }
 
       // Markdown images are inline syntax, but PaperCanvas images are block
@@ -775,7 +931,9 @@ function fromMdast(
       let inline: JSONContent[] = [];
       const flushInline = () => {
         if (inline.some((child) => child.type !== "text" || child.text?.trim()))
-          blocks.push({ type: "paragraph", content: inline });
+          blocks.push(
+            ...paragraphContent(inline, taskParagraph && blocks.length === 0),
+          );
         inline = [];
       };
       children.forEach((child) => {
@@ -847,7 +1005,10 @@ function fromMdast(
       }));
     }
     case "listItem": {
-      const children = content(node.children);
+      const task = typeof node.checked === "boolean";
+      const children = (node.children ?? []).flatMap((child, index) =>
+        fromMdast(child, "block", task && index === 0),
+      );
       return [
         {
           type:
@@ -948,21 +1109,65 @@ function fromMdast(
   }
 }
 
+function hasAmbiguousHtmlParagraph(
+  node: JSONContent,
+  parent?: JSONContent,
+  index = 0,
+): boolean {
+  const first = node.content?.[0];
+  if (
+    node.type === "paragraph" &&
+    !(parent?.type === "taskItem" && index === 0) &&
+    (node.content?.length ?? 0) > 1 &&
+    first?.type === "inlineHtmlPreview" &&
+    !first.marks?.length
+  ) {
+    try {
+      const standalone = processor.parse(
+        String(first.attrs?.source ?? ""),
+      ) as unknown as MdRoot;
+      if (standalone.children[0]?.type === "html") return true;
+    } catch {
+      return true;
+    }
+  }
+  return (
+    node.content?.some((child, childIndex) =>
+      hasAmbiguousHtmlParagraph(child, node, childIndex),
+    ) ?? false
+  );
+}
+
 export function markdownToDocument(markdown: string): JSONContent {
   const source = parseMarkdownComments(markdown).body;
   // CommonMark replaces literal NULs with U+FFFD; a lossless source atom keeps
   // those bytes recoverable instead of silently modifying the opened file.
   if (source.includes("\0")) return preservedSourceDocument(source);
-  const normalized = normalizeLatexDelimiters(source);
-  const root = processor.parse(normalized) as unknown as MdRoot;
+  let normalized: string;
+  let root: MdRoot;
+  try {
+    normalized = normalizeLatexDelimiters(source);
+    root = processor.parse(normalized) as unknown as MdRoot;
+  } catch {
+    // A malformed construct can trip a parser dependency assertion. Keeping
+    // all source available is safer than crashing or returning a partial tree.
+    return preservedSourceDocument(source);
+  }
   if (hasExtremeNesting(root)) return preservedSourceDocument(source);
-  groupInlineHtml(root, normalized);
+  const safety = { preserve: false };
+  groupInlineHtml(root, normalized, [], safety);
+  if (safety.preserve) return preservedSourceDocument(source);
   resolveReferences(root, normalized);
   const converted = content(root.children);
-  return {
+  const document: JSONContent = {
     type: "doc",
     content: converted.length > 0 ? converted : [{ type: "paragraph" }],
   };
+  // A newly standalone HTML comment/declaration can swallow native text after
+  // an image split. Its original phrasing cannot be represented losslessly.
+  return hasAmbiguousHtmlParagraph(document)
+    ? preservedSourceDocument(source)
+    : document;
 }
 
 function wrapInlineMarks(node: JSONContent, bare: MdNode): MdNode {

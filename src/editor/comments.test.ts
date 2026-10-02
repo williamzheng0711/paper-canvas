@@ -85,6 +85,49 @@ describe('PaperCanvas Markdown comments metadata', () => {
     });
   });
 
+  it.each(['```markdown\n', '<pre>\n', '<div>\n', '> ', '    '])(
+    'preserves literal metadata inside %j',
+    (prefix) => {
+      const markdown = `${prefix}<!-- papercanvas-comments:v1\n{"version":1,"comments":[]}\n-->`;
+
+      expect(parseMarkdownComments(markdown)).toEqual({ body: markdown, comments: [], status: 'invalid' });
+      expect(serializeMarkdownWithComments(markdown, [])).toBe(markdown);
+    },
+  );
+
+  it.each(['```markdown\nbody', '<pre>\nbody', '<div>\nbody', 'body'])(
+    'round-trips generated comments after an unclosed or newline-free body %j',
+    (body) => {
+      const comment = createMarkdownComment(body, { kind: 'position', offset: body.length }, 'Review', '', 'id');
+      const serialized = serializeMarkdownWithComments(body, [comment]);
+
+      expect(parseMarkdownComments(serialized)).toEqual({ body, comments: [comment], status: 'valid' });
+      expect(serializeMarkdownWithComments(serialized, [comment])).toBe(serialized);
+    },
+  );
+
+  it('accepts older standalone metadata and externally edited bodies', () => {
+    const legacy = 'body\n<!-- papercanvas-comments:v1\n{"version":1,"comments":[]}\n-->';
+    expect(parseMarkdownComments(legacy)).toEqual({ body: 'body\n', comments: [], status: 'valid' });
+    const body = 'original\n';
+    const comment = createMarkdownComment(body, { kind: 'position', offset: 0 }, 'Review', '', 'id');
+    const edited = serializeMarkdownWithComments(body, [comment]).replace('original', 'changed');
+    expect(parseMarkdownComments(edited)).toEqual({ body: 'changed\n', comments: [comment], status: 'valid' });
+  });
+
+  it('reads a final valid block after many damaged blocks without rescanning suffixes', () => {
+    const body = '<!-- papercanvas-comments:v1\n{}\n-->\n'.repeat(30_000) + 'text';
+    const comment = createMarkdownComment(body, { kind: 'position', offset: body.length }, 'Review', '', 'id');
+    const started = performance.now();
+    expect(parseMarkdownComments(body + 'x').status).toBe('invalid');
+    expect(parseMarkdownComments(serializeMarkdownWithComments(body, [comment]))).toEqual({
+      body,
+      comments: [comment],
+      status: 'valid',
+    });
+    expect(performance.now() - started).toBeLessThan(1000);
+  });
+
   it('relocates a comment when its anchor becomes unique after a source edit', () => {
     const source = '前文\n\nBefore [old text] after\n';
     const start = source.indexOf('old text');
@@ -164,5 +207,15 @@ describe('PaperCanvas Markdown comments metadata', () => {
     const [relocated] = relocateMarkdownComments([comment], source, 'banana');
 
     expect(relocated.status).toBe('needs-review');
+  });
+
+  it('marks repeated context boundaries as ambiguous without building every possible range', () => {
+    const source = 'aOLDa';
+    const comment = createMarkdownComment(source, { kind: 'range', from: 1, to: 4 }, 'Review', undefined, 'range');
+    const started = performance.now();
+    const [relocated] = relocateMarkdownComments([comment], source, 'a'.repeat(10_000));
+
+    expect(relocated.status).toBe('needs-review');
+    expect(performance.now() - started).toBeLessThan(1000);
   });
 });

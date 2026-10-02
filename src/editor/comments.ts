@@ -1,4 +1,6 @@
 import type { JSONContent } from '@tiptap/core';
+import { unified } from 'unified';
+import remarkParse from 'remark-parse';
 
 export const commentsMetadataVersion = 1;
 export const commentsMetadataMarker = 'papercanvas-comments';
@@ -41,7 +43,9 @@ export type ParsedComments = {
   status: 'none' | 'valid' | 'invalid' | 'unknown-version';
 };
 
-const metadataPattern = new RegExp(`<!--\\s*${commentsMetadataMarker}:v(\\d+)\\r?\\n([\\s\\S]*?)\\r?\\n-->\\s*$`);
+const metadataOpeningPattern = new RegExp(`<!--\\s*${commentsMetadataMarker}:v\\d+\\r?\\n`, 'g');
+const metadataPattern = new RegExp(`^<!--\\s*${commentsMetadataMarker}:v(\\d+)\\r?\\n([\\s\\S]*?)\\r?\\n-->\\s*$`);
+const metadataContextParser = unified().use(remarkParse);
 
 function clampOffset(value: unknown, length: number): number {
   const number = typeof value === 'number' ? value : Number(value);
@@ -143,7 +147,11 @@ function normalizeComment(value: unknown, bodyLength: number): MarkdownComment |
  * discard user data.
  */
 export function parseMarkdownComments(markdown: string): ParsedComments {
-  const match = metadataPattern.exec(markdown);
+  // Start with the final opening header. Trying the entire suffix at every
+  // earlier marker makes a file containing many damaged blocks quadratic.
+  let metadataStart = -1;
+  for (const opening of markdown.matchAll(metadataOpeningPattern)) metadataStart = opening.index;
+  const match = metadataStart >= 0 ? metadataPattern.exec(markdown.slice(metadataStart)) : null;
   if (!match) {
     const markerIndex = markdown.lastIndexOf(`<!-- ${commentsMetadataMarker}:v`);
     return {
@@ -154,7 +162,7 @@ export function parseMarkdownComments(markdown: string): ParsedComments {
   }
 
   const version = Number(match[1]);
-  const body = markdown.slice(0, match.index);
+  let body = markdown.slice(0, metadataStart);
   if (version !== commentsMetadataVersion) {
     return { body: markdown, comments: [], status: 'unknown-version' };
   }
@@ -162,10 +170,24 @@ export function parseMarkdownComments(markdown: string): ParsedComments {
   try {
     const payload = JSON.parse(match[2]) as {
       version?: unknown;
+      bodyFingerprint?: unknown;
       comments?: unknown;
     };
     if (payload.version !== commentsMetadataVersion || !Array.isArray(payload.comments)) {
       return { body: markdown, comments: [], status: 'invalid' };
+    }
+    const fingerprintMatches = payload.bodyFingerprint === markdownFingerprint(body);
+    const insertedSeparator =
+      !fingerprintMatches && body.endsWith('\n') && payload.bodyFingerprint === markdownFingerprint(body.slice(0, -1));
+    if (insertedSeparator) body = body.slice(0, -1);
+    if (!fingerprintMatches && !insertedSeparator) {
+      // Examples in a fence, raw HTML, or a quote are user text. A current
+      // fingerprint still identifies our own metadata appended to an unclosed
+      // construct, while standalone older or externally edited blocks work.
+      const root = metadataContextParser.parse(markdown);
+      if (!root.children.some((node) => node.type === 'html' && node.position?.start.offset === metadataStart)) {
+        return { body: markdown, comments: [], status: 'invalid' };
+      }
     }
     const comments = payload.comments.map((comment) => normalizeComment(comment, body.length));
     if (comments.some((comment): comment is null => comment === null)) {
@@ -220,13 +242,17 @@ function relocateByContext(comment: MarkdownComment, markdown: string): { from: 
   if (!before && !after) return undefined;
   const beforeEnds = before ? findOccurrences(markdown, before).map((offset) => offset + before.length) : [0];
   const afterStarts = after ? findOccurrences(markdown, after) : [markdown.length];
-  const candidates = beforeEnds.flatMap((beforeEnd) =>
-    afterStarts
-      .filter((afterStart) => afterStart >= beforeEnd)
-      .map((afterStart) => ({ from: beforeEnd, to: afterStart })),
-  );
-  if (candidates.length !== 1) return undefined;
-  return candidates[0];
+  let candidate: { from: number; to: number } | undefined;
+  let afterIndex = 0;
+  for (const beforeEnd of beforeEnds) {
+    while (afterIndex < afterStarts.length && afterStarts[afterIndex] < beforeEnd) afterIndex += 1;
+    if (afterIndex === afterStarts.length) continue;
+    // Only uniqueness matters. Stop as soon as two possible ranges exist
+    // instead of allocating the Cartesian product of repeated contexts.
+    if (candidate || afterIndex + 1 < afterStarts.length) return undefined;
+    candidate = { from: beforeEnd, to: afterStarts[afterIndex] };
+  }
+  return candidate;
 }
 
 function refreshCommentAnchor(

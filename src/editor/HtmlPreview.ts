@@ -95,17 +95,27 @@ export function createHtmlPreview(
     return preview;
   }
 
-  const sanitized = DOMPurify.sanitize(source, {
-    ALLOWED_TAGS: [...previewHtmlTags],
-    ALLOWED_ATTR: [...previewHtmlAttributes],
-    ALLOW_ARIA_ATTR: false,
-    ALLOW_DATA_ATTR: false,
-    RETURN_DOM_FRAGMENT: true,
-    // Image URLs are validated and converted below before this detached
-    // fragment is rendered. Retain local file URLs for that explicit resolver;
-    // the ordinary DOMPurify URL policy still applies to links.
-    ADD_URI_SAFE_ATTR: ["src"],
-  });
+  let sanitized: DocumentFragment;
+  try {
+    sanitized = DOMPurify.sanitize(source, {
+      ALLOWED_TAGS: [...previewHtmlTags],
+      ALLOWED_ATTR: [...previewHtmlAttributes],
+      ALLOW_ARIA_ATTR: false,
+      ALLOW_DATA_ATTR: false,
+      RETURN_DOM_FRAGMENT: true,
+      // Image URLs are validated and converted below before this detached
+      // fragment is rendered. Retain local file URLs for that explicit resolver;
+      // the ordinary DOMPurify URL policy still applies to links.
+      ADD_URI_SAFE_ATTR: ["src"],
+    });
+  } catch {
+    // A sanitizer can reject an extreme or malformed DOM. Keep the editor,
+    // search and clipboard available without ever rendering unsanitized HTML.
+    preview.classList.add("html-preview--blocked");
+    preview.hidden = false;
+    preview.textContent = source;
+    return preview;
+  }
   resolveImageSources(sanitized, options.basePath, options.convertLocalFile);
   preview.append(sanitized);
   preview.querySelectorAll<HTMLAnchorElement>("a").forEach((anchor) => {

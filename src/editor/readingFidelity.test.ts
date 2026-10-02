@@ -45,6 +45,184 @@ function allText(node: JSONContent): string {
 }
 
 describe("reading fixtures in the real editor schema", () => {
+  it.each(["- [x] <d>", "- [x] <!-->", "- [x] <u>", "- [x] <d>![]()"])(
+    "retains a task marker when its first paragraph contains incomplete HTML: %j",
+    (source) => {
+      const imported = ProseMirrorNode.fromJSON(
+        schema,
+        markdownToDocument(source),
+      );
+      imported.check();
+      const saved = documentToMarkdown(imported.toJSON());
+      expect(saved).toContain("[x]");
+      expect(
+        ProseMirrorNode.fromJSON(schema, markdownToDocument(saved)).toJSON(),
+      ).toEqual(imported.toJSON());
+    },
+  );
+
+  it.each(["![]()<!-->a", "![]()<!-->*", "![]()<!d>$"])(
+    "preserves image-split HTML that would swallow following native text: %j",
+    (source) => {
+      const document = markdownToDocument(source);
+      const imported = ProseMirrorNode.fromJSON(schema, document);
+      imported.check();
+      expect(document.content?.[0]?.type).toBe("unsupportedMarkdown");
+      expect(documentToMarkdown(imported.toJSON())).toBe(source);
+    },
+  );
+
+  it.each(["<u>![]()", "![]()<u>", "![]()<x>", "![]()<!-->", "[b]:x\n<d>"])(
+    "keeps standalone HTML classification stable after paragraph splitting: %j",
+    (source) => {
+      const imported = ProseMirrorNode.fromJSON(
+        schema,
+        markdownToDocument(source),
+      );
+      imported.check();
+      const saved = documentToMarkdown(imported.toJSON());
+      const reopened = ProseMirrorNode.fromJSON(
+        schema,
+        markdownToDocument(saved),
+      );
+      reopened.check();
+      expect(reopened.toJSON(), saved).toEqual(imported.toJSON());
+    },
+  );
+
+  it.each(["- <kbd>|\n--\n~</kbd>", "><kbd>|\n--\n</kbd>["])(
+    "preserves lazy inline HTML whose continuation would change block structure on save: %j",
+    (source) => {
+      const document = markdownToDocument(source);
+      const imported = ProseMirrorNode.fromJSON(schema, document);
+      imported.check();
+      expect(document.content?.[0]?.type).toBe("unsupportedMarkdown");
+      expect(documentToMarkdown(imported.toJSON())).toBe(source);
+    },
+  );
+
+  it.each([
+    "><kbd>x\n]</kbd>",
+    "> <kbd>x\n> ]</kbd>",
+    "- <kbd>x\n  y</kbd>",
+    "> - <kbd>x\n>   y</kbd>",
+    "> > <kbd>x\n> > y</kbd>",
+    "3. <kbd>x\n   y</kbd>",
+    "[^a]: <kbd>x\n    y</kbd>",
+    "> <kbd\n> title='x'>y</kbd>",
+    "-\t<kbd>x\n\ty</kbd>",
+    "> -\t<kbd>x\n> \ty</kbd>",
+    "-     code\n\n  <kbd>x\n  y</kbd>",
+  ])("keeps container syntax out of multiline inline HTML: %j", (source) => {
+    const imported = ProseMirrorNode.fromJSON(
+      schema,
+      markdownToDocument(source),
+    );
+    imported.check();
+    const saved = documentToMarkdown(imported.toJSON());
+    const reopened = ProseMirrorNode.fromJSON(
+      schema,
+      markdownToDocument(saved),
+    );
+    reopened.check();
+    expect(reopened.toJSON(), saved).toEqual(imported.toJSON());
+    expect(allText(imported.toJSON())).not.toContain("> ");
+  });
+
+  it.each([
+    "[^a]:![]()[^a]:",
+    "![]()[^a]:\n[^a]:",
+    "text[^a]: punctuation\n\n[^a]: Definition.",
+  ])("keeps a footnote reference followed by a colon as text: %j", (source) => {
+    const imported = ProseMirrorNode.fromJSON(
+      schema,
+      markdownToDocument(source),
+    );
+    imported.check();
+    const saved = documentToMarkdown(imported.toJSON());
+    const reopened = ProseMirrorNode.fromJSON(
+      schema,
+      markdownToDocument(saved),
+    );
+    reopened.check();
+    expect(reopened.toJSON(), saved).toEqual(imported.toJSON());
+  });
+
+  it.each(["*\n[x] a", "*\n[ ] a", "*\n[x] \\(x\\)"])(
+    "preserves source when the task parser rejects %j",
+    (source) => {
+      const document = markdownToDocument(source);
+      const imported = ProseMirrorNode.fromJSON(schema, document);
+      imported.check();
+      expect(document.content?.[0]?.type).toBe("unsupportedMarkdown");
+      expect(documentToMarkdown(imported.toJSON())).toBe(source);
+    },
+  );
+
+  it.each(["- [x]\r\na", "- [ ]\r\na", "- [X]\r\n  a", "1. [x]\r\na"])(
+    "round-trips a CRLF task marker without an artificial leading line break: %j",
+    (source) => {
+      const imported = ProseMirrorNode.fromJSON(
+        schema,
+        markdownToDocument(source),
+      );
+      imported.check();
+      expect(allText(imported.toJSON())).toBe("a");
+      const saved = documentToMarkdown(imported.toJSON());
+      const reopened = ProseMirrorNode.fromJSON(
+        schema,
+        markdownToDocument(saved),
+      );
+      reopened.check();
+      expect(reopened.toJSON()).toEqual(imported.toJSON());
+    },
+  );
+
+  it.each(["$x$", "*a*", "<u>x</u>", "<kbd>x</kbd>"])(
+    "does not leave an empty text node before task continuation content %j",
+    (value) => {
+      const imported = ProseMirrorNode.fromJSON(
+        schema,
+        markdownToDocument(`- [x]\r\n${value}`),
+      );
+      imported.check();
+      const saved = documentToMarkdown(imported.toJSON());
+      expect(
+        ProseMirrorNode.fromJSON(schema, markdownToDocument(saved)).toJSON(),
+      ).toEqual(imported.toJSON());
+    },
+  );
+
+  it.each(["\na", "a\n", "\r\na\r\n"])(
+    "preserves literal line endings at task text edges: %j",
+    (text) => {
+      const edited = ProseMirrorNode.fromJSON(schema, {
+        type: "doc",
+        content: [
+          {
+            type: "taskList",
+            content: [
+              {
+                type: "taskItem",
+                attrs: { checked: true },
+                content: [
+                  { type: "paragraph", content: [{ type: "text", text }] },
+                ],
+              },
+            ],
+          },
+        ],
+      });
+      const saved = documentToMarkdown(edited.toJSON());
+      const reopened = ProseMirrorNode.fromJSON(
+        schema,
+        markdownToDocument(saved),
+      );
+      reopened.check();
+      expect(reopened.toJSON(), saved).toEqual(edited.toJSON());
+    },
+  );
+
   it("round-trips every adjacent bold, italic, strike and underline combination", () => {
     const types = ["bold", "italic", "strike", "underline"];
     const text = (mask: number, value: string): JSONContent => ({
