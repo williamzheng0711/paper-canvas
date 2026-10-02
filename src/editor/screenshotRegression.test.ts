@@ -163,6 +163,9 @@ describe('native support for structures shown in reading screenshots', () => {
     expect(references[0].marks).toEqual([{ type: 'bold' }]);
     expect(references[1].marks).toEqual([{ type: 'italic' }]);
     expect(markdown).toContain('**Reference[^n]**');
-    expect(markdown).toContain('*[^n]*');
+    expect(markdown).toContain('_[^n]_');
+    expect(nodesOfType(markdownToDocument(markdown), 'footnoteReference').map((reference) => reference.marks)).toEqual(
+      references.map((reference) => reference.marks),
+    );
   });
 });

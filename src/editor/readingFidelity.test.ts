@@ -45,6 +45,131 @@ function allText(node: JSONContent): string {
 }
 
 describe("reading fixtures in the real editor schema", () => {
+  it("round-trips every adjacent bold, italic, strike and underline combination", () => {
+    const types = ["bold", "italic", "strike", "underline"];
+    const text = (mask: number, value: string): JSONContent => ({
+      type: "text",
+      text: value,
+      marks: types
+        .filter((_, index) => mask & (1 << index))
+        .map((type) => ({ type })),
+    });
+    for (let left = 0; left < 16; left += 1) {
+      for (let right = 0; right < 16; right += 1) {
+        for (const separator of ["", " ", "\\"]) {
+          const edited = ProseMirrorNode.fromJSON(schema, {
+            type: "doc",
+            content: [
+              {
+                type: "paragraph",
+                content: [text(left, `a${separator}`), text(right, "b")],
+              },
+            ],
+          });
+          const saved = documentToMarkdown(edited.toJSON());
+          const reopened = ProseMirrorNode.fromJSON(
+            schema,
+            markdownToDocument(saved),
+          );
+          expect(reopened.toJSON(), saved).toEqual(edited.toJSON());
+        }
+      }
+    }
+  });
+
+  it.each([
+    { type: "text", text: "a ", marks: [{ type: "strike" }] },
+    { type: "text", text: "a\\", marks: [{ type: "strike" }] },
+    {
+      type: "inlineFormula",
+      attrs: { latex: "x" },
+      marks: [{ type: "strike" }],
+    },
+    {
+      type: "inlineHtmlPreview",
+      attrs: { source: "<kbd>x</kbd>" },
+      marks: [{ type: "strike" }],
+    },
+  ] satisfies JSONContent[])(
+    "keeps strike around punctuation and spaced runs beside words: %j",
+    (inline) => {
+      const edited = ProseMirrorNode.fromJSON(schema, {
+        type: "doc",
+        content: [
+          {
+            type: "paragraph",
+            content: [
+              { type: "text", text: "Before" },
+              inline,
+              { type: "text", text: "after" },
+            ],
+          },
+        ],
+      });
+      const reopened = ProseMirrorNode.fromJSON(
+        schema,
+        markdownToDocument(documentToMarkdown(edited.toJSON())),
+      );
+      expect(reopened.toJSON()).toEqual(edited.toJSON());
+    },
+  );
+
+  it.each(["\n[", "\n# heading", "x\r\n\r\ny", "x\n<&\"'>&amp;&#10;$", "\n"])(
+    "retains exact multiline inline formula sources on save/reopen: %j",
+    (latex) => {
+      const edited = ProseMirrorNode.fromJSON(schema, {
+        type: "doc",
+        content: [
+          {
+            type: "paragraph",
+            content: [
+              { type: "text", text: "Before " },
+              {
+                type: "inlineFormula",
+                attrs: { latex },
+                marks: [{ type: "underline" }, { type: "bold" }],
+              },
+              { type: "text", text: " after." },
+            ],
+          },
+        ],
+      });
+      const saved = documentToMarkdown(edited.toJSON());
+      const reopened = ProseMirrorNode.fromJSON(
+        schema,
+        markdownToDocument(saved),
+      );
+      expect(reopened.toJSON()).toEqual(edited.toJSON());
+      expect(documentToMarkdown(reopened.toJSON())).toBe(saved);
+    },
+  );
+
+  it.each([
+    "***i**c*",
+    "**d**<u>*c*</u>",
+    "*t*<u>**d**</u>",
+    "<u>*c*</u>**d**",
+    "<u>~~s~~</u>a",
+    "\\a<u>*d*</u>",
+    "\\a*c*",
+    "*\\a*l",
+    "\\*\\**a*\\a*next*",
+    "**before <u>middle</u> after**",
+  ])(
+    "keeps overlapping and adjacent marks without introducing delimiters: %s",
+    (source) => {
+      const imported = ProseMirrorNode.fromJSON(
+        schema,
+        markdownToDocument(source),
+      );
+      const reopened = ProseMirrorNode.fromJSON(
+        schema,
+        markdownToDocument(documentToMarkdown(imported.toJSON())),
+      );
+      expect(reopened.toJSON()).toEqual(imported.toJSON());
+    },
+  );
+
   it.each([
     `${"> ".repeat(2_000)}body $x$`,
     `${"> ".repeat(2_000)}body \\(x\\)`,

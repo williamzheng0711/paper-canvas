@@ -2,6 +2,9 @@ import type { JSONContent } from '@tiptap/core';
 import type { Node as ProseMirrorNode } from '@tiptap/pm/model';
 import { parseMarkdownComments } from './comments';
 import { documentToMarkdown, markdownToDocument } from './markdown';
+import { selectionMarker } from './selectionMarker';
+
+export { selectionMarker } from './selectionMarker';
 
 export type DocumentSelectionAnchor =
   | { kind: 'formula'; path: number[]; offset: number }
@@ -35,9 +38,6 @@ export type ParsedMarkdownSelection = {
   document: JSONContent;
   anchor?: DocumentSelectionAnchor;
 };
-
-/** Private-use text that survives remark parsing/stringifying without escaping. */
-export const selectionMarker = '\uE000\uE001\uE002';
 
 const textBlockTypes = new Set(['paragraph', 'heading', 'codeBlock']);
 
@@ -337,7 +337,7 @@ export function markdownSelectionFromMarkedDocument(
   const markedMarkdown = documentToMarkdown(markedDocument, (value) => value.replace(selectionMarker, '').length);
   const offset = markedMarkdown.indexOf(selectionMarker);
   if (offset < 0) return undefined;
-  if (markedMarkdown.replace(selectionMarker, '') !== markdown) return undefined;
+  if (markedMarkdown.replaceAll(selectionMarker, '') !== markdown) return undefined;
   return { markdown, offset };
 }
 

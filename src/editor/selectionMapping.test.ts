@@ -12,6 +12,32 @@ import {
 } from './selectionMapping';
 
 describe('canvas and Markdown selection mapping', () => {
+  it("maps exact multiline formula carets through repeated inert HTML metadata", () => {
+    const document = markdownToDocument("Before $\n[xy$ after.");
+    const marked = structuredClone(document);
+    const formula = marked.content![0].content!.find(
+      (node) => node.type === "inlineFormula",
+    )!;
+    formula.attrs!.latex = `\n[x${selectionMarker}y`;
+    const selection = markdownSelectionFromMarkedDocument(document, marked);
+    expect(selection).toBeDefined();
+    expect(selection!.offset).toBe(selection!.markdown.indexOf("[xy") + 2);
+    const occurrences = [...selection!.markdown.matchAll(/\[xy/g)];
+    expect(occurrences).toHaveLength(3);
+    for (const occurrence of occurrences) {
+      const mapped = markdownToDocumentWithSelection(
+        selection!.markdown,
+        occurrence.index! + 2,
+      );
+      expect(mapped.document).toEqual(document);
+      expect(mapped.anchor).toEqual({
+        kind: "formula",
+        path: [0, 1],
+        offset: 3,
+      });
+    }
+  });
+
   it('serializes an exact canvas text offset through Markdown emphasis markers', () => {
     const document: JSONContent = {
       type: 'doc',

@@ -1,5 +1,7 @@
 import type { JSONContent } from "@tiptap/core";
 import type {} from "mdast-util-gfm-strikethrough";
+import type { Handle } from "mdast-util-to-markdown";
+import { classifyCharacter } from "micromark-util-classify-character";
 import { unified } from "unified";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -10,6 +12,7 @@ import { parseMarkdownComments } from "./comments";
 import { isDisplayLatexEnvironment } from "./formulaInput";
 import { isHtmlPreviewCandidate } from "./htmlSafety";
 import { requiresHtmlTable, tableToHtml } from "./markdownTableHtml";
+import { selectionMarker } from "./selectionMarker";
 
 type MdNode = {
   type: string;
@@ -59,32 +62,70 @@ function preservedSourceDocument(source: string): JSONContent {
   };
 }
 
+function strikeEdge(outside: number, inside: number) {
+  const outer = classifyCharacter(outside);
+  const inner = classifyCharacter(inside);
+  return {
+    inside: inner === 1,
+    outside:
+      (outer === undefined && inner !== undefined) ||
+      (outer === 1 && inner === 1),
+  };
+}
+
+const serializeStrike: Handle & { peek?: Handle } = (
+  node,
+  _parent,
+  state,
+  info,
+) => {
+  const exit = state.enter("strikethrough");
+  const tracker = state.createTracker(info);
+  const opening = tracker.move("~~");
+  let value = state.containerPhrasing(node, {
+    ...tracker.current(),
+    before: opening,
+    after: "~",
+  });
+  const open = strikeEdge(
+    info.before.charCodeAt(info.before.length - 1),
+    value.charCodeAt(0),
+  );
+  // GFM rejects whitespace just inside ~~ delimiters. Entity escaping
+  // retains the exact marked text when a user strikes a spaced run.
+  if (open.inside) value = `&#${value.charCodeAt(0)};${value.slice(1)}`;
+  const close = strikeEdge(
+    info.after.charCodeAt(0),
+    value.charCodeAt(value.length - 1),
+  );
+  if (close.inside)
+    value = `${value.slice(0, -1)}&#${value.charCodeAt(value.length - 1)};`;
+  tracker.move(value);
+  const closing = tracker.move("~~");
+  exit();
+  state.attentionEncodeSurroundingInfo = {
+    before: open.outside,
+    after: close.outside,
+  };
+  return opening + value + closing;
+};
+// Phrasing lookahead must not run this handler and mutate attention state.
+serializeStrike.peek = () => "~";
+
 const processor = unified()
   .use(remarkParse)
   .use(remarkGfm)
   .use(remarkMath)
   .use(remarkStringify, {
+    emphasis: "_",
+    unsafe: [{ character: "\\", inConstruct: "phrasing" }],
     handlers: {
-      delete(node, _parent, state, info) {
-        const exit = state.enter("strikethrough");
-        const tracker = state.createTracker(info);
-        const opening = tracker.move("~~");
-        let value = state.containerPhrasing(node, {
-          ...tracker.current(),
-          before: opening,
-          after: "~",
-        });
-        // GFM rejects whitespace just inside ~~ delimiters. Entity escaping
-        // retains the exact marked text when a user strikes a spaced run.
-        if (/^\s/.test(value))
-          value = `&#${value.charCodeAt(0)};${value.slice(1)}`;
-        if (/\s$/.test(value))
-          value = `${value.slice(0, -1)}&#${value.charCodeAt(value.length - 1)};`;
-        tracker.move(value);
-        const closing = tracker.move("~~");
-        exit();
-        return opening + value + closing;
+      text(node, _parent, state, info) {
+        // Attention handlers may entity-encode the neighboring character.
+        // Encode literal backslashes so they cannot escape that new entity.
+        return state.safe(node.value, { ...info, encode: ["\\"] });
       },
+      delete: serializeStrike,
     },
   });
 const imageSizeTitle = /^papercanvas-size:(\d+)x(\d+)(?:\s+\|\s+([\s\S]*))?$/i;
@@ -519,6 +560,40 @@ function textNode(value: string | undefined): JSONContent {
   return { type: "text", text: value ?? "" };
 }
 
+function formulaFromHtml(source: string): string | undefined {
+  const match =
+    /^<span data-formula-kind="inline" latex="([^"]*)" data-latex="([^"]*)">([\s\S]*)<\/span>$/.exec(
+      source,
+    );
+  if (!match) return undefined;
+  const entities: Record<string, string> = {
+    amp: "&",
+    lt: "<",
+    gt: ">",
+    quot: '"',
+    "#39": "'",
+    "#13": "\r",
+    "#10": "\n",
+  };
+  const decode = (value: string) =>
+    value.replace(
+      /&(amp|lt|gt|quot|#39|#13|#10);/g,
+      (_, entity: string) => entities[entity],
+    );
+  const latex = decode(match[1]);
+  // Recognize only the inert formula HTML emitted by our own lossless
+  // serializer, keeping ordinary user HTML as its original preview source.
+  const candidates = [latex, decode(match[2]), decode(match[3]).slice(1, -1)];
+  const clean = (value: string) => value.replaceAll(selectionMarker, "");
+  if (
+    !decode(match[3]).startsWith("$") ||
+    !decode(match[3]).endsWith("$") ||
+    candidates.some((value) => clean(value) !== clean(latex))
+  )
+    return undefined;
+  return candidates.find((value) => value.includes(selectionMarker)) ?? latex;
+}
+
 function imageDimension(value: unknown): number | null {
   const dimension = Number(value);
   return Number.isInteger(dimension) && dimension > 0 && dimension <= 10_000
@@ -835,7 +910,14 @@ function fromMdast(
           content: tableCellContent(node),
         },
       ];
-    case "html":
+    case "html": {
+      const latex = formulaFromHtml(node.value ?? "");
+      if (latex !== undefined) {
+        const formula = { type: "inlineFormula", attrs: { latex } };
+        return context === "inline"
+          ? [formula]
+          : [{ type: "paragraph", content: [formula] }];
+      }
       if (context === "inline" && /^<br\s*\/?\s*>$/i.test(node.value ?? ""))
         return [{ type: "hardBreak" }];
       if (
@@ -860,6 +942,7 @@ function fromMdast(
           attrs: { source: node.value ?? "" },
         },
       ];
+    }
     default:
       return [unsupported(node, undefined, context)];
   }
@@ -886,9 +969,7 @@ function wrapInlineMarks(node: JSONContent, bare: MdNode): MdNode {
   const marks = node.marks ?? [];
   const mark = (type: string) => marks.find((item) => item.type === type);
   let wrapped = bare;
-  // Native Markdown marks stay outside the HTML underline wrapper so shared
-  // runs still merge, including whitespace that cannot end a ~~strike~~ span.
-  if (mark("underline")) wrapped = { type: "underline", children: [wrapped] };
+  // Distinct bold/italic delimiters keep overlapping mark runs unambiguous.
   if (mark("link"))
     wrapped = {
       type: "link",
@@ -899,6 +980,9 @@ function wrapInlineMarks(node: JSONContent, bare: MdNode): MdNode {
   if (mark("strike")) wrapped = { type: "delete", children: [wrapped] };
   if (mark("italic")) wrapped = { type: "emphasis", children: [wrapped] };
   if (mark("bold")) wrapped = { type: "strong", children: [wrapped] };
+  // Keep delimiters beside their text rather than HTML's punctuation, which
+  // prevents closing emphasis/strike spans from being recognized next to words.
+  if (mark("underline")) wrapped = { type: "underline", children: [wrapped] };
   return wrapped;
 }
 
@@ -1026,11 +1110,17 @@ function toMdast(node: JSONContent): MdNode | null {
           }
         : image;
     }
-    case "inlineFormula":
+    case "inlineFormula": {
+      const latex = String(node.attrs?.latex ?? "");
       return wrapInlineMarks(node, {
-        type: "inlineMath",
-        value: String(node.attrs?.latex ?? ""),
+        // Inline math serializers rewrite newlines that resemble Markdown
+        // blocks. Existing inert formula HTML retains every source character.
+        type: /[\r\n]/.test(latex) ? "html" : "inlineMath",
+        value: /[\r\n]/.test(latex)
+          ? tableToHtml({ ...node, marks: undefined })
+          : latex,
       });
+    }
     case "blockFormula":
       return { type: "math", value: String(node.attrs?.latex ?? "") };
     case "table":
