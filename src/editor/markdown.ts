@@ -1,4 +1,5 @@
 import type { JSONContent } from "@tiptap/core";
+import type {} from "mdast-util-gfm-strikethrough";
 import { unified } from "unified";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -31,11 +32,61 @@ type MdNode = {
 
 type MdRoot = MdNode & { children: MdNode[] };
 
+function hasExtremeNesting(root: MdNode): boolean {
+  const pending: Array<{ node: MdNode; depth: number }> = [
+    { node: root, depth: 0 },
+  ];
+  while (pending.length) {
+    const { node, depth } = pending.pop()!;
+    // Parser trees can be deeper than the recursive editor/schema walkers or
+    // the browser DOM can safely support. Preserve their source as one atom.
+    if (depth > 256) return true;
+    for (const child of node.children ?? [])
+      pending.push({ node: child, depth: depth + 1 });
+  }
+  return false;
+}
+
+function preservedSourceDocument(source: string): JSONContent {
+  return {
+    type: "doc",
+    content: [
+      {
+        type: "unsupportedMarkdown",
+        attrs: { source, reason: getMessages().unsupportedMarkdownReason },
+      },
+    ],
+  };
+}
+
 const processor = unified()
   .use(remarkParse)
   .use(remarkGfm)
   .use(remarkMath)
-  .use(remarkStringify);
+  .use(remarkStringify, {
+    handlers: {
+      delete(node, _parent, state, info) {
+        const exit = state.enter("strikethrough");
+        const tracker = state.createTracker(info);
+        const opening = tracker.move("~~");
+        let value = state.containerPhrasing(node, {
+          ...tracker.current(),
+          before: opening,
+          after: "~",
+        });
+        // GFM rejects whitespace just inside ~~ delimiters. Entity escaping
+        // retains the exact marked text when a user strikes a spaced run.
+        if (/^\s/.test(value))
+          value = `&#${value.charCodeAt(0)};${value.slice(1)}`;
+        if (/\s$/.test(value))
+          value = `${value.slice(0, -1)}&#${value.charCodeAt(value.length - 1)};`;
+        tracker.move(value);
+        const closing = tracker.move("~~");
+        exit();
+        return opening + value + closing;
+      },
+    },
+  });
 const imageSizeTitle = /^papercanvas-size:(\d+)x(\d+)(?:\s+\|\s+([\s\S]*))?$/i;
 const inlineMarkTypes = new Set([
   "text",
@@ -125,6 +176,7 @@ export function normalizeLatexDelimiters(markdown: string): string {
   // paired HTML end. Line-based fence detection alone rewrites literal TeX in
   // quoted/list code and changes the source of supposedly lossless previews.
   const literalRoot = processor.parse(markdown) as unknown as MdRoot;
+  if (hasExtremeNesting(literalRoot)) return markdown;
   groupInlineHtml(literalRoot, markdown);
   const literalRanges: SourceRange[] = [];
   const collectLiteralRanges = (node: MdNode) => {
@@ -369,7 +421,9 @@ function groupInlineHtml(node: MdNode, source: string): void {
     const child = node.children[index];
     const opening =
       child.type === "html"
-        ? /^<([A-Za-z][A-Za-z0-9-]*)\b[^>]*>$/.exec(child.value ?? "")
+        ? /^<([A-Za-z][A-Za-z0-9-]*)\b(?:[^"'<>]|"[^"]*"|'[^']*')*>$/.exec(
+            child.value ?? "",
+          )
         : null;
     if (
       !opening ||
@@ -385,9 +439,10 @@ function groupInlineHtml(node: MdNode, source: string): void {
     for (; closingIndex < node.children.length; closingIndex += 1) {
       const next = node.children[closingIndex];
       if (next.type !== "html") continue;
-      const match = /^<(\/)?([A-Za-z][A-Za-z0-9-]*)\b[^>]*>$/.exec(
-        next.value ?? "",
-      );
+      const match =
+        /^<(\/)?([A-Za-z][A-Za-z0-9-]*)\b(?:[^"'<>]|"[^"]*"|'[^']*')*>$/.exec(
+          next.value ?? "",
+        );
       if (match?.[2].toLowerCase() !== tag) continue;
       depth += match[1] ? -1 : 1;
       if (depth === 0) break;
@@ -670,8 +725,15 @@ function fromMdast(
           content: content(node.children, "inline"),
         },
       ];
-    case "blockquote":
-      return [{ type: "blockquote", content: content(node.children) }];
+    case "blockquote": {
+      const children = content(node.children);
+      return [
+        {
+          type: "blockquote",
+          content: children.length ? children : [{ type: "paragraph" }],
+        },
+      ];
+    }
     case "thematicBreak":
       return [{ type: "horizontalRule" }];
     case "code":
@@ -730,23 +792,33 @@ function fromMdast(
         },
       ];
     }
-    case "table":
+    case "table": {
       // GFM permits images in cells, while our cells currently serialize inline
       // paragraphs. Keep the complete table source until that shape is supported.
       if (containsImage(node)) return [unsupported(node)];
+      // ProseMirror requires a rectangular table. Pad missing GFM fields up
+      // front so opening or saving cannot trigger implicit table repair, and
+      // retain overflow cells rather than discarding their authored content.
+      const columns = (node.children ?? []).reduce(
+        (maximum, row) => Math.max(maximum, row.children?.length ?? 0),
+        0,
+      );
       return [
         {
           type: "table",
           content: (node.children ?? []).map((row, rowIndex) => ({
             type: "tableRow",
-            content: (row.children ?? []).map((cell, columnIndex) => ({
+            content: Array.from({ length: columns }, (_, columnIndex) => ({
               type: rowIndex === 0 ? "tableHeader" : "tableCell",
               attrs: { textAlign: node.align?.[columnIndex] ?? null },
-              content: tableCellContent(cell),
+              content: tableCellContent(
+                row.children?.[columnIndex] ?? { type: "tableCell" },
+              ),
             })),
           })),
         },
       ];
+    }
     case "tableRow":
       return [{ type: "tableRow", content: content(node.children) }];
     case "tableCell":
@@ -766,6 +838,19 @@ function fromMdast(
     case "html":
       if (context === "inline" && /^<br\s*\/?\s*>$/i.test(node.value ?? ""))
         return [{ type: "hardBreak" }];
+      if (
+        context === "block" &&
+        /^(?:<br\s*\/?\s*>\s*)+$/i.test(node.value ?? "")
+      )
+        return [
+          {
+            type: "paragraph",
+            content: Array.from(
+              (node.value ?? "").matchAll(/<br\s*\/?\s*>/gi),
+              () => ({ type: "hardBreak" }),
+            ),
+          },
+        ];
       if (context === "block" && !isHtmlPreviewCandidate(node.value ?? "")) {
         return [unsupported(node, getMessages().htmlPreserved)];
       }
@@ -782,8 +867,12 @@ function fromMdast(
 
 export function markdownToDocument(markdown: string): JSONContent {
   const source = parseMarkdownComments(markdown).body;
+  // CommonMark replaces literal NULs with U+FFFD; a lossless source atom keeps
+  // those bytes recoverable instead of silently modifying the opened file.
+  if (source.includes("\0")) return preservedSourceDocument(source);
   const normalized = normalizeLatexDelimiters(source);
   const root = processor.parse(normalized) as unknown as MdRoot;
+  if (hasExtremeNesting(root)) return preservedSourceDocument(source);
   groupInlineHtml(root, normalized);
   resolveReferences(root, normalized);
   const converted = content(root.children);
@@ -917,7 +1006,10 @@ function toMdast(node: JSONContent): MdNode | null {
     case "horizontalRule":
       return { type: "thematicBreak" };
     case "hardBreak":
-      return { type: "break" };
+      // Markdown line endings followed by inline HTML are flattened by remark,
+      // and heading line endings leave the heading. HTML keeps the same break
+      // in every phrasing context and imports back into the native break node.
+      return { type: "html", value: "<br>" };
     case "image": {
       const image: MdNode = {
         type: "image",
@@ -1039,6 +1131,11 @@ export function documentToMarkdown(
   document: JSONContent,
   stringLength?: (value: string) => number,
 ): string {
+  if (
+    document.content?.length === 1 &&
+    document.content[0].type === "unsupportedMarkdown"
+  )
+    return String(document.content[0].attrs?.source ?? "");
   const root: MdRoot = {
     type: "root",
     children: (document.content ?? []).flatMap((node) => {

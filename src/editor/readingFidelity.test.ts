@@ -45,6 +45,116 @@ function allText(node: JSONContent): string {
 }
 
 describe("reading fixtures in the real editor schema", () => {
+  it.each([
+    `${"> ".repeat(2_000)}body $x$`,
+    `${"> ".repeat(2_000)}body \\(x\\)`,
+    "# Heading\n\nText with a \0 byte.\n\n```\ncode\0data\n```\n",
+  ])(
+    "preserves extreme nesting and literal NULs as recoverable source",
+    (source) => {
+      const imported = ProseMirrorNode.fromJSON(
+        schema,
+        markdownToDocument(source),
+      );
+      expect(() => imported.check()).not.toThrow();
+      expect(imported.firstChild?.type.name).toBe("unsupportedMarkdown");
+      expect(imported.firstChild?.attrs.source).toBe(source);
+      expect(documentToMarkdown(imported.toJSON())).toBe(source);
+      const reopened = ProseMirrorNode.fromJSON(
+        schema,
+        markdownToDocument(documentToMarkdown(imported.toJSON())),
+      );
+      expect(reopened.toJSON()).toEqual(imported.toJSON());
+    },
+  );
+
+  it.each([
+    "[x][target]\n\n> [target]: /destination",
+    "[x][target]\n\n> > [target]: /destination",
+    ">",
+  ])(
+    "keeps empty blockquotes schema-valid after resolving definitions: %s",
+    (source) => {
+      const imported = ProseMirrorNode.fromJSON(
+        schema,
+        markdownToDocument(source),
+      );
+      expect(() => imported.check()).not.toThrow();
+      const reopened = ProseMirrorNode.fromJSON(
+        schema,
+        markdownToDocument(documentToMarkdown(imported.toJSON())),
+      );
+      expect(() => reopened.check()).not.toThrow();
+      expect(reopened.toJSON()).toEqual(imported.toJSON());
+    },
+  );
+
+  it.each([
+    "<u>first<br>second</u>",
+    "first<br><kbd>second</kbd>",
+    "# first<br>second",
+    "**first<br>second**",
+    "first<br>",
+    "<br>",
+    "<br><br>",
+    "<br>![image](image.png)",
+  ])("retains hard breaks next to HTML and inside headings: %s", (source) => {
+    const imported = ProseMirrorNode.fromJSON(
+      schema,
+      markdownToDocument(source),
+    );
+    expect(imported.textContent).not.toContain("\\");
+    const reopened = ProseMirrorNode.fromJSON(
+      schema,
+      markdownToDocument(documentToMarkdown(imported.toJSON())),
+    );
+    expect(reopened.toJSON()).toEqual(imported.toJSON());
+  });
+
+  it.each([" ", " spaced ", "\tspaced\t", "\nspaced\n", "\u00a0spaced\u00a0"])(
+    "retains exact whitespace inside a strikethrough run: %j",
+    (text) => {
+      const edited = ProseMirrorNode.fromJSON(schema, {
+        type: "doc",
+        content: [
+          {
+            type: "paragraph",
+            content: [{ type: "text", text, marks: [{ type: "strike" }] }],
+          },
+        ],
+      });
+      const reopened = ProseMirrorNode.fromJSON(
+        schema,
+        markdownToDocument(documentToMarkdown(edited.toJSON())),
+      );
+      expect(reopened.toJSON()).toEqual(edited.toJSON());
+    },
+  );
+
+  it("makes ragged GFM rows rectangular without losing overflow fields", () => {
+    const imported = ProseMirrorNode.fromJSON(
+      schema,
+      markdownToDocument(
+        "| A | B |\n| --- | --- |\n| short |\n| extra | **field** | $x$ |",
+      ),
+    );
+    const table = imported.firstChild!;
+    expect(
+      Array.from(
+        { length: table.childCount },
+        (_, index) => table.child(index).childCount,
+      ),
+    ).toEqual([3, 3, 3]);
+    expect(table.child(2).child(2).firstChild?.firstChild?.type.name).toBe(
+      "inlineFormula",
+    );
+    const reopened = ProseMirrorNode.fromJSON(
+      schema,
+      markdownToDocument(documentToMarkdown(imported.toJSON())),
+    );
+    expect(reopened.toJSON()).toEqual(imported.toJSON());
+  });
+
   it("preserves the additional paragraph and formula created by Enter in a table cell", () => {
     const imported = ProseMirrorNode.fromJSON(
       schema,

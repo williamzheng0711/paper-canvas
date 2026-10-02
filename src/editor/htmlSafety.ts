@@ -70,7 +70,8 @@ export const previewHtmlAttributes = [
 ] as const;
 
 const previewTagSet = new Set<string>(previewHtmlTags);
-const htmlTag = /<\s*\/?\s*([A-Za-z][A-Za-z0-9-]*)\b[^>]*>/g;
+const htmlTag =
+  /<!--[\s\S]*?-->|<\s*\/?\s*([A-Za-z][A-Za-z0-9-]*)\b(?:[^"'<>]|"[^"]*"|'[^']*')*>/g;
 
 export function isHtmlCommentOnly(source: string): boolean {
   return (
@@ -87,9 +88,8 @@ export function isHtmlCommentOnly(source: string): boolean {
 export function isHtmlPreviewCandidate(source: string): boolean {
   if (isHtmlCommentOnly(source)) return true;
   let foundTag = false;
-  for (const match of source
-    .replace(/<!--[\s\S]*?-->/g, "")
-    .matchAll(htmlTag)) {
+  for (const match of source.matchAll(htmlTag)) {
+    if (!match[1]) continue;
     foundTag = true;
     if (!previewTagSet.has(match[1].toLowerCase())) return false;
   }

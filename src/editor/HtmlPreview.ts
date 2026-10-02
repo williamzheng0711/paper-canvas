@@ -100,19 +100,14 @@ export function createHtmlPreview(
     ALLOWED_ATTR: [...previewHtmlAttributes],
     ALLOW_ARIA_ATTR: false,
     ALLOW_DATA_ATTR: false,
+    RETURN_DOM_FRAGMENT: true,
     // Image URLs are validated and converted below before this detached
     // fragment is rendered. Retain local file URLs for that explicit resolver;
     // the ordinary DOMPurify URL policy still applies to links.
     ADD_URI_SAFE_ATTR: ["src"],
   });
-  const template = document.createElement("template");
-  template.innerHTML = String(sanitized);
-  resolveImageSources(
-    template.content,
-    options.basePath,
-    options.convertLocalFile,
-  );
-  preview.append(template.content.cloneNode(true));
+  resolveImageSources(sanitized, options.basePath, options.convertLocalFile);
+  preview.append(sanitized);
   preview.querySelectorAll<HTMLAnchorElement>("a").forEach((anchor) => {
     anchor.removeAttribute("target");
     anchor.rel = "noopener noreferrer";
@@ -164,36 +159,64 @@ export function htmlPreviewText(
   if (preview.classList.contains("html-preview--blocked"))
     return preview.textContent ?? "";
 
-  const text: string[] = [];
-  function visit(node: globalThis.Node, preformatted = false): void {
+  const text: Array<{ value: string; preformatted: boolean }> = [];
+  const append = (value: string, preformatted: boolean) => {
+    const previous = text.at(-1);
+    if (previous?.preformatted === preformatted) previous.value += value;
+    else text.push({ value, preformatted });
+  };
+  const pending: Array<{
+    node: globalThis.Node;
+    preformatted: boolean;
+    closing?: boolean;
+  }> = [];
+  for (let index = preview.childNodes.length - 1; index >= 0; index -= 1)
+    pending.push({ node: preview.childNodes[index], preformatted: false });
+  while (pending.length) {
+    const { node, preformatted, closing } = pending.pop()!;
+    if (closing) {
+      append("\n", preformatted);
+      continue;
+    }
     if (node.nodeType === globalThis.Node.TEXT_NODE) {
       let value = node.textContent ?? "";
       if (!preformatted) {
         value = value.replace(/\s+/g, " ");
-        if (text.at(-1)?.endsWith(" ") && value.startsWith(" "))
+        if (text.at(-1)?.value.endsWith(" ") && value.startsWith(" "))
           value = value.slice(1);
       }
-      text.push(value);
-      return;
+      append(value, preformatted);
+      continue;
     }
-    if (!(node instanceof HTMLElement) || node.hidden) return;
+    if (!(node instanceof HTMLElement) || node.hidden) continue;
     if (node.tagName === "BR") {
-      text.push("\n");
-      return;
+      append("\n", preformatted);
+      continue;
     }
     const block = previewBlockTags.has(node.tagName);
-    if (block) text.push("\n");
-    node.childNodes.forEach((child) =>
-      visit(child, preformatted || node.tagName === "PRE"),
-    );
-    if (block) text.push("\n");
+    if (block) {
+      append("\n", preformatted);
+      pending.push({ node, preformatted, closing: true });
+    }
+    for (let index = node.childNodes.length - 1; index >= 0; index -= 1)
+      pending.push({
+        node: node.childNodes[index],
+        preformatted: preformatted || node.tagName === "PRE",
+      });
   }
-  preview.childNodes.forEach((child) => visit(child));
-  const readable = text
-    .join("")
-    .replace(/ *\n */g, "\n")
-    .replace(/\n+/g, "\n");
-  return options.preserveEdges ? readable : readable.trim();
+  return text
+    .map(({ value, preformatted }, index) => {
+      // Browser whitespace normalization does not apply inside <pre>. Keep
+      // authored blank lines and indentation intact in text/clipboard output.
+      if (preformatted) return value;
+      let readable = value.replace(/ *\n */g, "\n").replace(/\n+/g, "\n");
+      if (!options.preserveEdges) {
+        if (index === 0) readable = readable.trimStart();
+        if (index === text.length - 1) readable = readable.trimEnd();
+      }
+      return readable;
+    })
+    .join("");
 }
 
 class HtmlPreviewView {

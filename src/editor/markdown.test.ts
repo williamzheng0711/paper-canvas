@@ -20,6 +20,23 @@ function nodesOfType(document: JSONContent, type: string): JSONContent[] {
 
 describe("PaperCanvas Markdown subset", () => {
   it.each([
+    '<kbd title="x > y">Press \\(x\\)</kbd>',
+    "<span title='x > <script> y'>Press \\(x\\)</span>",
+  ])(
+    "groups HTML with quoted angle brackets without converting its literal TeX: %s",
+    (html) => {
+      const document = markdownToDocument(`Before ${html} after.`);
+      expect(nodesOfType(document, "inlineHtmlPreview")).toEqual([
+        { type: "inlineHtmlPreview", attrs: { source: html } },
+      ]);
+      expect(nodesOfType(document, "inlineFormula")).toHaveLength(0);
+      expect(markdownToDocument(documentToMarkdown(document))).toEqual(
+        document,
+      );
+    },
+  );
+
+  it.each([
     "[]( <https://example.com/a> 'Keep title')",
     '[<br>](https://example.com/a "Keep title")',
     '[<u></u>](https://example.com/a "Keep title")',

@@ -182,7 +182,7 @@ describe("rich table HTML source preservation", () => {
     expect(preview.querySelectorAll("tr")).toHaveLength(2);
     expect(preview.querySelectorAll("td")).toHaveLength(2);
     expect(preview.querySelector("td pre")?.textContent).toBe(
-      "one <tag>\n\n  two & three",
+      "one <tag>\r\n\r\n  two & three",
     );
     expect(preview.querySelector("td div")?.getAttribute("title")).toBe(
       "line one\n\nline two",

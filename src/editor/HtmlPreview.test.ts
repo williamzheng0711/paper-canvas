@@ -4,6 +4,7 @@ import StarterKit from "@tiptap/starter-kit";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createHtmlPreview,
+  htmlPreviewText,
   HtmlPreview,
   InlineHtmlPreview,
 } from "./HtmlPreview";
@@ -12,6 +13,50 @@ import { sanitizePastedHtml } from "./paste";
 describe("sanitized HTML previews", () => {
   afterEach(() => {
     document.body.replaceChildren();
+  });
+
+  it("reads extremely nested safe HTML without overflowing the text walker", () => {
+    const source = `${"<div>".repeat(2_000)}Deep text${"</div>".repeat(2_000)}`;
+    expect(htmlPreviewText(source, "block")).toBe("Deep text");
+  });
+
+  it("treats tag-like text inside quoted attributes as literal attribute values", () => {
+    const source = '<span title="x > <script> y">Visible</span>';
+    const preview = createHtmlPreview(source, { kind: "inline" });
+    expect(preview.classList.contains("html-preview--blocked")).toBe(false);
+    expect(preview.querySelector("span")?.title).toBe("x > <script> y");
+    expect(preview.querySelector("script")).toBeNull();
+    expect(htmlPreviewText(source, "inline")).toBe("Visible");
+    const executable =
+      '<span title="<!--"><script>alert(1)</script><!-- end -->text</span>';
+    const blocked = createHtmlPreview(executable, { kind: "inline" });
+    expect(blocked.classList.contains("html-preview--blocked")).toBe(true);
+    expect(blocked.textContent).toBe(executable);
+    expect(blocked.querySelector("script")).toBeNull();
+  });
+
+  it("keeps authored indentation, blank lines and edge line endings in preformatted clipboard text", () => {
+    const code = "  first\n\n    second\n";
+    expect(htmlPreviewText(`<pre><code>${code}</code></pre>`, "block")).toBe(
+      code,
+    );
+    expect(
+      htmlPreviewText(`<p>Before</p><pre>${code}</pre><p>After</p>`, "block"),
+    ).toBe(`Before\n${code}\nAfter`);
+    expect(htmlPreviewText("<pre>one&#13;&#10;two</pre>", "block")).toBe(
+      "one\r\ntwo",
+    );
+    const editor = new Editor({
+      extensions: [StarterKit, HtmlPreview],
+      content: {
+        type: "doc",
+        content: [
+          { type: "htmlPreview", attrs: { source: `<pre>${code}</pre>` } },
+        ],
+      },
+    });
+    expect(editor.getText()).toBe(code);
+    editor.destroy();
   });
 
   it("renders the centered headings, images, and table layout used by the repository READMEs", () => {
