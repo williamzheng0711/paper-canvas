@@ -17,7 +17,7 @@ import {
   createCommentDecorationsExtension,
   type CanvasCommentPosition,
 } from '../editor/commentDecorations';
-import { focusedFormulaSelection, focusFormulaSource, updateFormulaLabels } from '../editor/Formula';
+import { focusedFormulaSelection, focusFormulaSource, flushFormulaSources, updateFormulaLabels } from '../editor/Formula';
 import { MarkdownTyping } from '../editor/markdownTyping';
 import { QuoteTyping } from '../editor/quoteTyping';
 import { IndentedListInput } from '../editor/indentedListInput';
@@ -374,13 +374,15 @@ export const CanvasEditor = memo(
   const pendingImagesRef = useRef(new Set<PendingImageInsertion>());
 
   const flushCommentMapping = useCallback(() => {
+    const currentEditor = editorRef.current;
+    if (!currentEditor) return;
+    flushFormulaSources(currentEditor.view);
     if (commentSyncTimerRef.current !== undefined) {
       window.clearTimeout(commentSyncTimerRef.current);
       commentSyncTimerRef.current = undefined;
     }
-    const currentEditor = editorRef.current;
     const currentComments = commentsRef.current;
-    if (!currentEditor || !pendingChangeRef.current) return;
+    if (!pendingChangeRef.current) return;
     pendingChangeRef.current = false;
     const document = currentEditor.getJSON();
     if (currentComments.length === 0) {

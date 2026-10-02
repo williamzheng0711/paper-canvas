@@ -496,6 +496,82 @@ describe("inline formula input rule", () => {
 });
 
 describe("formula editing history and selection", () => {
+  it.each(["Backspace", "Delete"])(
+    "removes an empty inline formula immediately with %s before rapid typing",
+    (key) => {
+      const flush = holdAnimationFrames();
+      const editor = new Editor({
+        extensions: [StarterKit, InlineFormula],
+        content: {
+          type: "doc",
+          content: [
+            {
+              type: "paragraph",
+              content: [
+                { type: "text", text: "Before " },
+                { type: "inlineFormula", attrs: { latex: "" } },
+                { type: "text", text: " after" },
+              ],
+            },
+          ],
+        },
+      });
+      editors.push(editor);
+      const before = editor.getJSON();
+      editor.view.dom.querySelector<HTMLElement>(".formula-render")!.click();
+      editor.view.dom
+        .querySelector("textarea")!
+        .dispatchEvent(
+          new KeyboardEvent("keydown", {
+            key,
+            bubbles: true,
+            cancelable: true,
+          }),
+        );
+      expect(editor.getText()).toBe("Before  after");
+      const removed = editor.getJSON();
+      expect(editor.commands.undo()).toBe(true);
+      expect(editor.getJSON()).toEqual(before);
+      expect(editor.commands.redo()).toBe(true);
+      expect(editor.getJSON()).toEqual(removed);
+      editor.view.dispatch(editor.state.tr.insertText("next"));
+      flush();
+      expect(editor.getText()).toBe("Before next after");
+    },
+  );
+
+  it("does not apply an empty block formula deletion to a replacement document", () => {
+    const flush = holdAnimationFrames();
+    const editor = new Editor({
+      extensions: [StarterKit, BlockFormula],
+      content: {
+        type: "doc",
+        content: [
+          {
+            type: "paragraph",
+            content: [{ type: "text", text: "Before ".repeat(30) }],
+          },
+          { type: "blockFormula", attrs: { latex: "" } },
+        ],
+      },
+    });
+    editors.push(editor);
+    editor.view.dom.querySelector<HTMLElement>(".formula-render")!.click();
+    editor.view.dom
+      .querySelector("textarea")!
+      .dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "Backspace",
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    expect(JSON.stringify(editor.getJSON())).not.toContain("blockFormula");
+    editor.commands.setContent("<p>Replacement</p>");
+    expect(flush).not.toThrow();
+    expect(editor.getText()).toBe("Replacement");
+  });
+
   it("updates a focused source field and preview when document undo changes its formula", () => {
     const flush = holdAnimationFrames();
     const element = document.createElement("div");

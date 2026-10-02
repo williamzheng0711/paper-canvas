@@ -1,8 +1,11 @@
 import { Extension, InputRule } from "@tiptap/core";
-import { isHistoryTransaction } from "@tiptap/pm/history";
-import { Plugin, TextSelection } from "@tiptap/pm/state";
+import { TextSelection } from "@tiptap/pm/state";
 import { completeTypedTable } from "./tableInput";
 import { isEscaped } from "./formulaInput";
+import {
+  changedTypingTextblock,
+  compositionAwareTypingPlugin,
+} from "./typingTransactions";
 
 const formats = [
   { pattern: /(?<!`)`([^`\n]+)`(?!`)/g, delimiter: "`", mark: "code" },
@@ -54,13 +57,8 @@ export const MarkdownTyping = Extension.create({
   },
   addProseMirrorPlugins() {
     return [
-      new Plugin({
-        appendTransaction(transactions, _oldState, state) {
-          if (
-            !transactions.some((tr) => tr.docChanged) ||
-            transactions.some(isHistoryTransaction)
-          )
-            return null;
+      compositionAwareTypingPlugin({
+        appendTransaction(transactions, oldState, state) {
           if (
             !(state.selection instanceof TextSelection) ||
             !state.selection.empty
@@ -68,6 +66,8 @@ export const MarkdownTyping = Extension.create({
             return null;
           const { $from } = state.selection;
           if (!$from.parent.isTextblock || $from.parent.type.spec.code)
+            return null;
+          if (!changedTypingTextblock(transactions, oldState, $from))
             return null;
           // A leaf placeholder preserves document offsets around formulas/images.
           const text = $from.parent.textBetween(

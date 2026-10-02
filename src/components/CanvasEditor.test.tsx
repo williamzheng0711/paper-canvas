@@ -433,11 +433,65 @@ it('keeps the same formula textarea and active composition while refreshing lang
     expect(source.getAttribute('aria-label')).toBe(getMessages('zh-Hant').formulaSource('inline'));
     expect(host.querySelector('.formula-editor__done')?.getAttribute('aria-label')).toBe(getMessages('zh-Hant').finishFormula);
     expect(host.querySelector('.formula-editor__header > span')?.textContent).toBe(getMessages('zh-Hant').inlineMath);
+    expect(host.querySelector('.formula-live-preview')?.getAttribute('aria-label')).toBe(getMessages('zh-Hant').formulaPreview);
     await act(async () => { source.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true })); });
     expect(harness.editor!.getJSON().content?.[0].content?.[1]).toMatchObject({ attrs: { latex: String.raw`\text{中文}` } });
     vi.spyOn(harness.editor!.view, 'coordsAtPos').mockReturnValue({ left: 0, right: 0, top: 0, bottom: 0 });
     expect(harness.editor!.commands.undo()).toBe(true);
     expect(harness.editor!.getJSON().content?.[0].content?.[1]).toMatchObject({ attrs: { latex: 'x' } });
+  } finally {
+    await act(async () => root.unmount());
+    host.remove();
+    Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: false });
+  }
+});
+
+it.each(['Value $x$', '$$\nx\n$$'])('flushes visible composing formula input before publishing %s', async (markdown) => {
+  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+  const host = document.createElement('div');
+  document.body.append(host);
+  const root = createRoot(host);
+  const handle = createRef<SwitchableEditorHandle>();
+  const onChange = vi.fn();
+  const onEdit = vi.fn();
+  try {
+    await act(async () => root.render(
+      <CanvasEditor ref={handle} language="en" documentId={1} initialDocument={markdownConversion.markdownToDocument(markdown)} onChange={onChange} onEdit={onEdit} />,
+    ));
+    const editor = harness.editor!;
+    const before = editor.getJSON();
+    await act(async () => handle.current!.flushCommentMapping?.());
+    expect(onChange).not.toHaveBeenCalled();
+    expect(onEdit).not.toHaveBeenCalled();
+    await act(async () => { host.querySelector<HTMLElement>('.formula-render')!.click(); });
+    const source = host.querySelector<HTMLTextAreaElement>('textarea')!;
+    const value = String.raw`\begin{equation}`;
+    source.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+    source.value = value;
+    source.setSelectionRange(1, 1);
+    source.dispatchEvent(new InputEvent('input', { bubbles: true, isComposing: true }));
+    await act(async () => handle.current!.flushCommentMapping?.());
+    let formula: Editor['state']['doc'] | undefined;
+    editor.state.doc.descendants((node) => { if (node.type.name.endsWith('Formula')) formula = node; });
+    expect(formula!.attrs.latex).toBe(value);
+    expect(host.querySelector('textarea')).toBe(source);
+    expect(source.value).toBe(value);
+    expect(source.selectionStart).toBe(1);
+    expect(onChange).toHaveBeenCalledTimes(1);
+    expect(onEdit).toHaveBeenCalledTimes(1);
+    await act(async () => handle.current!.flushCommentMapping?.());
+    expect(onChange).toHaveBeenCalledTimes(1);
+    const continued = String.raw`\begin{align}`;
+    source.value = continued;
+    source.setSelectionRange(source.value.length, source.value.length);
+    source.dispatchEvent(new InputEvent('input', { bubbles: true, isComposing: true }));
+    expect(onEdit).toHaveBeenCalledTimes(1);
+    await act(async () => { source.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true })); });
+    editor.state.doc.descendants((node) => { if (node.type.name.endsWith('Formula')) formula = node; });
+    expect(formula!.attrs.latex).toBe(`${continued}\\end{align}`);
+    vi.spyOn(editor.view, 'coordsAtPos').mockReturnValue({ left: 0, right: 0, top: 0, bottom: 0 });
+    expect(editor.commands.undo()).toBe(true);
+    expect(editor.getJSON()).toEqual(before);
   } finally {
     await act(async () => root.unmount());
     host.remove();

@@ -39,7 +39,9 @@ export function insertPastedMarkdown(view: EditorView, text: string): boolean {
           parsed.content,
         )
       : view.state.tr.replaceSelection(Slice.maxOpen(parsed.content));
-  view.dispatch(transaction.scrollIntoView());
+  view.dispatch(
+    transaction.setMeta("skipTypingNormalization", true).scrollIntoView(),
+  );
   return true;
 }
 
@@ -78,6 +80,7 @@ export function insertPastedFormula(view: EditorView, text: string): boolean {
               sourceCaret: parsed.caret,
             }),
           )
+          .setMeta("skipTypingNormalization", true)
           .scrollIntoView(),
       );
       return true;
@@ -97,6 +100,7 @@ export function insertPastedFormula(view: EditorView, text: string): boolean {
           sourceCaret: formula.sourceCaret ?? null,
         }),
       )
+      .setMeta("skipTypingNormalization", true)
       .scrollIntoView(),
   );
   return true;

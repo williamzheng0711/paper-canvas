@@ -5,9 +5,8 @@ import {
   mergeAttributes,
   type NodeViewRendererProps,
 } from "@tiptap/core";
-import { NodeSelection, TextSelection } from "@tiptap/pm/state";
+import { NodeSelection, Selection, TextSelection } from "@tiptap/pm/state";
 import { Plugin } from "@tiptap/pm/state";
-import { isHistoryTransaction } from "@tiptap/pm/history";
 import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
 import katex from "katex";
 import {
@@ -22,6 +21,10 @@ import {
   shouldCreateBlockFormula,
 } from "./formulaInput";
 import { getMessages, type Language, type Messages } from "../i18n";
+import {
+  changedTypingTextblock,
+  compositionAwareTypingPlugin,
+} from "./typingTransactions";
 
 export type FormulaKind = "inline" | "block";
 
@@ -95,10 +98,19 @@ export function completeFormulaSourceInput(
 
 const formulaViews = new WeakMap<HTMLElement, FormulaNodeView>();
 
-export function updateFormulaLabels(view: NodeViewRendererProps["view"], language: Language): void {
+export function updateFormulaLabels(
+  view: NodeViewRendererProps["view"],
+  language: Language,
+): void {
   const text = getMessages(language);
   view.dom.querySelectorAll<HTMLElement>(".formula-node").forEach((dom) => {
     formulaViews.get(dom)?.updateLabels(text);
+  });
+}
+
+export function flushFormulaSources(view: NodeViewRendererProps["view"]): void {
+  view.dom.querySelectorAll<HTMLElement>(".formula-node").forEach((dom) => {
+    formulaViews.get(dom)?.flushSource();
   });
 }
 
@@ -281,17 +293,35 @@ class FormulaNodeView {
   updateLabels(text: Messages): void {
     const formula = this.dom.querySelector<HTMLElement>(".formula-render");
     if (formula) formula.title = text.formulaInspect;
-    this.dom.querySelector(".formula-copy")?.setAttribute("aria-label", text.copyLatex);
-    const header = this.dom.querySelector<HTMLElement>(".formula-editor__header > span");
-    if (header) header.textContent = this.kind === "block" ? text.blockMath : text.inlineMath;
+    this.dom
+      .querySelector(".formula-copy")
+      ?.setAttribute("aria-label", text.copyLatex);
+    const header = this.dom.querySelector<HTMLElement>(
+      ".formula-editor__header > span",
+    );
+    if (header)
+      header.textContent =
+        this.kind === "block" ? text.blockMath : text.inlineMath;
     const done = this.dom.querySelector<HTMLElement>(".formula-editor__done");
     if (done) {
       done.setAttribute("aria-label", text.finishFormula);
       done.title = text.finishFormulaShortcut;
     }
     this.source?.setAttribute("aria-label", text.formulaSource(this.kind));
-    const errorPreview = this.dom.querySelector<HTMLElement>(".formula-render--error");
+    this.dom
+      .querySelector(".formula-live-preview")
+      ?.setAttribute("aria-label", text.formulaPreview);
+    const errorPreview = this.dom.querySelector<HTMLElement>(
+      ".formula-render--error",
+    );
     if (errorPreview) this.renderPreview(errorPreview, this.latex, text);
+  }
+
+  flushSource(): void {
+    if (!this.source || this.source.value === this.latex) return;
+    this.updateLatex(this.source.value);
+    const preview = this.dom.querySelector<HTMLElement>(".formula-live-preview");
+    if (preview) this.renderPreview(preview, this.source.value);
   }
 
   enterEditing(initialCaret = this.latex.length): void {
@@ -463,7 +493,11 @@ class FormulaNodeView {
     );
   }
 
-  private renderPreview(container: HTMLElement, latex: string, text = getMessages()): void {
+  private renderPreview(
+    container: HTMLElement,
+    latex: string,
+    text = getMessages(),
+  ): void {
     const error = validateLatex(latex, this.kind === "block");
     container.textContent = "";
     container.classList.toggle("formula-render--error", Boolean(error));
@@ -577,15 +611,18 @@ class FormulaNodeView {
     if (position === null) return;
     const size = this.node.nodeSize;
     this.finishEditing();
-    requestAnimationFrame(() => {
-      const transaction = this.view.state.tr.delete(position, position + size);
-      this.view.dispatch(
-        transaction.setSelection(
-          TextSelection.create(transaction.doc, position),
+    const transaction = this.view.state.tr.delete(position, position + size);
+    this.view.dispatch(
+      transaction.setSelection(
+        Selection.near(
+          transaction.doc.resolve(
+            Math.min(position, transaction.doc.content.size),
+          ),
+          -1,
         ),
-      );
-      this.view.focus();
-    });
+      ),
+    );
+    this.view.focus();
   }
 }
 
@@ -886,16 +923,15 @@ function createFormulaNode(
       if (kind === "inline") {
         return [
           pendingInput,
-          new Plugin({
-            appendTransaction: (transactions, _oldState, newState) => {
-              if (transactions.some(isHistoryTransaction)) return null;
-              if (!transactions.some((transaction) => transaction.docChanged))
-                return null;
+          compositionAwareTypingPlugin({
+            appendTransaction: (transactions, oldState, newState) => {
               const selection = newState.selection;
               if (!(selection instanceof TextSelection) || !selection.empty)
                 return null;
               const $cursor = selection.$from;
               if (!$cursor.parent.isTextblock || $cursor.parent.type.spec.code)
+                return null;
+              if (!changedTypingTextblock(transactions, oldState, $cursor))
                 return null;
               const parsed = inlineFormulaAroundCaret(
                 $cursor.parent.textBetween(
@@ -934,16 +970,15 @@ function createFormulaNode(
       }
       return [
         pendingInput,
-        new Plugin({
-          appendTransaction: (transactions, _oldState, newState) => {
-            if (transactions.some(isHistoryTransaction)) return null;
-            if (!transactions.some((transaction) => transaction.docChanged))
-              return null;
+        compositionAwareTypingPlugin({
+          appendTransaction: (transactions, oldState, newState) => {
             const selection = newState.selection;
             if (!(selection instanceof TextSelection) || !selection.empty)
               return null;
             const $cursor = selection.$from;
             if ($cursor.parent.type.name !== "paragraph") return null;
+            if (!changedTypingTextblock(transactions, oldState, $cursor))
+              return null;
             const codeMark = newState.schema.marks.code;
             if (
               codeMark &&
