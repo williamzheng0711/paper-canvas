@@ -1,5 +1,6 @@
 import { Editor } from "@tiptap/core";
 import StarterKit from "@tiptap/starter-kit";
+import { closeHistory } from "@tiptap/pm/history";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   BlockFormula,
@@ -664,6 +665,92 @@ describe("formula editing history and selection", () => {
       editor.view.dom.querySelector(".formula-live-preview")?.textContent,
     ).toContain("x");
   });
+
+  it.each(["inlineFormula", "blockFormula"] as const)(
+    "undoes and redoes automatic source completion through keyboard history for %s",
+    (type) => {
+      const flush = holdAnimationFrames();
+      const element = document.createElement("div");
+      document.body.append(element);
+      const originalLatex = "x\r\n+y\rz";
+      const formula = { type, attrs: { latex: originalLatex } };
+      const editor = new Editor({
+        element,
+        extensions: [StarterKit, InlineFormula, BlockFormula],
+        // JSDOM has no text geometry for history's scroll-to-selection request.
+        editorProps: { handleScrollToSelection: () => true },
+        content: { type: "doc", content: type === "inlineFormula"
+          ? [{ type: "paragraph", content: [formula, { type: "text", text: " after" }] }]
+          : [formula, { type: "paragraph", content: [{ type: "text", text: "after" }] }],
+        },
+      });
+      editors.push(editor);
+      const before = editor.getJSON();
+      editor.view.dom.querySelector<HTMLElement>(".formula-render")!.click();
+      flush();
+      const source = editor.view.dom.querySelector<HTMLTextAreaElement>("textarea")!;
+      source.value += "\\begin{matrix}";
+      source.setSelectionRange(source.value.length, source.value.length);
+      source.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertFromPaste" }));
+      const completed = editor.getJSON();
+      expect(source.value.endsWith("\\begin{matrix}\\end{matrix}")).toBe(true);
+
+      const shortcut = (key: string, modifiers: KeyboardEventInit) => {
+        const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true, ...modifiers });
+        source.dispatchEvent(event);
+        expect(event.defaultPrevented).toBe(true);
+      };
+      shortcut("z", { metaKey: true });
+      expect(editor.getJSON()).toEqual(before);
+      expect(source.value).toBe("x\n+y\nz");
+      shortcut("Z", { metaKey: true, shiftKey: true });
+      expect(editor.getJSON()).toEqual(completed);
+      expect(source.value.endsWith("\\end{matrix}")).toBe(true);
+      shortcut("z", { ctrlKey: true });
+      expect(editor.getJSON()).toEqual(before);
+      shortcut("y", { ctrlKey: true });
+      expect(editor.getJSON()).toEqual(completed);
+
+      source.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+      editor.view.dispatch(closeHistory(editor.state.tr));
+      editor.commands.insertContent("tail ");
+      const afterTyping = editor.getJSON();
+      expect(editor.commands.undo()).toBe(true);
+      expect(editor.getJSON()).toEqual(completed);
+      expect(editor.commands.undo()).toBe(true);
+      expect(editor.getJSON()).toEqual(before);
+      expect(editor.commands.redo()).toBe(true);
+      expect(editor.getJSON()).toEqual(completed);
+      expect(editor.commands.redo()).toBe(true);
+      expect(editor.getJSON()).toEqual(afterTyping);
+    },
+  );
+
+  it.each(["source flag", "event flag", "legacy key code"])(
+    "leaves undo shortcuts to an active composition identified by %s",
+    (composition) => {
+      const flush = holdAnimationFrames();
+      const editor = new Editor({
+        extensions: [StarterKit, BlockFormula],
+        content: { type: "doc", content: [{ type: "blockFormula", attrs: { latex: "x" } }] },
+      });
+      editors.push(editor);
+      editor.view.dom.querySelector<HTMLElement>(".formula-render")!.click();
+      flush();
+      const source = editor.view.dom.querySelector<HTMLTextAreaElement>("textarea")!;
+      source.value = "y";
+      source.dispatchEvent(new Event("input", { bubbles: true }));
+      if (composition === "source flag") source.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+      const event = new KeyboardEvent("keydown", {
+        key: "z", metaKey: true, bubbles: true, cancelable: true,
+        isComposing: composition === "event flag", keyCode: composition === "legacy key code" ? 229 : 0,
+      });
+      source.dispatchEvent(event);
+      expect(event.defaultPrevented).toBe(false);
+      expect(editor.getJSON().content?.[0].attrs?.latex).toBe("y");
+      expect(source.value).toBe("y");
+    },
+  );
   it("does not redirect typing into an old pending formula after the caret moved elsewhere", () => {
     const flush = holdAnimationFrames();
     const editor = new Editor({

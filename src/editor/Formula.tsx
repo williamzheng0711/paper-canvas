@@ -8,6 +8,7 @@ import {
 import { NodeSelection, Selection, TextSelection } from "@tiptap/pm/state";
 import { Plugin } from "@tiptap/pm/state";
 import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
+import { redo, undo } from "@tiptap/pm/history";
 import { formulaPreview } from "./formulaRendering";
 import {
   displayFormulaFromBracketedLine,
@@ -584,6 +585,14 @@ class FormulaNodeView {
   ): void {
     if (this.sourceIsComposing || event.isComposing || event.keyCode === 229)
       return;
+    const key = event.key.toLowerCase();
+    if (!event.altKey && (event.metaKey || event.ctrlKey) &&
+      (key === "z" || (key === "y" && !event.shiftKey))) {
+      event.preventDefault();
+      (key === "y" || event.shiftKey ? redo : undo)(this.view.state, this.view.dispatch);
+      if (this.destroyed) this.view.focus();
+      return;
+    }
     if (
       event.key === "Escape" ||
       (event.key === "Enter" && (event.metaKey || event.ctrlKey))
