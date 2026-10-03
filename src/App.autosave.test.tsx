@@ -13,6 +13,9 @@ import { getMessages } from './i18n';
 
 type CanvasProps = {
   documentId: number;
+  assetSourcePath?: string;
+  assetSourceOperation?: 'rebase' | 'rename';
+  assetSourceTransition?: { oldPath: string; newPath: string; operation: 'rebase' | 'rename' };
   initialDocument: JSONContent;
   comments: readonly MarkdownComment[];
   outlineTarget?: { index: number; request: number };
@@ -1855,6 +1858,8 @@ describe('App autosave cursor stability', () => {
     expect(harness.sourceProps?.value).toBe('\nBody');
     expect(harness.sourceProps?.valueRevision).toBe(revision);
     expect(harness.sourceProps?.assetSourcePath).toBe(newPath);
+    expect(harness.canvasProps?.assetSourcePath).toBe(newPath);
+    expect(harness.canvasProps?.assetSourceOperation).toBe('rebase');
     } finally {
       confirm.mockRestore();
     }
@@ -2428,6 +2433,8 @@ describe('App autosave cursor stability', () => {
     expect(harness.sourceProps?.valueRevision).toBe(revision);
     expect(harness.sourceProps?.assetSourcePath).toBe('/tmp/renamed.md');
     expect(harness.sourceProps?.assetSourceOperation).toBe('rename');
+    expect(harness.canvasProps?.assetSourcePath).toBe('/tmp/renamed.md');
+    expect(harness.canvasProps?.assetSourceOperation).toBe('rename');
   });
 
   it('updates live Markdown image paths when a source document is renamed', async () => {
@@ -2652,6 +2659,8 @@ describe('App autosave cursor stability', () => {
     expect(harness.sourceProps?.value).toBe(expected);
     expect(harness.sourceProps?.assetSourcePath).toBe('/tmp/renamed.md');
     expect(harness.sourceProps?.assetSourceOperation).toBe(assetsRenamed ? 'rename' : 'rebase');
+    expect(harness.canvasProps?.assetSourcePath).toBe('/tmp/renamed.md');
+    expect(harness.canvasProps?.assetSourceOperation).toBe(assetsRenamed ? 'rename' : 'rebase');
     await act(async () => { await vi.advanceTimersByTimeAsync(100); await vi.advanceTimersByTimeAsync(1000); await flushEffects(); });
     expect(files.saveEditorFile).toHaveBeenCalledWith(expect.objectContaining({ path: '/tmp/renamed.md', sourceMarkdown: expected }), false, expected);
     expect(files.saveEditorFile.mock.calls.every(([candidate]) => candidate.path !== '/tmp/research.md')).toBe(true);
@@ -2672,6 +2681,7 @@ describe('App autosave cursor stability', () => {
     expect(harness.sourceProps?.valueRevision).toBe(revision);
     expect(harness.sourceProps?.assetSourcePath).toBe('/tmp/research.md');
     expect(harness.sourceProps?.assetSourceTransition).toEqual({ oldPath: '/tmp/research.md', newPath: '/tmp/renamed.md', operation: 'rename' });
+    expect(harness.canvasProps?.assetSourceTransition).toEqual({ oldPath: '/tmp/research.md', newPath: '/tmp/renamed.md', operation: 'rename' });
     expect(host.querySelector('.status-message')?.textContent).toBe('Asset rollback failed');
   });
 
@@ -3295,6 +3305,7 @@ describe('App autosave cursor stability', () => {
     files.loadDraft.mockResolvedValueOnce(recovered);
     root = createRoot(host);
     await act(async () => { root.render(<App />); await flushEffects(); });
+    expect(harness.canvasProps?.assetSourcePath).toBe(origin);
     if (mode === 'source') await act(async () => { readingModeButton('source').click(); await flushEffects(); });
     let finishSave!: () => void;
     files.saveEditorFile.mockImplementationOnce((candidate: EditorFile) => new Promise<EditorFile>((resolve) => {

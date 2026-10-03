@@ -2,6 +2,7 @@ import Placeholder from '@tiptap/extension-placeholder';
 import { EditorContent, useEditor } from '@tiptap/react';
 import { forwardRef, memo, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useRef } from 'react';
 import type { Editor, JSONContent } from '@tiptap/core';
+import { closeHistory } from '@tiptap/pm/history';
 import { Fragment, Slice } from '@tiptap/pm/model';
 import { Selection, TextSelection, type SelectionBookmark } from '@tiptap/pm/state';
 import type { EditorView } from '@tiptap/pm/view';
@@ -25,6 +26,7 @@ import { TaskListInput } from '../editor/taskListInput';
 import { updateFootnoteLabels } from '../editor/Footnote';
 import { canvasNodesAndMarks } from '../editor/canvasSchema';
 import { CanvasCapacity } from '../editor/canvasCapacity';
+import { CanvasAssetHistory, canvasAssetTransitionKey, type CanvasAssetTransition } from '../editor/canvasAssetHistory';
 import { replaceDocumentPreservingSelection } from '../editor/documentSync';
 import { documentToMarkdown } from '../editor/markdown';
 import { decodePaperImages } from '../editor/PaperImage';
@@ -52,6 +54,9 @@ type Props = {
   language: Language;
   documentId: number;
   documentPath?: string;
+  assetSourcePath?: string;
+  assetSourceOperation?: 'rebase' | 'rename';
+  assetSourceTransition?: CanvasAssetTransition;
   initialDocument: JSONContent;
   comments?: readonly MarkdownComment[];
   outlineTarget?: { index: number; request: number };
@@ -285,6 +290,9 @@ function sameCanvasProps(previous: Props, next: Props): boolean {
     previous.language === next.language &&
     previous.documentId === next.documentId &&
     previous.documentPath === next.documentPath &&
+    previous.assetSourcePath === next.assetSourcePath &&
+    previous.assetSourceOperation === next.assetSourceOperation &&
+    previous.assetSourceTransition === next.assetSourceTransition &&
     previous.comments === next.comments &&
     previous.onEdit === next.onEdit &&
     previous.outlineTarget === next.outlineTarget &&
@@ -306,6 +314,9 @@ export const CanvasEditor = memo(
     language,
     documentId,
     documentPath,
+    assetSourcePath = documentPath,
+    assetSourceOperation = 'rebase',
+    assetSourceTransition,
     initialDocument,
     comments = [],
     outlineTarget,
@@ -343,10 +354,12 @@ export const CanvasEditor = memo(
     documentSnapshot.current = { id: documentId, initial: initialDocument };
   }
   const appliedDocument = useRef<{ id: number; editor: Editor } | undefined>(undefined);
+  const assetSourcePathRef = useRef(assetSourcePath);
+  const appliedAssetTransition = useRef(assetSourceTransition);
   const commentsRef = useRef<readonly MarkdownComment[]>(comments);
   const onChangeRef = useRef(onChange);
-  const documentPathRef = useRef(documentPath);
-  documentPathRef.current = documentPath;
+  const documentPathRef = useRef(assetSourcePath);
+  documentPathRef.current = assetSourcePath;
   const getDocumentPath = useCallback(() => documentPathRef.current, []);
   const onEditRef = useRef(onEdit);
   const onCommentRequestRef = useRef(onCommentRequest);
@@ -452,6 +465,7 @@ export const CanvasEditor = memo(
     {
       extensions: [
         CanvasCapacity.configure({ onLimit: () => onCapacityErrorRef.current?.(getMessages().canvasEditLimited) }),
+        CanvasAssetHistory,
         ...canvasNodesAndMarks(() => textRef.current, getDocumentPath),
         TaskListInput,
         Placeholder.configure({ placeholder: () => textRef.current.canvasPlaceholder }),
@@ -611,6 +625,20 @@ export const CanvasEditor = memo(
     updateUnsupportedMarkdownLabels(editor.view, textRef.current.unsupportedMarkdownTitle);
     editor.view.dispatch(editor.state.tr.setSelection(editor.state.selection).setMeta('skipTrailingNode', true));
   }, [editor, language]);
+
+  useLayoutEffect(() => {
+    if (!editor) return;
+    const previous = assetSourcePathRef.current;
+    const explicitTransition = assetSourceTransition && assetSourceTransition !== appliedAssetTransition.current;
+    appliedAssetTransition.current = assetSourceTransition;
+    assetSourcePathRef.current = assetSourcePath;
+    const transition = explicitTransition ? assetSourceTransition : previous && assetSourcePath && previous !== assetSourcePath
+      ? { oldPath: previous, newPath: assetSourcePath, operation: assetSourceOperation } : undefined;
+    if (transition) {
+      editor.view.dispatch(closeHistory(editor.state.tr).setMeta(canvasAssetTransitionKey, transition)
+        .setMeta('addToHistory', false).setMeta('preventUpdate', true));
+    }
+  }, [editor, assetSourcePath, assetSourceOperation, assetSourceTransition]);
 
   useLayoutEffect(() => {
     if (!editor || (appliedDocument.current?.id === documentId && appliedDocument.current.editor === editor)) return;

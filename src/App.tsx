@@ -2039,6 +2039,9 @@ export default function App() {
               language={preferences.language}
               documentId={documentId}
               documentPath={file.path}
+              assetSourcePath={fileAssetSourcePath(file)}
+              assetSourceOperation={sourceAssetOperationRef.current}
+              assetSourceTransition={sourceAssetTransitionRef.current}
               initialDocument={file.document}
               comments={comments}
               outlineTarget={outlineTarget}
