@@ -22,6 +22,16 @@ const rename = (source: string) =>
   renameMarkdownImageAssets(source, oldPath, newPath);
 
 describe("image edits in UTF-8 BOM documents", () => {
+  it.each(["\n", "\r\n", "\r"])(
+    "protects display formula image literals while rebasing actual images with %j separators",
+    (ending) => {
+      const literal = "![literal](./research.assets/formula.png)";
+      const source = `\uFEFF\\[${ending}\\text{${literal}}${ending}\\]${ending}${ending}\\begin{align}${ending}\\text{${literal}}${ending}\\end{align}${ending}${ending}![actual](./research.assets/image.png)${ending}`;
+      expect(rebaseMarkdownImageAssets(source, oldPath, "/copies/copy.md")).toBe(source.replace("./research.assets/image.png", "../notes/./research.assets/image.png"));
+      expect(rename(source)).toBe(source.replace("./research.assets/image.png", "./renamed.assets/image.png"));
+    },
+  );
+
   it("keeps offsets and all other source bytes when rebasing inline, reference, and HTML images", () => {
     const source = '\uFEFF# Original 中文\r\n\r\n![Diagram](./research.assets/image.svg)\r\n\r\n![Reference][diagram]\r\n\r\n[diagram]: ./research.assets/ref.svg "Title"\r\n\r\n<div><img src="./research.assets/html.svg"></div>\r\n\r\n`![literal](./research.assets/literal.svg)`\r\nLatest writing 🧪';
     const expected = source

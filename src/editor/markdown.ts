@@ -274,8 +274,17 @@ export function normalizeLatexDelimiters(markdown: string): string {
   };
   collectLiteralRanges(literalRoot);
   literalRanges.sort((left, right) => left.start - right.start);
-  const lines = markdown.split("\n");
+  const lines = markdown.split(/(\r\n|\r|\n)/);
   const normalized: string[] = [];
+  let lineEnding = "";
+  const append = (...values: string[]) => {
+    for (const value of values) {
+      const previous = normalized.at(-1);
+      if (previous !== undefined && !/[\r\n]$/.test(previous))
+        normalized[normalized.length - 1] += lineEnding || "\n";
+      normalized.push(value + lineEnding);
+    }
+  };
   let fence: { marker: "`" | "~"; length: number } | null = null;
   let bracketOpeningIndex: number | null = null;
   let bracketOpeningSource = "";
@@ -288,10 +297,12 @@ export function normalizeLatexDelimiters(markdown: string): string {
   let lineOffset = 0;
   let rangeIndex = 0;
 
-  for (const line of lines) {
+  for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 2) {
+    const line = lines[lineIndex];
+    lineEnding = lines[lineIndex + 1] ?? "";
     const lineStart = lineOffset;
     const lineEnd = lineStart + line.length;
-    lineOffset = lineEnd + 1;
+    lineOffset = lineEnd + lineEnding.length;
     while (literalRanges[rangeIndex]?.end <= lineStart) rangeIndex += 1;
     const lineRanges: SourceRange[] = [];
     for (
@@ -306,13 +317,13 @@ export function normalizeLatexDelimiters(markdown: string): string {
       });
     }
     if (latexEnvironment !== null) {
-      normalized.push(line);
+      append(line);
       if (
         new RegExp(
           `\\\\end\\{${latexEnvironment.name.replace(/\*/g, "\\*")}\\}\\s*$`,
         ).test(line)
       ) {
-        normalized.push(`${latexEnvironment.indent}$$`);
+        append(`${latexEnvironment.indent}$$`);
         latexEnvironment = null;
       }
       continue;
@@ -320,23 +331,23 @@ export function normalizeLatexDelimiters(markdown: string): string {
     if (bracketOpeningIndex !== null) {
       const closing = /^([ \t]*)\\\]\s*$/.exec(line);
       if (closing) {
-        normalized.push(`${closing[1]}$$`);
+        append(`${closing[1]}$$`);
         bracketOpeningIndex = null;
         bracketOpeningSource = "";
       } else {
-        normalized.push(line);
+        append(line);
       }
       continue;
     }
 
     if (lineRanges.length > 0) {
-      normalized.push(normalizeInlineLatexDelimiters(line, lineRanges));
+      append(normalizeInlineLatexDelimiters(line, lineRanges));
       continue;
     }
 
     const fenceMatch = /^ {0,3}(`{3,}|~{3,})/.exec(line);
     if (fence) {
-      normalized.push(line);
+      append(line);
       if (
         fenceMatch &&
         fenceMatch[1][0] === fence.marker &&
@@ -352,7 +363,7 @@ export function normalizeLatexDelimiters(markdown: string): string {
         marker: fenceMatch[1][0] as "`" | "~",
         length: fenceMatch[1].length,
       };
-      normalized.push(line);
+      append(line);
       continue;
     }
 
@@ -361,13 +372,13 @@ export function normalizeLatexDelimiters(markdown: string): string {
     // inline TeX must still be converted into an editable formula.
 
     if (dollarDisplayBlock) {
-      normalized.push(line);
+      append(line);
       if (/^\s*\$\$\s*$/.test(line)) dollarDisplayBlock = false;
       continue;
     }
     if (/^\s*\$\$\s*$/.test(line)) {
       dollarDisplayBlock = true;
-      normalized.push(line);
+      append(line);
       continue;
     }
 
@@ -376,7 +387,7 @@ export function normalizeLatexDelimiters(markdown: string): string {
     const sameLineDollarDisplay = /^([ \t]*)\$\$([^\n]+)\$\$\s*$/.exec(line);
     if (sameLineDollarDisplay) {
       const [, indent, latex] = sameLineDollarDisplay;
-      normalized.push(`${indent}$$`, `${indent}${latex}`, `${indent}$$`);
+      append(`${indent}$$`, `${indent}${latex}`, `${indent}$$`);
       continue;
     }
 
@@ -384,15 +395,15 @@ export function normalizeLatexDelimiters(markdown: string): string {
       /^([ \t]*)\\\[\s*([\s\S]*?\S)\s*\\\]\s*$/.exec(line);
     if (sameLineBracketDisplay) {
       const [, indent, latex] = sameLineBracketDisplay;
-      normalized.push(`${indent}$$`, `${indent}${latex}`, `${indent}$$`);
+      append(`${indent}$$`, `${indent}${latex}`, `${indent}$$`);
       continue;
     }
 
     const bracketOpening = /^([ \t]*)\\\[\s*$/.exec(line);
     if (bracketOpening) {
       bracketOpeningIndex = normalized.length;
-      bracketOpeningSource = line;
-      normalized.push(`${bracketOpening[1]}$$`);
+      bracketOpeningSource = line + lineEnding;
+      append(`${bracketOpening[1]}$$`);
       continue;
     }
 
@@ -407,12 +418,12 @@ export function normalizeLatexDelimiters(markdown: string): string {
         `\\\\end\\{${name.replace(/\*/g, "\\*")}\\}\\s*$`,
       );
       const openingIndex = normalized.length;
-      normalized.push(`${indent}$$`, line);
-      if (closing.test(line)) normalized.push(`${indent}$$`);
+      append(`${indent}$$`, line);
+      if (closing.test(line)) append(`${indent}$$`);
       else latexEnvironment = { name, openingIndex, indent };
       continue;
     }
-    normalized.push(normalizeInlineLatexDelimiters(line));
+    append(normalizeInlineLatexDelimiters(line));
   }
 
   // An unmatched opening delimiter is prose, not a display formula. Restore it
@@ -421,7 +432,7 @@ export function normalizeLatexDelimiters(markdown: string): string {
     normalized[bracketOpeningIndex] = bracketOpeningSource;
   if (latexEnvironment !== null)
     normalized.splice(latexEnvironment.openingIndex, 1);
-  return normalized.join("\n");
+  return normalized.join("");
 }
 
 type MarkdownContext = "block" | "inline";

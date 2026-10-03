@@ -523,14 +523,14 @@ function maskTyporaMath(source: string): string {
     /^[^\S\r\n]*\\\[[\s\S]*?\\\][^\S\r\n]*$/gm,
   )) {
     const formula = match.index === 0 ? match[0].slice(sourceOffset) : match[0];
-    if (normalizeLatexDelimiters(formula).startsWith("$$\n"))
+    if (/^\$\$(?:\r\n|\r|\n)/.test(normalizeLatexDelimiters(formula)))
       blank(match.index, match.index + match[0].length);
   }
   for (const match of scan.matchAll(
     /^[^\S\r\n]*\\begin\{([A-Za-z][A-Za-z0-9_*-]*)\}[\s\S]*?\\end\{\1\}[^\S\r\n]*$/gm,
   )) {
     const formula = match.index === 0 ? match[0].slice(sourceOffset) : match[0];
-    if (normalizeLatexDelimiters(formula).startsWith("$$\n"))
+    if (/^\$\$(?:\r\n|\r|\n)/.test(normalizeLatexDelimiters(formula)))
       blank(match.index, match.index + match[0].length);
   }
   return maskSourceRanges(source, maskedRanges, true);

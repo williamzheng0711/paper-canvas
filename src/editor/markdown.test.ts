@@ -19,6 +19,38 @@ function nodesOfType(document: JSONContent, type: string): JSONContent[] {
 }
 
 describe("PaperCanvas Markdown subset", () => {
+  it.each(["\n", "\r\n", "\r"])(
+    "imports Typora display formulas consistently with %j line endings",
+    (ending) => {
+      for (const formula of [
+        `\\[${ending}x+y${ending}\\]`,
+        `\\begin{align}${ending}x+y${ending}\\end{align}`,
+        "\\[x+y\\]",
+        "$$x+y$$",
+      ]) {
+        const source = `Before${ending}${ending}${formula}${ending}${ending}After${ending}`;
+        const document = markdownToDocument(source);
+        expect(nodesOfType(document, "blockFormula")).toEqual([
+          { type: "blockFormula", attrs: { latex: formula.startsWith("\\begin") ? formula : "x+y" } },
+        ]);
+        expect(nodesOfType(document, "text").map((node) => node.text)).toEqual(["Before", "After"]);
+      }
+    },
+  );
+
+  it.each(["\n", "\r\n", "\r"])(
+    "preserves code, raw HTML, unmatched delimiters and original %j separators during formula normalization",
+    (ending) => {
+      const literal = `\`\`\`latex${ending}\\[${ending}literal${ending}\\]${ending}\`\`\`${ending}${ending}<div>${ending}\\begin{align}${ending}HTML${ending}\\end{align}${ending}</div>${ending}${ending}`;
+      const formula = `\\[${ending}x+y${ending}\\]${ending}`;
+      expect(normalizeLatexDelimiters(literal + formula)).toBe(literal + `$$${ending}x+y${ending}$$${ending}`);
+      for (const unmatched of [
+        `Before${ending}${ending}\\[${ending}unclosed`,
+        `Before${ending}${ending}\\begin{align}${ending}unclosed`,
+      ]) expect(normalizeLatexDelimiters(unmatched)).toBe(unmatched);
+    },
+  );
+
   it.each(["\uFEFF", "\uFEFF\uFEFFhello", "\uFEFF  > literal", "\uFEFF🧪"])(
     "preserves an editable leading zero-width no-break space: %j",
     (text) => {
