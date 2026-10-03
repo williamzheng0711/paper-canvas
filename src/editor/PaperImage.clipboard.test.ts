@@ -180,4 +180,27 @@ describe("portable local-image clipboard destinations", () => {
       next.destroy();
     }
   });
+
+  it.each([
+    ['file:///tmp/Project%20%28100%25%29.assets/a.svg', '/tmp/Project (100%).assets/a.svg'],
+    ['FILE:///tmp/images/a.svg', '/tmp/images/a.svg'],
+    ['file://localhost/tmp/images/a.svg', '/tmp/images/a.svg'],
+    ['file://server/share/Project%20%28100%25%29.assets/a.svg', '//server/share/Project (100%).assets/a.svg'],
+  ])('pastes a raw local-file HTML image from %s into an unnamed document without losing it', (source, physicalPath) => {
+    const pasted = destination(() => undefined);
+    const before = pasted.getJSON();
+    try {
+      pasted.commands.selectAll();
+      expect(pasted.view.pasteHTML(`<img src="${source}" alt="Final pasted image" width="240">`, new Event('paste') as ClipboardEvent)).toBe(true);
+      const image = pasted.getJSON().content?.find((node) => node.type === 'image');
+      expect(image).toMatchObject({ attrs: {
+        src: `asset://${encodeURIComponent(physicalPath)}`, originalSrc: source, alt: 'Final pasted image', width: 240,
+      } });
+      expect(documentToPortableMarkdown(pasted.getJSON())).toContain(source);
+      expect(pasted.commands.undo()).toBe(true);
+      expect(pasted.getJSON()).toEqual(before);
+      expect(pasted.commands.redo()).toBe(true);
+      expect(pasted.getJSON().content?.find((node) => node.type === 'image')).toEqual(image);
+    } finally { pasted.destroy(); }
+  });
 });

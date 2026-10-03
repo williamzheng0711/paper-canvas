@@ -125,7 +125,29 @@ export function insertPastedFormula(view: EditorView, text: string): boolean {
  * browser attributes need to survive a paste.
  */
 export function sanitizePastedHtml(html: string): string {
-  const sanitized = DOMPurify.sanitize(html, {
+  // Templates parse clipboard markup without loading its images or executing
+  // it. Keep local file images through the existing inert origin channel;
+  // DOMPurify continues rejecting file: in ordinary src/href attributes.
+  let input: string | DocumentFragment = html;
+  if (/file:\/\//i.test(html)) {
+    const template = document.createElement('template');
+    template.innerHTML = html;
+    template.content.querySelectorAll<HTMLImageElement>('img[src]').forEach((image) => {
+      if (image.hasAttribute('data-image-original-src')) return;
+      const source = image.getAttribute('src') ?? '';
+      if (!/^file:\/\//i.test(source)) return;
+      try {
+        const url = new URL(source);
+        if (url.protocol === 'file:') {
+          image.setAttribute('data-image-original-src', source);
+        }
+      } catch { /* Leave malformed URLs to the existing sanitizer. */ }
+    });
+    // Import the inert nodes directly so a second HTML parse cannot normalize
+    // encoded carriage returns in formula source attributes.
+    input = template.content;
+  }
+  const sanitized = DOMPurify.sanitize(input, {
     ALLOWED_TAGS: [
       "p",
       "div",

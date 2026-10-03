@@ -144,6 +144,35 @@ describe("HTML paste sanitization", () => {
     expect(sanitized).not.toMatch(/script|onclick|onerror|javascript:/i);
   });
 
+  it('promotes only local-file image sources without broadening URL protocols or overriding origin metadata', () => {
+    const sanitized = sanitizePastedHtml(
+      '<a href="file:///tmp/private.txt">Local link</a>' +
+      '<img src="file:///tmp/safe.svg" onerror="execute()">' +
+      '<img src="file:///tmp/runtime.svg" data-image-original-src="/tmp/original.svg">' +
+      '<img src="file://remote.example/share/a.svg">' +
+      '<img src="javascript:execute()"><img src="file://invalid:port/a.svg">' +
+      '<script>execute()</script><iframe src="file:///tmp/private.html"></iframe>',
+    );
+    const template = document.createElement('template');
+    template.innerHTML = sanitized;
+    const images = [...template.content.querySelectorAll('img')];
+    expect(images[0].getAttribute('data-image-original-src')).toBe('file:///tmp/safe.svg');
+    expect(images[1].getAttribute('data-image-original-src')).toBe('/tmp/original.svg');
+    expect(images[2].getAttribute('data-image-original-src')).toBe('file://remote.example/share/a.svg');
+    expect(images.slice(3).every((image) => !image.hasAttribute('data-image-original-src'))).toBe(true);
+    expect(images.every((image) => !image.hasAttribute('src'))).toBe(true);
+    expect(template.content.querySelector('a')?.hasAttribute('href')).toBe(false);
+    expect(sanitized).not.toMatch(/script|iframe|onerror|javascript:|execute\(/i);
+  });
+
+  it('preserves formula line endings when local image metadata is enriched in the same paste', () => {
+    const sanitized = sanitizePastedHtml('<img src="file:///tmp/a.svg"><span data-formula-kind="inline" data-latex="x&#13;&#10;y&#13;z"></span>');
+    const template = document.createElement('template');
+    template.innerHTML = sanitized;
+    const formula = template.content.querySelector('[data-formula-kind]');
+    expect(JSON.parse(formula!.getAttribute('data-latex-json')!)).toBe('x\r\ny\rz');
+  });
+
   it("preserves safe PaperCanvas formula nodes during editor-to-editor copy", () => {
     const sanitized = sanitizePastedHtml(
       '<p>Before <span latex="x^2" data-formula-kind="inline" data-latex="x^2"></span> after.</p>' +
