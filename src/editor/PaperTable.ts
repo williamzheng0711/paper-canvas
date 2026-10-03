@@ -1,4 +1,6 @@
-import { TableCell, TableHeader } from "@tiptap/extension-table";
+import type { CommandProps } from "@tiptap/core";
+import { Table, TableCell, TableHeader } from "@tiptap/extension-table";
+import { addRow, isInTable, selectedRect, TableMap } from "@tiptap/pm/tables";
 import { tableCellPositions } from "./tableGeometry";
 
 function pixelWidth(value: string | null): number {
@@ -107,6 +109,44 @@ const textAlign = {
       : {};
   },
 };
+
+function insertAlignedRow({ state, tr, dispatch }: CommandProps, after: boolean): boolean {
+  if (!isInTable(state)) return false;
+  if (!dispatch) return true;
+  const rect = selectedRect(state);
+  const rowIndex = after ? rect.bottom : rect.top;
+  const referenceRow = after ? rect.bottom - 1 : rect.top;
+  addRow(tr, rect, rowIndex);
+  const table = tr.doc.nodeAt(rect.tableStart - 1)!;
+  const map = TableMap.get(table);
+  const columns = new Map<number, number>();
+  for (let column = 0; column < map.width; column++) {
+    const position = map.map[rowIndex * map.width + column];
+    if (!columns.has(position)) columns.set(position, column);
+  }
+  let rowPosition = rect.tableStart;
+  for (let index = 0; index < rowIndex; index++) rowPosition += table.child(index).nodeSize;
+  table.child(rowIndex).forEach((cell, offset) => {
+    const position = rowPosition + offset + 1;
+    const column = columns.get(position - rect.tableStart);
+    if (column === undefined) return;
+    const alignment = rect.table.nodeAt(rect.map.map[referenceRow * rect.map.width + column])?.attrs.textAlign;
+    if (alignment === "left" || alignment === "center" || alignment === "right")
+      tr.setNodeMarkup(position, undefined, { ...cell.attrs, textAlign: alignment });
+  });
+  return true;
+}
+
+/** New rows keep their neighboring cell alignment without rewriting existing cells. */
+export const PaperTable = Table.extend({
+  addCommands() {
+    return {
+      ...this.parent?.(),
+      addRowBefore: () => (props) => insertAlignedRow(props, false),
+      addRowAfter: () => (props) => insertAlignedRow(props, true),
+    };
+  },
+});
 
 export const PaperTableCell = TableCell.extend({
   addAttributes() {

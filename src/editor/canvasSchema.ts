@@ -3,7 +3,7 @@ import type { Schema } from '@tiptap/pm/model';
 import StarterKit from '@tiptap/starter-kit';
 import Heading from '@tiptap/extension-heading';
 import CodeBlockLowlight from '@tiptap/extension-code-block-lowlight';
-import { Table, TableRow } from '@tiptap/extension-table';
+import { TableRow } from '@tiptap/extension-table';
 import TaskItem from '@tiptap/extension-task-item';
 import TaskList from '@tiptap/extension-task-list';
 import { common, createLowlight } from 'lowlight';
@@ -14,7 +14,7 @@ import { HtmlPreview, InlineHtmlPreview } from './HtmlPreview';
 import { PaperCode, PaperLink } from './PaperLink';
 import { PaperImage } from './PaperImage';
 import { PaperOrderedList } from './PaperOrderedList';
-import { PaperTableCell, PaperTableHeader } from './PaperTable';
+import { PaperTable, PaperTableCell, PaperTableHeader } from './PaperTable';
 import { PaperTrailingNode } from './PaperTrailingNode';
 import { UnsupportedMarkdown } from './UnsupportedMarkdown';
 
@@ -97,7 +97,7 @@ export function canvasNodesAndMarks(
         alwaysPreserveAspectRatio: false,
       },
     }),
-    Table.configure({ resizable: true }),
+    PaperTable.configure({ resizable: true }),
     TableRow,
     PaperTableHeader,
     PaperTableCell,

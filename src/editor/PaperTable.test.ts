@@ -1,11 +1,12 @@
-import { getSchema } from "@tiptap/core";
+import { Editor, getSchema } from "@tiptap/core";
 import { DOMParser, DOMSerializer } from "@tiptap/pm/model";
 import { TableMap } from "@tiptap/pm/tables";
 import StarterKit from "@tiptap/starter-kit";
 import { Table, TableRow } from "@tiptap/extension-table";
 import { describe, expect, it, vi } from "vitest";
-import { PaperTableCell, PaperTableHeader } from "./PaperTable";
+import { PaperTable, PaperTableCell, PaperTableHeader } from "./PaperTable";
 import { sanitizePastedHtml } from "./paste";
+import { markdownToDocument } from "./markdown";
 
 const schema = getSchema([
   StarterKit,
@@ -22,6 +23,70 @@ function parse(html: string) {
 }
 
 describe("table widths from standard clipboard HTML", () => {
+  it("continues aligned columns when Tab creates the next table row", () => {
+    const editor = new Editor({
+      extensions: [StarterKit.configure({ trailingNode: false }), PaperTable, TableRow, PaperTableCell, PaperTableHeader],
+      content: markdownToDocument("| Left | Right |\n| :--- | ---: |\n| a | b |"),
+    });
+    try {
+      const before = editor.getJSON();
+      let lastCellPosition = 0;
+      editor.state.doc.descendants((node, position) => {
+        if (node.type.name === "tableCell") lastCellPosition = position + 2 + node.firstChild!.content.size;
+      });
+      editor.commands.setTextSelection(lastCellPosition);
+      editor.view.someProp("handleKeyDown", (handler) => handler(editor.view,
+        new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true })));
+      const lastRow = editor.state.doc.firstChild!.lastChild!;
+      expect(editor.state.doc.firstChild!.childCount).toBe(3);
+      expect(lastRow.firstChild!.attrs.textAlign).toBe("left");
+      expect(lastRow.lastChild!.attrs.textAlign).toBe("right");
+      const after = editor.getJSON();
+      expect(editor.commands.undo()).toBe(true);
+      expect(editor.getJSON()).toEqual(before);
+      expect(editor.commands.redo()).toBe(true);
+      expect(editor.getJSON()).toEqual(after);
+    } finally { editor.destroy(); }
+  });
+
+  it.each(["addRowBefore", "addRowAfter"] as const)("inherits only new cells during %s with a spanning neighbor", (command) => {
+    const editor = new Editor({
+      extensions: [StarterKit.configure({ trailingNode: false }), PaperTable, TableRow, PaperTableCell, PaperTableHeader],
+      content: '<table><tr><th align="left"><p>Left</p></th><th align="right"><p>Right</p></th></tr>' +
+        '<tr><td rowspan="2" align="center"><p>Spanning</p></td><td align="right"><p>Upper</p></td></tr>' +
+        '<tr><td align="left"><p>Lower</p></td></tr></table>',
+    });
+    try {
+      let position = 0;
+      editor.state.doc.descendants((node, offset) => {
+        if (node.type.name === "paragraph" && node.textContent === "Lower") position = offset + 1;
+      });
+      editor.commands.setTextSelection(position);
+      const before = editor.getJSON();
+      expect(editor.can()[command]()).toBe(true);
+      expect(editor.getJSON()).toEqual(before);
+      expect(editor.commands[command]()).toBe(true);
+      const table = editor.state.doc.firstChild!;
+      expect(TableMap.get(table).problems).toBeNull();
+      const added = table.child(command === "addRowBefore" ? 2 : 3);
+      expect(added.lastChild!.attrs.textAlign).toBe("left");
+      if (command === "addRowAfter") expect(added.firstChild!.attrs.textAlign).toBe("center");
+      const existing = new Map<string, string>();
+      table.descendants((node) => {
+        if (["tableCell", "tableHeader"].includes(node.type.name) && node.textContent)
+          existing.set(node.textContent, node.attrs.textAlign);
+      });
+      expect(existing).toEqual(new Map([
+        ["Left", "left"], ["Right", "right"], ["Spanning", "center"], ["Upper", "right"], ["Lower", "left"],
+      ]));
+      const after = editor.getJSON();
+      expect(editor.commands.undo()).toBe(true);
+      expect(editor.getJSON()).toEqual(before);
+      expect(editor.commands.redo()).toBe(true);
+      expect(editor.getJSON()).toEqual(after);
+    } finally { editor.destroy(); }
+  });
+
   it("retains native cell alignment through sanitized HTML copy and repeated paste", () => {
     const original = parse(
       '<table><tr><th align="center"><p>Heading</p></th><th align="right"><p>Value</p></th></tr>' +
