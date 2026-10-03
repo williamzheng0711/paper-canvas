@@ -5,17 +5,19 @@ import {
   serializeMarkdownWithComments,
 } from "../editor/comments";
 import { exportMarkdownFile } from "./files";
+import { getMessages } from "../i18n";
 
 const mocks = vi.hoisted(() => ({
   save: vi.fn<() => Promise<string | null>>(),
   writeMarkdown: vi.fn(),
+  resolvePath: vi.fn<(path: string) => Promise<string>>(),
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({
   isTauri: () => true,
   convertFileSrc: (path: string) => path,
   invoke: async (command: string, args?: { path: string; contents: string }) => {
-    if (command === 'resolve_markdown_document_path') return args!.path;
+    if (command === 'resolve_markdown_document_path') return mocks.resolvePath(args!.path);
     if (command === 'write_markdown_file') return mocks.writeMarkdown(args!.path, args!.contents);
   },
 }));
@@ -37,6 +39,7 @@ describe("Markdown export image paths", () => {
     vi.resetAllMocks();
     mocks.save.mockResolvedValue("/exports/copy.md");
     mocks.writeMarkdown.mockResolvedValue(undefined);
+    mocks.resolvePath.mockImplementation(async (path) => path);
   });
 
   it("keeps images at their original physical location when exporting to another folder", async () => {
@@ -97,5 +100,44 @@ describe("Markdown export image paths", () => {
       exportMarkdownFile("![Image](a.png)\n", "notes.md", "/notes/notes.md"),
     ).resolves.toBeNull();
     expect(mocks.writeMarkdown).not.toHaveBeenCalled();
+  });
+
+  it("does not export a copy over the document that owns the save baseline", async () => {
+    mocks.save.mockResolvedValue("/notes/notes.md");
+    await expect(
+      exportMarkdownFile("New writing\n", "notes.md", "/notes/notes.md"),
+    ).rejects.toThrow(getMessages().markdownExportOriginalFile);
+    expect(mocks.writeMarkdown).not.toHaveBeenCalled();
+  });
+
+  it("rejects a symlink alias of the original document after resolving its physical path", async () => {
+    mocks.save.mockResolvedValue("/exports/shortcut.md");
+    mocks.resolvePath.mockResolvedValueOnce("/notes/notes.md");
+    await expect(
+      exportMarkdownFile("New writing\n", "notes.md", "/notes/notes.md"),
+    ).rejects.toThrow(getMessages().markdownExportOriginalFile);
+    expect(mocks.writeMarkdown).not.toHaveBeenCalled();
+  });
+
+  it("preserves newer autosaved writing when the pending export chooses the original document", async () => {
+    let finishDialog!: (path: string) => void;
+    let diskSource = "Original\n";
+    mocks.save.mockImplementationOnce(() => new Promise((resolve) => { finishDialog = resolve; }));
+    mocks.writeMarkdown.mockImplementation(async (_path: string, contents: string) => { diskSource = contents; });
+    const exporting = exportMarkdownFile("Earlier snapshot\n", "notes.md", "/notes/notes.md");
+    const rejected = expect(exporting).rejects.toThrow(getMessages().markdownExportOriginalFile);
+    diskSource = "Newer writing saved while the dialog was pending\n";
+    finishDialog("/notes/notes.md");
+    await rejected;
+    expect(diskSource).toBe("Newer writing saved while the dialog was pending\n");
+    expect(mocks.writeMarkdown).not.toHaveBeenCalled();
+  });
+
+  it("still replaces a different existing export destination with the complete copy", async () => {
+    let diskSource = "Previous exported copy\n";
+    mocks.writeMarkdown.mockImplementation(async (_path: string, contents: string) => { diskSource = contents; });
+    const source = "\uFEFF# Latest copy\r\n\r\nExact  spaces.\r\n";
+    await expect(exportMarkdownFile(source, "notes.md", "/notes/notes.md")).resolves.toBe("copy.md");
+    expect(diskSource).toBe(source);
   });
 });

@@ -488,6 +488,7 @@ export async function exportMarkdownFile(markdown: string, defaultName: string, 
   });
   if (!selected) return null;
   selected = await resolveMarkdownDocumentPath(selected, true);
+  if (selected === sourcePath) throw new Error(text.markdownExportOriginalFile);
   const exportedMarkdown = sourcePath ? rebaseMarkdownImageAssets(markdown, sourcePath, selected) : markdown;
   await writeMarkdownFile(selected, exportedMarkdown);
   return fileName(selected);
