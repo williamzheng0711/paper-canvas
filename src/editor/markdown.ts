@@ -851,8 +851,8 @@ function markdownImageTitle(
   const title = String(attrs?.title ?? "");
   const width = imageDimension(attrs?.width);
   const height = imageDimension(attrs?.height);
-  if (!width || !height) return title || null;
-  return `papercanvas-size:${width}x${height}${title ? ` | ${title}` : ""}`;
+  if (!width && !height) return title || null;
+  return `papercanvas-size:${width ?? 0}x${height ?? 0}${title ? ` | ${title}` : ""}`;
 }
 
 function applyMark(

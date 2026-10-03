@@ -781,6 +781,16 @@ unclosed`;
     });
   });
 
+  it.each([{ width: 300 }, { height: 150 }])(
+    "preserves an independently specified image dimension: %j",
+    (dimensions) => {
+      const document: JSONContent = { type: "doc", content: [{ type: "image", attrs: { src: "diagram.png", alt: "Diagram", title: "Caption", ...dimensions } }] };
+      const source = documentToMarkdown(document);
+      expect(source).toContain(`papercanvas-size:${"width" in dimensions ? dimensions.width : 0}x${"height" in dimensions ? dimensions.height : 0} | Caption`);
+      expect(markdownToDocument(source)).toEqual(document);
+    },
+  );
+
   it("uses a hydrated image's original path when entering Markdown source mode", () => {
     const serialized = documentToMarkdown({
       type: "doc",

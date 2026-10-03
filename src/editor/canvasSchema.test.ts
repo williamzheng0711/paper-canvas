@@ -45,6 +45,26 @@ describe("shared canvas attribute validation", () => {
     }
   });
 
+  it.each([['width', 300], ['height', 150]] as const)(
+    "keeps a pasted image's %s through Source mode and reopen",
+    (dimension, size) => {
+      const editor = new Editor({ element: document.createElement("div"), extensions: canvasNodesAndMarks(), editorProps: { transformPastedHTML: sanitizePastedHtml }, content: markdownToDocument("replace me") });
+      try {
+        editor.commands.selectAll();
+        expect(editor.view.pasteHTML(`<img src="https://example.com/diagram.png" ${dimension}="${size}" alt="Diagram" title="Caption">`, new Event("paste") as ClipboardEvent)).toBe(true);
+        const before = editor.getJSON();
+        expect(before.content?.[0].attrs?.[dimension]).toBe(size);
+        const source = documentToMarkdown(before);
+        editor.commands.setContent(markdownToDocument(source));
+        expect(editor.getJSON()).toEqual(before);
+        expect(editor.view.dom.querySelector("img")?.style[dimension]).toBe(`${size}px`);
+        expect(() => editor.state.doc.check()).not.toThrow();
+      } finally {
+        editor.destroy();
+      }
+    },
+  );
+
   it.each([
     {
       html: '<table><colgroup><col width="80"><col width="120"></colgroup><tbody><tr><td rowspan="0">Spanning writing</td><td>One</td></tr><tr><td>Two</td></tr><tr><td>Three</td></tr></tbody></table>',
