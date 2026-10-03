@@ -128,6 +128,13 @@ failure injection. Keep original bytes for comparison.
   replacement, source undo must never apply stale line-ending restoration or
   resurrect writing from another file. Rename and Save As path rewrites must
   retain applicable history.
+- Delete a local image in Source, Save As into another folder, then Undo and
+  save. The restored reference must still point to the original physical image.
+  Repeat with Rename and a moved companion asset folder, another Save As, and
+  subsequent typing. Redo must remove the complete restored reference without
+  leaving part of its rewritten URL behind; preserve mixed line endings.
+  Inject a rename failure where the document returns to its original path but
+  its companion folder remains renamed; Undo must use that surviving folder.
 - Open a formula with CRLF/CR source, enter its textarea, and save without
   typing. Browser textarea normalization must not dirty or change it. Cancel
   composition, including after a save flush, then repeat rich HTML copy/paste;
@@ -150,12 +157,43 @@ failure injection. Keep original bytes for comparison.
 - Source syntax styling pauses above 250,000 characters or a 20,000-character
   line. The complete text, selections, mixed line endings and undo/redo remain
   available; reducing content or undoing the oversized insertion resumes styling.
+- Open 5 MB of unmatched TeX, backticks, prose, or headings. Source must open
+  without parsing the entire Markdown tree. A shortened or partial outline must
+  explain its limit, and word/character counts must remain meaningful. Preserve
+  stale or ambiguous comment footers as source rather than guessing ownership.
+- Search 249,980 characters containing 124,990 occurrences. Confirm the complete
+  count and forward/backward wraparound; bounded highlights explain their limit.
+  Add point comments while searching and confirm the combined DOM stays bounded.
+  Opening 12,000 comments must show 100 cards per page and retain every ID when
+  editing a later page, saving, and reopening.
+- In Source, delete the space between a standalone CR and LF in `A\r \nB`.
+  The two visible line breaks must survive saving/reopening, and Undo must restore
+  the original exact bytes. Repeat with trailing-whitespace cleanup and Save As.
+- Save As or export a source file above 250,000 characters. Image-free writing
+  must preserve exact bytes. If a location change requires parsing possible image
+  references beyond that budget, show an explanation before moving or writing
+  files; ordinary saves to the existing path must remain available.
+- In a formula source field, paste an environment that gains a closing delimiter,
+  then use Undo/Redo. Both the source and rendered formula must follow editor
+  history. Excessive formula expansion must retain complete source with a local
+  preview warning rather than constructing an enormous preview.
+  Import adjacent Typora formulas containing escaped dollars, such as
+  `\(\text{\$5}\)`. Each must remain one formula with its complete source;
+  formula-local image-looking text must not become a rewritten file reference.
 - Open Markdown with supported local images outside the home directory. Existing
   referenced files must render without granting an entire directory. Repeat with
   HTML image references, symlinks, missing images, and Save As in another folder.
+- Within disposable permitted image locations, substitute a named pipe for an
+  image. Loading it must fail promptly while writing and menus remain responsive.
+  Reopen a cached image, then add another relative image in Source and return to
+  Canvas; both must appear immediately. Open Markdown through a symlink and paste
+  an image; the companion folder must belong to the physical Markdown file.
 - Export PDF from Source and confirm it stays active with its selection and undo
   history. Verify all rendered pages, local images, formulas and intended margins;
   native printing must start pagination with the same margins as print CSS.
+- Export over a writable PDF and preserve its permissions. Export through a
+  symlink without replacing the link. A read-only target must report failure and
+  retain its previous bytes. Test long Unicode filenames and inspect every page.
 - Resolve Windows drive-root and UNC image paths, including repeated parent
   traversal. A relative path must retain its drive or server/share root. Hiding
   a recent file must not consume a visible Recent slot when it is saved again.
@@ -170,8 +208,25 @@ and complete multi-page PDF export while Source stayed active. The seeded
 Canvas history probe exercised 70,000 actions; a browser probe accepted 4,000
 nested HTML blockquotes without a parser or traversal error. Native oversized
 paste followed by Undo/Redo/Undo and Save preserved mixed CRLF/LF/CR bytes.
-The final automated run passed 1,249 tests across 70 frontend test files and
-31 native tests, along with lint, type checking, and production/native builds.
+The initial three-hour automated run passed 1,249 tests across 70 frontend test
+files and 31 native tests, along with lint, type checking, and production/native
+builds.
+
+The two-hour continuation confirmed native responsiveness with a 5 MB unmatched
+TeX source and 124,990 search matches, retaining complete writing and search
+counts. An image backed by a named pipe failed promptly without blocking the UI.
+Native Source Undo/Redo preserved distinct adjacent CR/LF separators and restored
+a deleted image to its moved companion folder after Rename and Save As, saving
+exact CRLF bytes. Cached and newly referenced SVG images rendered immediately.
+PDF exports preserved writable target permissions and relative symlinks;
+read-only targets retained their original bytes and reported failure. Exported
+PDF pages were rendered and inspected. A settings-write failure retained unsaved
+writing in independent recovery and prevented Quit until saving succeeded.
+The final continuation run passed 1,463 tests across 74 frontend test files and
+63 native tests, plus native doctests, lint, type checking, production and native
+builds. Full frontend verification used two workers to avoid performance-test
+contention; focused adversarial probes retained their original time limits.
+
 Composition and delayed-operation regressions are
 also exercised by the automated editor and application suites. Real IME
 behavior and Windows-native dialogs still require their platform manual checks.
