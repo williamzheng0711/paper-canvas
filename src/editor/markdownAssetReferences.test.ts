@@ -80,6 +80,26 @@ describe("POSIX filenames containing literal backslashes", () => {
 });
 
 describe("renaming local image destinations without rewriting document content", () => {
+  it("maps many saved comments through an image rename without rehashing the whole body per comment", () => {
+    const body = "![Image](research.assets/image.png)\n\n" + "a".repeat(160_000);
+    const base = createMarkdownComment(body, { kind: "position", offset: body.length - 1 }, "Review", "a", "base");
+    const comments = Array.from({ length: 12_000 }, (_, index) => ({ ...base, id: String(index) }));
+    const source = serializeMarkdownWithComments(body, comments);
+    const started = performance.now();
+    const saved = rename(source);
+    const elapsed = performance.now() - started;
+    const parsed = parseMarkdownComments(saved);
+    const expectedBody = body.replace("research.assets", "renamed.assets");
+    const expectedFingerprint = markdownFingerprint(expectedBody);
+
+    expect(parsed.status).toBe("valid");
+    expect(parsed.body).toBe(expectedBody);
+    expect(parsed.comments.map((comment) => comment.id)).toEqual(comments.map((comment) => comment.id));
+    expect(parsed.comments.every((comment) => comment.target.kind === "position" && comment.target.offset === expectedBody.length - 1)).toBe(true);
+    expect(parsed.comments.every((comment) => comment.bodyFingerprint === expectedFingerprint && comment.status === "active")).toBe(true);
+    expect(elapsed).toBeLessThan(1500);
+  });
+
   it("rebases actual images after dense missing or nested TeX openings without quadratic searches", () => {
     for (const closing of ["", "\\)"]) {
       const literal = "\\(".repeat(40_000) + closing + "\r\n\r\n";

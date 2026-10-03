@@ -726,6 +726,7 @@ function commentsThroughSourceEdits(
   after: string,
   edits: SourceEdit[],
 ): MarkdownComment[] {
+  const bodyFingerprint = markdownFingerprint(after);
   const mapOffset = (offset: number, association: -1 | 1) => {
     let shift = 0;
     const position = Math.min(before.length, Math.max(0, offset));
@@ -766,7 +767,7 @@ function commentsThroughSourceEdits(
       contextBefore: context.before,
       contextAfter: context.after,
       anchorText: context.anchorText,
-      bodyFingerprint: markdownFingerprint(after),
+      bodyFingerprint,
       status: changedTarget ? ("needs-review" as const) : comment.status,
     };
   });
