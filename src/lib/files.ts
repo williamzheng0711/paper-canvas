@@ -91,7 +91,17 @@ async function loadSettingsStore(): Promise<Store> {
   } catch {
     throw new Error(getMessages().settingsReadFailed);
   }
-  return Store.load(settingsKey, { autoSave: 200 });
+  // The plugin's delayed writes discard errors and truncate the destination.
+  // Queued mutations commit through the native atomic writer instead.
+  return Store.load(settingsKey, { autoSave: false });
+}
+
+async function persistSettingsStore(): Promise<void> {
+  try {
+    await invoke('write_settings_store');
+  } catch (error) {
+    throw error instanceof Error ? error : new Error(typeof error === 'string' ? error : getMessages().loadSettingsFailed);
+  }
 }
 
 function queueSettingsMutation<T>(operation: () => Promise<T>): Promise<T> {
@@ -691,6 +701,7 @@ async function updateRecentFiles(update: (files: RecentFile[]) => RecentFile[]):
     const store = await loadSettingsStore();
     const files = visibleRecentFiles(updated, await store.get<unknown>(hiddenRecentKey));
     await store.set(recentKey, files);
+    await persistSettingsStore();
     return files;
   }
   const storage = await browserSettings();
@@ -717,6 +728,7 @@ export function hideRecentFile(path: string): Promise<RecentFile[]> {
       const hidden = hiddenRecentPaths(await store.get<unknown>(hiddenRecentKey));
       hidden.add(path);
       await store.set(hiddenRecentKey, [...hidden]);
+      await persistSettingsStore();
     } else {
       const storage = await browserSettings();
       const hidden = hiddenRecentPaths(parseRecentValue(storage.getItem(hiddenRecentKey)));
@@ -782,7 +794,10 @@ async function readPreferences(): Promise<AppPreferences> {
     const store = await loadSettingsStore();
     const stored = await store.get<Partial<AppPreferences>>(preferencesKey);
     const preferences = mergePreferences(stored);
-    if (stored?.compactLayoutVersion !== preferences.compactLayoutVersion) await store.set(preferencesKey, preferences);
+    if (stored?.compactLayoutVersion !== preferences.compactLayoutVersion) {
+      await store.set(preferencesKey, preferences);
+      await persistSettingsStore();
+    }
     return preferences;
   }
   let stored: Partial<AppPreferences> | undefined;
@@ -811,6 +826,7 @@ export function savePreferences(preferences: AppPreferences): Promise<void> {
     if (isTauri()) {
       const store = await loadSettingsStore();
       await store.set(preferencesKey, saved);
+      await persistSettingsStore();
       return;
     }
     localStorage.setItem(preferencesKey, JSON.stringify(saved));
@@ -930,6 +946,7 @@ export function clearDraft(): Promise<void> {
       await invoke('clear_recovery_draft');
       const store = await loadSettingsStore();
       await store.delete(draftKey);
+      await persistSettingsStore();
       return;
     }
     localStorage.removeItem(draftKey);
@@ -940,8 +957,8 @@ export function clearDraft(): Promise<void> {
 export function flushSettings(): Promise<void> {
   return queueSettingsMutation(async () => {
     if (!isTauri()) return;
-    const store = await loadSettingsStore();
-    await store.save();
+    await loadSettingsStore();
+    await persistSettingsStore();
   });
 }
 

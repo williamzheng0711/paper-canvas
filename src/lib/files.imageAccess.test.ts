@@ -73,7 +73,7 @@ describe('opened document image access', () => {
     const saved = await saveEditorFile({ name: 'notes.md', path, sourceMarkdown, document: hydrateDocumentAssets(markdownToDocument(sourceMarkdown), path) });
     expect(saved.sourceMarkdown).toBe(sourceMarkdown);
     expect(mocks.invoke).toHaveBeenCalledWith('allow_document_image_files', { path, images: ['/tmp/outside-home/new.svg'] });
-    expect(mocks.invoke.mock.calls.map(([command]) => command).filter((command) => command !== 'validate_settings_file')).toEqual(['write_markdown_file', 'allow_document_image_files']);
+    expect(mocks.invoke.mock.calls.map(([command]) => command).filter((command) => command === 'write_markdown_file' || command === 'allow_document_image_files')).toEqual(['write_markdown_file', 'allow_document_image_files']);
   });
 
   it('authorizes the physical source images against the committed Save As destination after rebasing', async () => {

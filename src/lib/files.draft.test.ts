@@ -57,6 +57,7 @@ describe("ordered draft persistence", () => {
       if (command === "read_recovery_draft") return mocks.recovery;
       if (command === "write_recovery_draft") mocks.recovery = args!.contents;
       if (command === "clear_recovery_draft") mocks.recovery = "null";
+      if (command === "write_settings_store") await mocks.save();
     });
     mocks.load.mockResolvedValue(store);
   });

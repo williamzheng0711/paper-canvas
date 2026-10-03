@@ -1,6 +1,6 @@
 use std::{
     fs::File,
-    io::Write,
+    io::{Read, Write},
     path::{Path, PathBuf},
     sync::Mutex,
 };
@@ -10,12 +10,13 @@ use std::process::Command;
 
 #[cfg(target_os = "macos")]
 use std::{
-    io::{Read, Seek, SeekFrom},
+    io::{Seek, SeekFrom},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tauri_plugin_fs::FsExt;
+use tauri_plugin_store::StoreExt;
 
 #[cfg(target_os = "macos")]
 use objc2::runtime::{AnyObject, ProtocolObject};
@@ -251,38 +252,106 @@ fn recovery_draft_path(app: &AppHandle) -> Result<PathBuf, String> {
         .map_err(|error| error.to_string())
 }
 
-fn validate_settings_file_at(path: &Path) -> Result<(), String> {
-    let contents = match std::fs::read(path) {
-        Ok(contents) => contents,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error.to_string()),
+fn read_regular_file(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
+    match std::fs::metadata(path) {
+        Ok(metadata) if !metadata.is_file() => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "The data path must be a regular file.",
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+        _ => {}
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // A pipe substituted after metadata inspection must not block startup.
+        options.custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32);
+    }
+    let file = match options.open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
     };
+    read_regular_file_contents(file).map(Some)
+}
+
+fn read_regular_file_contents(mut file: File) -> std::io::Result<Vec<u8>> {
+    if !file.metadata()?.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "The data path must be a regular file.",
+        ));
+    }
+    let mut contents = Vec::new();
+    file.read_to_end(&mut contents)?;
+    Ok(contents)
+}
+
+fn settings_file_path(app: &AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_data_dir()
+        .map(|directory| directory.join("papercanvas.settings.v1"))
+        .map_err(|error| error.to_string())
+}
+
+fn validate_settings_contents(contents: &[u8]) -> Result<(), String> {
     let value: serde_json::Value =
-        serde_json::from_slice(&contents).map_err(|error| error.to_string())?;
+        serde_json::from_slice(contents).map_err(|error| error.to_string())?;
     if !value.is_object() {
         return Err("The settings file must contain a JSON object.".into());
     }
     Ok(())
 }
 
+fn validate_settings_file_at(path: &Path) -> Result<(), String> {
+    let Some(contents) = read_regular_file(path).map_err(|error| error.to_string())? else {
+        return Ok(());
+    };
+    validate_settings_contents(&contents)
+}
+
 #[tauri::command]
 async fn validate_settings_file(app: AppHandle) -> Result<(), String> {
-    let path = app
-        .path()
-        .app_data_dir()
-        .map_err(|error| error.to_string())?
-        .join("papercanvas.settings.v1");
+    let path = settings_file_path(&app)?;
     tauri::async_runtime::spawn_blocking(move || validate_settings_file_at(&path))
         .await
         .map_err(|error| error.to_string())?
 }
 
-fn read_recovery_draft_file(path: &Path) -> Result<Option<String>, String> {
-    match std::fs::read_to_string(path) {
-        Ok(contents) => Ok(Some(contents)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error.to_string()),
+fn write_settings_file_at(path: &Path, contents: &[u8]) -> Result<(), String> {
+    validate_settings_contents(contents)?;
+    let original = read_regular_file(path).map_err(|error| error.to_string())?;
+    if let Some(original) = original.as_deref() {
+        validate_settings_contents(original)?;
     }
+    let directory = path.parent().ok_or("The settings directory is invalid.")?;
+    std::fs::create_dir_all(directory).map_err(|error| error.to_string())?;
+    replace_file_atomically_checked(path, original.as_deref(), |file| file.write_all(contents))
+}
+
+#[tauri::command]
+async fn write_settings_store(app: AppHandle) -> Result<(), String> {
+    let path = settings_file_path(&app)?;
+    let store = app
+        .get_store("papercanvas.settings.v1")
+        .ok_or("The settings store is not loaded.")?;
+    let value: serde_json::Map<String, serde_json::Value> = store.entries().into_iter().collect();
+    let contents = serde_json::to_vec(&value).map_err(|error| error.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || write_settings_file_at(&path, &contents))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+fn read_recovery_draft_file(path: &Path) -> Result<Option<String>, String> {
+    read_regular_file(path)
+        .map_err(|error| error.to_string())?
+        .map(|contents| String::from_utf8(contents).map_err(|error| error.to_string()))
+        .transpose()
 }
 
 fn write_recovery_draft_file(path: &Path, contents: &str) -> Result<(), String> {
@@ -904,6 +973,7 @@ pub fn run() {
             write_recovery_draft,
             clear_recovery_draft,
             validate_settings_file,
+            write_settings_store,
             allow_document_assets,
             allow_document_image_files,
             allow_document_rename,
@@ -922,6 +992,11 @@ pub fn run() {
                 if let Some(window) = app.get_webview_window("main") {
                     api.prevent_exit();
                     let _ = window.close();
+                } else if let Some(store) = app.get_store("papercanvas.settings.v1") {
+                    // The frontend completed its atomic flush before destroying
+                    // the window. Avoid the plugin's unconditional truncating
+                    // save when the subsequent Exit event is dispatched.
+                    store.close_resource();
                 }
             }
             #[cfg(any(target_os = "macos", target_os = "ios", target_os = "android"))]
@@ -1297,6 +1372,143 @@ mod tests {
             assert_eq!(std::fs::read(&path).unwrap(), contents);
         }
         assert!(validate_settings_file_at(directory.path()).is_err());
+    }
+
+    #[test]
+    fn atomic_settings_commits_keep_original_damage_and_failed_write_bytes() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("papercanvas.settings.v1");
+        let contents = br#"{"preferences":{"fontSize":22},"recentFiles":[{"path":"/notes/retained.md"}],"custom":{"writing":"Keep this key"}}"#;
+        for original in [b"{ damaged".as_slice(), b"[]", b"null", &[0xff]] {
+            std::fs::write(&path, original).unwrap();
+            assert!(write_settings_file_at(&path, contents).is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), original);
+            assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+        }
+        std::fs::write(&path, b"{}").unwrap();
+        let result = replace_file_atomically_checked(&path, Some(b"{}"), |file| {
+            file.write_all(b"{partial settings")?;
+            Err(std::io::Error::other("simulated settings interruption"))
+        });
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"{}");
+        write_settings_file_at(&path, contents).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), contents);
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn atomic_settings_commits_create_new_data_directories_and_reject_invalid_new_values() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory
+            .path()
+            .join("new-app-data/papercanvas.settings.v1");
+        for contents in [b"{ damaged".as_slice(), b"[]", b"null", &[0xff]] {
+            assert!(write_settings_file_at(&path, contents).is_err());
+            assert!(!path.exists());
+        }
+        let contents = br#"{"preferences":{"fontSize":22},"custom":"Keep this key"}"#;
+        write_settings_file_at(&path, contents).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), contents);
+        assert_eq!(
+            std::fs::read_dir(path.parent().unwrap()).unwrap().count(),
+            1
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_settings_commits_respect_read_only_original_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("papercanvas.settings.v1");
+        std::fs::write(&path, br#"{"custom":"Original settings"}"#).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
+        assert!(write_settings_file_at(&path, br#"{"preferences":{"fontSize":22}}"#).is_err());
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            br#"{"custom":"Original settings"}"#
+        );
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o444
+        );
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn settings_and_recovery_reject_named_pipes_without_waiting_for_a_writer() {
+        use std::os::unix::fs::FileTypeExt;
+        let directory = tempfile::tempdir().unwrap();
+        for recovery in [false, true] {
+            let path = directory.path().join(if recovery {
+                "recovery-draft.json"
+            } else {
+                "papercanvas.settings.v1"
+            });
+            assert!(std::process::Command::new("mkfifo")
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success());
+            let (sender, receiver) = std::sync::mpsc::channel();
+            let read_path = path.clone();
+            let reader = std::thread::spawn(move || {
+                let result = if recovery {
+                    read_recovery_draft_file(&read_path).map(|_| ())
+                } else {
+                    validate_settings_file_at(&read_path)
+                };
+                sender.send(result).unwrap();
+            });
+            let result = receiver.recv_timeout(std::time::Duration::from_millis(250));
+            if result.is_err() {
+                // Bound a regression failure too: release the old blocking read.
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&path)
+                    .unwrap()
+                    .write_all(b"{}")
+                    .unwrap();
+            }
+            reader.join().unwrap();
+            assert!(result
+                .expect("the pipe must fail without a rescue writer")
+                .is_err());
+            assert!(std::fs::symlink_metadata(&path)
+                .unwrap()
+                .file_type()
+                .is_fifo());
+        }
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn regular_data_reads_reject_a_pipe_opened_after_valid_path_metadata() {
+        use std::os::unix::fs::{FileTypeExt, OpenOptionsExt};
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("papercanvas.settings.v1");
+        std::fs::write(&path, b"{}").unwrap();
+        assert!(std::fs::metadata(&path).unwrap().is_file());
+        // An adversarial replacement makes the prior pathname check stale.
+        std::fs::remove_file(&path).unwrap();
+        assert!(std::process::Command::new("mkfifo")
+            .arg(&path)
+            .status()
+            .unwrap()
+            .success());
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32)
+            .open(&path)
+            .unwrap();
+        let error = read_regular_file_contents(file).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(std::fs::symlink_metadata(&path)
+            .unwrap()
+            .file_type()
+            .is_fifo());
     }
 
     #[test]
