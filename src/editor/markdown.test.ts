@@ -229,6 +229,77 @@ describe("PaperCanvas Markdown subset", () => {
     expect(markdownToDocument(documentToMarkdown(parsed))).toEqual(parsed);
   });
 
+  it.each(["Project%20(100%25).assets/a.svg", "notes[archive].md"])(
+    "preserves escaped image and link destinations after an ordinary edit: %s",
+    (destination) => {
+      const source = `![Diagram](${destination})\n\n[Writing](${destination})\n\nBefore.`;
+      const document = markdownToDocument(source);
+      document.content!.at(-1)!.content = [{ type: "text", text: "After." }];
+      const saved = documentToMarkdown(document);
+      const reopened = markdownToDocument(saved);
+      expect(nodesOfType(reopened, "image")[0].attrs?.src).toBe(destination);
+      expect(nodesOfType(reopened, "text").find((node) => node.text === "Writing")?.marks?.[0].attrs?.href).toBe(destination);
+      expect(reopened).toEqual(document);
+      expect(documentToMarkdown(reopened)).toBe(saved);
+    },
+  );
+
+  it.each(["\n", "\r\n", "\r"])(
+    "normalizes Typora prose while preserving literal link destinations, titles and image captions with %j endings",
+    (ending) => {
+      const source = `[Math \\(x\\)](notes\\(draft\\).md "\\(caption\\)")${ending}${ending}[Reference \\(y\\)][draft]${ending}${ending}[draft]: notes\\(draft\\).md "\\(title\\)"${ending}${ending}![\\(literal\\)](notes\\(draft\\).png "\\(caption\\)")`;
+      expect(normalizeLatexDelimiters(source)).toBe(source.replace("Math \\(x\\)", "Math $x$").replace("Reference \\(y\\)", "Reference $y$"));
+      const document = markdownToDocument(source);
+      expect(nodesOfType(document, "inlineFormula").map((node) => node.attrs?.latex)).toEqual(["x", "y"]);
+      expect(nodesOfType(document, "inlineFormula").map((node) => node.marks?.[0].attrs)).toEqual([
+        { href: "notes(draft).md", title: "(caption)" },
+        { href: "notes(draft).md", title: "(title)" },
+      ]);
+      expect(nodesOfType(document, "image")[0].attrs).toEqual({ src: "notes(draft).png", alt: "(literal)", title: "(caption)" });
+      expect(markdownToDocument(documentToMarkdown(document))).toEqual(document);
+    },
+  );
+
+  it.each(["<https://example.com/\\(draft\\)>", "https://example.com/\\(draft\\)"])(
+    "keeps Typora-looking URL text literal in autolinks: %s",
+    (source) => {
+      expect(normalizeLatexDelimiters(source + " and \\(x\\)")).toBe(source + " and $x$");
+      const document = markdownToDocument(source);
+      expect(nodesOfType(document, "inlineFormula")).toHaveLength(0);
+      expect(markdownToDocument(documentToMarkdown(document))).toEqual(document);
+    },
+  );
+
+  it("does not close unmatched prose math using an escaped URL parenthesis", () => {
+    const source = "Before \\(missing [Writing](notes\\(draft\\).md) after";
+    expect(normalizeLatexDelimiters(source)).toBe(source);
+    expect(nodesOfType(markdownToDocument(source), "inlineFormula")).toHaveLength(0);
+  });
+
+  it("keeps math in a marked link label editable beside literal bracket code and an escaped destination", () => {
+    const source = "[**Math \\(x\\)** and `]`](notes\\(draft\\).md)";
+    const document = markdownToDocument(source);
+    expect(nodesOfType(document, "inlineFormula")).toEqual([{
+      type: "inlineFormula",
+      attrs: { latex: "x" },
+      marks: [{ type: "bold" }, { type: "link", attrs: { href: "notes(draft).md" } }],
+    }]);
+    expect(markdownToDocument(documentToMarkdown(document))).toEqual(document);
+  });
+
+  it.each([
+    "\\[\\text{![literal](notes\\(draft\\).png)}\\]",
+    "\\begin{align}\\text{[literal](notes\\(draft\\).md)}\\end{align}",
+  ])("keeps link-looking source literal inside a complete Typora display formula: %s", (source) => {
+    const document = markdownToDocument(source);
+    expect(nodesOfType(document, "blockFormula")).toEqual([{
+      type: "blockFormula",
+      attrs: { latex: source.startsWith("\\[") ? source.slice(2, -2) : source },
+    }]);
+    expect(nodesOfType(document, "image")).toHaveLength(0);
+    expect(markdownToDocument(documentToMarkdown(document))).toEqual(document);
+  });
+
   it("normalizes a long line of unfinished TeX openings without repeatedly searching its remaining suffix", () => {
     const source = "\\(".repeat(80_000);
     const started = performance.now();

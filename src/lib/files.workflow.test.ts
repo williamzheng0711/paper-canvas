@@ -97,6 +97,7 @@ it.each([
   const initialImagePath = [...boundary.entries.keys()].find((path) => path.includes('.assets/image-'))!;
   expect(boundary.entries.get(initialImagePath)).toEqual(new Uint8Array([0, 1, 2, 3]));
   expect(imageSource(file.document)).toBe(`asset:${initialImagePath}`);
+  expect(imageSource((await openMarkdownFile(initialPath)).document)).toBe(`asset:${initialImagePath}`);
 
   file = await renameEditorFile(file, renamedName);
   const renamedImagePath = [...boundary.entries.keys()].find((path) => path.includes('.assets/image-'))!;
@@ -185,4 +186,23 @@ it('preserves ordinary rich Markdown through Source save, Rename, Save As and a 
   expect(exported.document.content?.flatMap((node) => node.content ?? []).filter((node) => node.type === 'inlineFormula')
     .map((node) => node.attrs?.latex)).toEqual(['x', 'y']);
   expect(exported.sourceMarkdown).toContain(' and note[^n].');
+});
+
+it('retains a parenthesized image path after same-folder Save As, a Canvas edit and reopen', async () => {
+  const imagePath = '/notes/Project (100%).assets/a.svg';
+  const imageBytes = new TextEncoder().encode('<svg xmlns="http://www.w3.org/2000/svg"/>');
+  boundary.entries.set(imagePath, imageBytes);
+  boundary.entries.set('/notes/research.md', new TextEncoder().encode('![Diagram](Project%20(100%25).assets/a.svg)\n\nOriginal writing.\n'));
+  let file = await openMarkdownFile('/notes/research.md');
+  expect(imageSource(file.document)).toBe(`asset:${imagePath}`);
+  boundary.choices.push('/notes/copied.md');
+  file = await saveEditorFile(file, true);
+  const document = structuredClone(file.document);
+  document.content!.push(...markdownToDocument('Later Canvas writing.\n').content!);
+  file = await saveEditorFile({ ...file, document, sourceMarkdown: undefined });
+  const reopened = await openMarkdownFile(file.path!);
+
+  expect(imageSource(reopened.document)).toBe(`asset:${imagePath}`);
+  expect(reopened.sourceMarkdown).toContain('Later Canvas writing.');
+  expect(boundary.entries.get(imagePath)).toEqual(imageBytes);
 });

@@ -281,7 +281,7 @@ function normalizeInlineLatexDelimiters(
 
 /**
  * Converts the LaTeX delimiters accepted by Typora into remark-math's dollar
- * delimiters, without touching fenced/indented code or inline code spans.
+ * delimiters, without touching literal code, HTML or link destinations.
  */
 export function normalizeLatexDelimiters(markdown: string): string {
   if (!/\\(?:[([]|begin\{)|\$\$/.test(markdown)) return markdown;
@@ -298,14 +298,30 @@ export function normalizeLatexDelimiters(markdown: string): string {
   if (hasExtremeNesting(literalRoot)) return markdown;
   groupInlineHtml(literalRoot, markdown);
   if (hasExtremeNesting(literalRoot)) return markdown;
-  const literalRanges: SourceRange[] = [];
+  type LiteralRange = SourceRange & { phrasingOnly?: boolean };
+  const literalRanges: LiteralRange[] = [];
   const collectLiteralRanges = (node: MdNode) => {
-    if (["code", "inlineCode", "html"].includes(node.type)) {
-      const start = node.position?.start.offset;
-      const end = node.position?.end.offset;
+    const start = node.position?.start.offset;
+    const end = node.position?.end.offset;
+    if (["code", "inlineCode", "html", "image", "definition"].includes(node.type)) {
       if (start !== undefined && end !== undefined)
-        literalRanges.push({ start, end });
+        literalRanges.push({
+          start,
+          end,
+          phrasingOnly: node.type === "image" || node.type === "definition",
+        });
       return;
+    }
+    if (node.type === "link" && start !== undefined && end !== undefined) {
+      // Escaped destination/title parentheses are Markdown punctuation, not
+      // Typora math. The last label child ends before the destination, so its
+      // prose can still contain formulas. Autolink text is a literal URL.
+      const labelEnd = node.children?.at(-1)?.position?.end.offset;
+      if (markdown[start] !== "[" || labelEnd === undefined) {
+        literalRanges.push({ start, end, phrasingOnly: true });
+        return;
+      }
+      literalRanges.push({ start: labelEnd, end, phrasingOnly: true });
     }
     node.children?.forEach(collectLiteralRanges);
   };
@@ -341,7 +357,7 @@ export function normalizeLatexDelimiters(markdown: string): string {
     const lineEnd = lineStart + line.length;
     lineOffset = lineEnd + lineEnding.length;
     while (literalRanges[rangeIndex]?.end <= lineStart) rangeIndex += 1;
-    const lineRanges: SourceRange[] = [];
+    const lineRanges: LiteralRange[] = [];
     for (
       let index = rangeIndex;
       literalRanges[index]?.start < lineEnd;
@@ -351,6 +367,7 @@ export function normalizeLatexDelimiters(markdown: string): string {
       lineRanges.push({
         start: Math.max(0, range.start - lineStart),
         end: Math.min(line.length, range.end - lineStart),
+        phrasingOnly: range.phrasingOnly,
       });
     }
     if (latexEnvironment !== null) {
@@ -377,7 +394,11 @@ export function normalizeLatexDelimiters(markdown: string): string {
       continue;
     }
 
-    if (lineRanges.length > 0) {
+    // A link/image-looking substring can also be literal TeX inside an outer
+    // display formula. Preserve that existing full-line syntax unless its
+    // opening is itself inside a destination, code or HTML range.
+    const firstContent = line.search(/\S/);
+    if (lineRanges.some((range) => !range.phrasingOnly || range.start <= firstContent)) {
       append(normalizeInlineLatexDelimiters(line, lineRanges));
       continue;
     }
@@ -460,7 +481,7 @@ export function normalizeLatexDelimiters(markdown: string): string {
       else latexEnvironment = { name, openingIndex, indent };
       continue;
     }
-    append(normalizeInlineLatexDelimiters(line));
+    append(normalizeInlineLatexDelimiters(line, lineRanges));
   }
 
   // An unmatched opening delimiter is prose, not a display formula. Restore it
