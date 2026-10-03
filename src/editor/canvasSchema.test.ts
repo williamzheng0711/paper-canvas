@@ -6,6 +6,28 @@ import { sanitizePastedHtml } from "./paste";
 import { loadDraft, saveDraft } from "../lib/files";
 
 describe("shared canvas attribute validation", () => {
+  it("keeps spacing created by Enter twice through Source mode and Markdown reopen", () => {
+    const editor = new Editor({ element: document.createElement("div"), extensions: canvasNodesAndMarks(), content: markdownToDocument("First.") });
+    try {
+      editor.commands.setTextSelection(editor.state.doc.content.size - 1);
+      expect(editor.commands.splitBlock()).toBe(true);
+      expect(editor.commands.splitBlock()).toBe(true);
+      editor.commands.insertContent("Second.");
+      const before = editor.getJSON();
+      expect(editor.view.dom.querySelectorAll("p")).toHaveLength(3);
+      expect(before.content?.[1]).toEqual({ type: "paragraph" });
+      const source = documentToMarkdown(before);
+      expect(source).toBe("First.\n\n<p></p>\n\nSecond.\n");
+      editor.commands.setContent(markdownToDocument(source));
+      expect(editor.getJSON()).toEqual(before);
+      expect(editor.view.dom.querySelectorAll("p")).toHaveLength(3);
+      expect(markdownToDocument(documentToMarkdown(editor.getJSON()))).toEqual(before);
+      expect(() => editor.state.doc.check()).not.toThrow();
+    } finally {
+      editor.destroy();
+    }
+  });
+
   it.each([
     {
       html: '<table><colgroup><col width="80"><col width="120"></colgroup><tbody><tr><td rowspan="0">Spanning writing</td><td>One</td></tr><tr><td>Two</td></tr><tr><td>Three</td></tr></tbody></table>',

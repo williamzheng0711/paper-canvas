@@ -1178,6 +1178,8 @@ function fromMdast(
           ? [formula]
           : [{ type: "paragraph", content: [formula] }];
       }
+      if (context === "block" && node.value === "<p></p>")
+        return [{ type: "paragraph" }];
       if (context === "inline" && /^<br\s*\/?\s*>$/i.test(node.value ?? ""))
         return [{ type: "hardBreak" }];
       if (
@@ -1329,19 +1331,37 @@ function mergeInlineMarks(nodes: MdNode[]): MdNode[] {
   return merged;
 }
 
-function toMdast(node: JSONContent): MdNode | null {
-  const childNodes = (node.content ?? []).flatMap((child) => {
-    const converted = toMdast(child);
+function isEmptyParagraph(node: JSONContent): boolean {
+  return node.type === "paragraph" && !node.content?.length;
+}
+
+function toMdastChildren(node: JSONContent): MdNode[] {
+  const children = node.content ?? [];
+  const firstWriting = children.findIndex((child) => !isEmptyParagraph(child));
+  let lastWriting = children.length - 1;
+  while (lastWriting >= 0 && isEmptyParagraph(children[lastWriting]))
+    lastWriting -= 1;
+  return children.flatMap((child, index) => {
+    // Standard HTML preserves authored spacing between blocks without saving
+    // the Canvas's automatic trailing paragraph or changing blank Markdown.
+    const converted: MdNode | null =
+      isEmptyParagraph(child) && index > firstWriting && index < lastWriting
+        ? { type: "html", value: "<p></p>" }
+        : toMdast(child);
     if (!converted) return [];
     return [
       child.type === "image" &&
-      ["blockquote", "listItem", "taskItem", "footnoteDefinition"].includes(
+      ["doc", "blockquote", "listItem", "taskItem", "footnoteDefinition"].includes(
         node.type ?? "",
       )
         ? { type: "paragraph", children: [converted] }
         : converted,
     ];
   });
+}
+
+function toMdast(node: JSONContent): MdNode | null {
+  const childNodes = toMdastChildren(node);
   if (node.type === "text") {
     return wrapInlineMarks(node, {
       type: node.marks?.some((mark) => mark.type === "code")
@@ -1555,18 +1575,7 @@ export function documentToMarkdown(
     return String(document.content[0].attrs?.source ?? "");
   const root: MdRoot = {
     type: "root",
-    children: (document.content ?? []).flatMap((node) => {
-      const converted = toMdast(node);
-      // A root containing bare phrasing nodes makes remark join all blocks as
-      // one paragraph (even headings). Images are block nodes in our schema.
-      return converted
-        ? [
-            node.type === "image"
-              ? { type: "paragraph", children: [converted] }
-              : converted,
-          ]
-        : [];
-    }),
+    children: toMdastChildren(document),
   };
   const serializer = stringLength
     ? processor().use(remarkGfm, { stringLength })

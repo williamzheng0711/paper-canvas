@@ -19,6 +19,46 @@ function nodesOfType(document: JSONContent, type: string): JSONContent[] {
 }
 
 describe("PaperCanvas Markdown subset", () => {
+  it.each([
+    "Paragraph.",
+    "# Heading",
+    "![Diagram](notes.assets/a.png)",
+    "- First\n- Second",
+    "| Header |\n| --- |\n| Cell |",
+    "> Quoted writing",
+  ])("preserves interior empty paragraphs around %s", (source) => {
+    const blocks = markdownToDocument(source).content!;
+    const document: JSONContent = { type: "doc", content: [...blocks, { type: "paragraph" }, { type: "paragraph" }, ...blocks] };
+    const saved = documentToMarkdown(document);
+    expect(saved.match(/<p><\/p>/g)).toHaveLength(2);
+    expect(markdownToDocument(saved)).toEqual(document);
+  });
+
+  it.each(["blockquote", "listItem", "taskItem", "footnoteDefinition"])(
+    "preserves authored empty paragraphs inside %s writing",
+    (type) => {
+      const paragraph = (text: string): JSONContent => ({ type: "paragraph", content: [{ type: "text", text }] });
+      const block: JSONContent = { type, content: [paragraph("First."), { type: "paragraph" }, paragraph("Second.")] };
+      if (type === "taskItem") block.attrs = { checked: false };
+      if (type === "footnoteDefinition") block.attrs = { identifier: "note", label: "note" };
+      const container: JSONContent = type === "listItem"
+        ? { type: "bulletList", content: [block] }
+        : type === "taskItem" ? { type: "taskList", content: [block] } : block;
+      const document: JSONContent = { type: "doc", content: [container] };
+      const saved = documentToMarkdown(document);
+      expect(saved).toContain("<p></p>");
+      expect(markdownToDocument(saved)).toEqual(document);
+    },
+  );
+
+  it("keeps ordinary Markdown blank lines, empty notes and automatic trailing placeholders unchanged", () => {
+    const source = "First.\n\n\n\nSecond.\n";
+    expect(markdownToDocument(source).content).toHaveLength(2);
+    expect(documentToMarkdown({ type: "doc", content: [{ type: "paragraph" }] })).toBe("");
+    const heading = markdownToDocument("# Heading").content![0];
+    expect(documentToMarkdown({ type: "doc", content: [heading, { type: "paragraph" }] })).toBe("# Heading\n\n");
+  });
+
   it.each(["\\(", "`x", "# Heading\r\n\r\nParagraph.\r\n\r\n"])(
     "preserves oversized %j source before unbounded Markdown parsing can stall",
     (chunk) => {
