@@ -8,6 +8,7 @@ import {
   formulaFromClipboard,
 } from "./formulaInput";
 import { markdownToDocument } from "./markdown";
+import { applyTableColumnWidths } from "./PaperTable";
 
 function containsFormula(node: JSONContent): boolean {
   return (
@@ -187,6 +188,7 @@ export function sanitizePastedHtml(html: string): string {
   });
   const template = document.createElement("template");
   template.content.append(sanitized);
+  applyTableColumnWidths(template.content);
   // Preserve formula source before another HTML serialization/parsing pass
   // normalizes the line endings of raw source attributes.
   template.content

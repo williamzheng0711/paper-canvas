@@ -16,6 +16,27 @@ function htmlRowspan(cell: HTMLTableCellElement): number {
   return Math.max(1, Math.min(65534, (group?.rows?.length ?? 1) - (row?.sectionRowIndex ?? 0)));
 }
 
+/** Resolve standard colgroup widths once before the clipboard is parsed. */
+export function applyTableColumnWidths(root: ParentNode): void {
+  for (const table of root.querySelectorAll<HTMLTableElement>("table")) {
+    const columns = [...table.children]
+      .filter((child) => child.tagName === "COLGROUP")
+      .flatMap((group) => [...group.children])
+      .filter((child) => child.tagName === "COL")
+      .map((column) => pixelWidth(column.getAttribute("width")));
+    if (!columns.some((width) => width > 0)) continue;
+    for (const { cell, column, colspan } of tableCellPositions<HTMLTableCellElement>(
+      [...table.rows].map((row) => [...row.cells]),
+      (cell) => ({ colspan: cell.colSpan, rowspan: htmlRowspan(cell) }),
+    )) {
+      // Native clipboard metadata takes precedence over a standard colgroup.
+      if (cell.getAttribute("colwidth")) continue;
+      const widths = Array.from({ length: colspan }, (_, index) => columns[column + index] ?? 0);
+      cell.setAttribute("colwidth", widths.join(","));
+    }
+  }
+}
+
 const colwidth = {
   default: null,
   validate: (value: unknown) => {
@@ -26,7 +47,7 @@ const colwidth = {
   parseHTML: (element: HTMLElement): number[] | null => {
     const native = element.getAttribute("colwidth");
     if (native) {
-      const widths = native.split(",").map(pixelWidth);
+      const widths = native.split(",", (element as HTMLTableCellElement).colSpan).map(pixelWidth);
       return widths.some((width) => width > 0) ? widths : null;
     }
     const table = element.closest<HTMLTableElement>("table");

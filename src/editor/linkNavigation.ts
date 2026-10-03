@@ -47,11 +47,13 @@ export function scrollToDocumentFragment(editorRoot: HTMLElement, fragment: stri
   }
   const headings = renderedOutlineHeadings(editorRoot);
   const usedSlugs = new Set<string>();
+  const nextSuffix = new Map<string, number>();
   for (let index = 0; index < headings.length; index += 1) {
     const base = headingSlug(renderedHeadingText(headings[index]));
     let slug = base;
-    let suffix = 1;
+    let suffix = nextSuffix.get(base) ?? 1;
     while (usedSlugs.has(slug)) slug = `${base}-${suffix++}`;
+    nextSuffix.set(base, suffix);
     usedSlugs.add(slug);
     if (slug === decoded) return scrollToOutlineHeading(editorRoot, index);
   }

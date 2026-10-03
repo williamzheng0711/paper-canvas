@@ -1,6 +1,8 @@
-import { Extension, type JSONContent } from '@tiptap/core';
-import type { Node as ModelNode } from '@tiptap/pm/model';
+import { Extension, getSchema, type JSONContent } from '@tiptap/core';
+import type { Node as ModelNode, Schema } from '@tiptap/pm/model';
 import { Plugin } from '@tiptap/pm/state';
+import { TableMap } from '@tiptap/pm/tables';
+import { canvasNodesAndMarks } from './canvasSchema';
 
 // Very large editable DOM trees stall native accessibility queries. Source
 // mode keeps the complete document editable without building that DOM tree.
@@ -10,6 +12,61 @@ export const maximumCanvasCharacters = 250_000;
 type TreeNode = JSONContent | ModelNode;
 function isModelNode(node: TreeNode): node is ModelNode {
   return typeof (node as ModelNode).child === 'function';
+}
+
+function childCount(node: TreeNode): number {
+  return isModelNode(node) ? node.childCount : node.content?.length ?? 0;
+}
+
+function child(node: TreeNode, index: number): TreeNode {
+  return isModelNode(node) ? node.child(index) : node.content![index];
+}
+
+let tableSchema: Schema | undefined;
+
+/** Bound table maps and the empty cells inserted by automatic table repair. */
+function tableCanvasCost(table: TreeNode): number | undefined {
+  const height = childCount(table);
+  const expires: number[] = [];
+  let activeSpans = 0;
+  let width = 0;
+  for (let rowIndex = 0; rowIndex < height; rowIndex += 1) {
+    activeSpans -= expires[rowIndex] ?? 0;
+    const row = child(table, rowIndex);
+    let rowWidth = activeSpans;
+    for (let index = 0; index < childCount(row); index += 1) {
+      const cell = child(row, index);
+      const colspan = cell.attrs?.colspan === undefined ? 1 : cell.attrs.colspan;
+      const rowspan = cell.attrs?.rowspan === undefined ? 1 : cell.attrs.rowspan;
+      if (!Number.isInteger(colspan) || colspan < 1 || colspan > 1000 ||
+        !Number.isInteger(rowspan) || rowspan < 1 || rowspan > 65534) return undefined;
+      const widths = cell.attrs?.colwidth;
+      if (widths !== undefined && widths !== null && (!Array.isArray(widths) || widths.length > 1000 ||
+        widths.some((value: unknown) => typeof value !== 'number' || !Number.isFinite(value) || value < 0))) return undefined;
+      rowWidth += colspan;
+      if (rowspan > 1) {
+        activeSpans += colspan;
+        const end = Math.min(height, rowIndex + rowspan);
+        expires[end] = (expires[end] ?? 0) + colspan;
+      }
+    }
+    width = Math.max(width, rowWidth);
+    if (width * height > maximumCanvasNodes) return undefined;
+  }
+  // The resizable table view creates a col element for every logical column.
+  let extraNodes = width;
+  try {
+    const model = isModelNode(table) ? table : (tableSchema ??= getSchema(canvasNodesAndMarks())).nodeFromJSON(table);
+    for (const problem of TableMap.get(model).problems ?? []) {
+      if (problem.type === 'missing') extraNodes += problem.n * 2;
+      else if (problem.type === 'collision') {
+        const cell = model.nodeAt(problem.pos);
+        extraNodes += problem.n * Number(cell?.attrs.rowspan ?? 1) * 2;
+      }
+      if (extraNodes > maximumCanvasNodes) return undefined;
+    }
+  } catch { return undefined; }
+  return extraNodes;
 }
 
 export function canvasDocumentSupported(document: TreeNode): boolean {
@@ -27,6 +84,12 @@ export function canvasDocumentSupported(document: TreeNode): boolean {
       }
       if (nodes > maximumCanvasNodes || characters > maximumCanvasCharacters) return false;
       const type = isModelNode(frame.node) ? frame.node.type.name : frame.node.type;
+      if (type === 'table') {
+        const cost = tableCanvasCost(frame.node);
+        if (cost === undefined) return false;
+        nodes += cost;
+        if (nodes > maximumCanvasNodes) return false;
+      }
       const source = frame.node.attrs?.source;
       if ((type === 'htmlPreview' || type === 'inlineHtmlPreview') && typeof source === 'string') {
         // Preview atoms can render a large DOM tree beneath one model node.

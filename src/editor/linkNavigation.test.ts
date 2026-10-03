@@ -50,6 +50,22 @@ describe('reading link navigation', () => {
     expect(viewport.scrollTo).toHaveBeenCalledTimes(4);
   });
 
+  it('follows thousands of repeated headings while preserving authored suffix collisions', () => {
+    const viewport = document.createElement('section');
+    viewport.className = 'canvas-area';
+    viewport.scrollTo = vi.fn();
+    const editor = document.createElement('article');
+    editor.innerHTML = '<h2>Repeated heading-1</h2><h2>Repeated heading-2</h2>' + '<h2>Repeated heading</h2>'.repeat(4_000);
+    viewport.append(editor);
+    const last = editor.lastElementChild as HTMLElement;
+    last.getBoundingClientRect = () => ({ top: 1200 }) as DOMRect;
+    const contents = editor.innerHTML;
+    // Authored -1/-2 headings reserve those suffixes before duplicate numbering.
+    expect(scrollToDocumentFragment(editor, 'repeated-heading-4001')).toBe(true);
+    expect(viewport.scrollTo).toHaveBeenLastCalledWith({ top: 1180, behavior: 'smooth' });
+    expect(editor.innerHTML).toBe(contents);
+  });
+
   it('jumps to rendered formula and inline-HTML headings without including duplicate KaTeX or copy labels', () => {
     const viewport = document.createElement('section');
     viewport.className = 'canvas-area';
