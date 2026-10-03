@@ -567,6 +567,14 @@ function withoutContainerPrefixes(
   );
 }
 
+function hasUnterminatedHtmlBlock(value: string): boolean {
+  if (value.startsWith("<!--")) return !value.includes("-->");
+  if (value.startsWith("<?")) return !value.includes("?>");
+  if (value.startsWith("<![CDATA[")) return !value.includes("]]>");
+  const rawText = /^<(pre|script|style|textarea)(?:[\s>]|$)/i.exec(value);
+  return Boolean(rawText && !new RegExp(`</${rawText[1]}>`, "i").test(value));
+}
+
 /** Keep paired inline HTML together so tags such as kbd/sup actually render. */
 function groupInlineHtml(
   node: MdNode,
@@ -574,6 +582,11 @@ function groupInlineHtml(
   prefixes: ContainerPrefix[] = [],
   safety?: { preserve: boolean },
 ): void {
+  // Unterminated block HTML can retain the container's final blank separator
+  // in its payload. The list/quote serializer adds that separator again on
+  // every save; preserve the original source when that boundary is ambiguous.
+  if (safety && node.type === "html" && prefixes.length && /[\r\n]$/.test(node.value ?? "") && hasUnterminatedHtmlBlock(node.value ?? ""))
+    safety.preserve = true;
   let childPrefixes = prefixes;
   if (node.type === "blockquote")
     childPrefixes = [...prefixes, { quote: true }];
@@ -730,7 +743,9 @@ function unsupported(
               : [node],
         }) as never,
       )
-      .trimEnd();
+      // Remove serializer-added line endings, retaining authored nonbreaking
+      // whitespace such as NBSP and zero-width no-break spaces as content.
+      .replace(/[\r\n]+$/, "");
   // Unsupported phrasing content must remain inline. Block atoms inside a
   // paragraph are discarded by ProseMirror when the document is loaded.
   if (context === "inline")

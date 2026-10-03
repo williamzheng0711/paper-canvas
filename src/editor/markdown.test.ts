@@ -19,6 +19,36 @@ function nodesOfType(document: JSONContent, type: string): JSONContent[] {
 }
 
 describe("PaperCanvas Markdown subset", () => {
+  it.each(["\n", "\r\n", "\r"])(
+    "preserves unterminated container HTML without growing blank %j separators on each save",
+    (ending) => {
+      for (const opening of ["<pre>literal", "<!--x--!>literal</span>", "<![CDATA[<div>x</div>", "<?pi <div>x</div>"]) {
+        for (const marker of ["1. ", "- "]) {
+          const source = marker + opening + ending + ending + "next";
+          const document = markdownToDocument(source);
+          expect(nodesOfType(document, "unsupportedMarkdown")[0].attrs?.source).toBe(source);
+          expect(documentToMarkdown(document)).toBe(source);
+          expect(markdownToDocument(documentToMarkdown(document))).toEqual(document);
+        }
+      }
+      for (const source of ["<pre>literal</pre>", "<!--x--><span>literal</span>", "<![CDATA[<div>x</div>]]>", "<?pi <div>x</div>?>"]) {
+        const closed = markdownToDocument("1. " + source + ending + ending + "next");
+        expect(nodesOfType(closed, "htmlPreview")).toHaveLength(1);
+        expect(nodesOfType(closed, "unsupportedMarkdown")).toHaveLength(0);
+      }
+    },
+  );
+
+  it.each(["\uFEFF", "\u00a0", "\u2003"])(
+    "retains authored nonbreaking whitespace at the end of a preserved heading: %j",
+    (trailing) => {
+      const source = "# ![Diagram](image.png) content" + trailing;
+      const document = markdownToDocument(source);
+      expect(nodesOfType(document, "unsupportedMarkdown")[0].attrs?.source).toBe(source);
+      expect(markdownToDocument(documentToMarkdown(document))).toEqual(document);
+    },
+  );
+
   it.each(["https://example.com/🧪", "https://example.com/\\", "https://example.com/👨‍👩‍👧‍👦", "mailto:person🧪@example.com"])(
     "preserves autolink text and destinations where phrasing escapes are literal: %s",
     (source) => {
