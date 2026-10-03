@@ -111,7 +111,7 @@ function buildDecorations(
     decorations.push(
       Decoration.widget(from, () => createMarker(position, markerClickRef), {
         side: 1,
-        key: `comment-marker-${position.id}`,
+        key: JSON.stringify(['comment-marker', position.id, position.number, position.status]),
       }),
     );
   });

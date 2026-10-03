@@ -96,6 +96,41 @@ describe('canvas comment decorations', () => {
     expect(afterDelete?.from).toBe(afterDelete?.to);
   });
 
+  it('refreshes point marker numbering without changing the document or history', () => {
+    const { editor, host, onCommentClick } = createEditor();
+    const position: CanvasCommentPosition = {
+      id: 'point', kind: 'position', from: 7, to: 7, status: 'active', number: 2,
+    };
+    setPositions(editor, [position]);
+    const before = editor.getJSON();
+
+    setPositions(editor, [{ ...position, number: 1 }]);
+
+    const marker = host.querySelector<HTMLButtonElement>('[data-comment-marker]');
+    expect(marker?.textContent).toBe('1');
+    expect(marker?.getAttribute('aria-label')).toBe('Comment 1');
+    marker?.click();
+    expect(onCommentClick).toHaveBeenCalledOnce();
+    expect(onCommentClick).toHaveBeenCalledWith('point');
+    expect(editor.getJSON()).toEqual(before);
+    expect(editor.can().undo()).toBe(false);
+  });
+
+  it('refreshes the review appearance of retained point markers in both directions', () => {
+    const { editor, host } = createEditor();
+    const position: CanvasCommentPosition = {
+      id: 'point', kind: 'position', from: 7, to: 7, status: 'active', number: 1,
+    };
+    setPositions(editor, [position]);
+
+    setPositions(editor, [{ ...position, status: 'needs-review' }]);
+    expect(host.querySelector('.comment-marker--needs-review')?.textContent).toBe('1');
+
+    setPositions(editor, [position]);
+    expect(host.querySelector('[data-comment-marker]')?.textContent).toBe('1');
+    expect(host.querySelector('.comment-marker--needs-review')).toBeNull();
+  });
+
   it('keeps repeated edits bounded with a large comment decoration set', () => {
     const { editor, host } = createEditor('x'.repeat(20_000));
     const count = 750;
