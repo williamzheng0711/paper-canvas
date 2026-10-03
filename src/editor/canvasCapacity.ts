@@ -11,6 +11,7 @@ export const maximumCanvasNodes = 10_000;
 export const maximumCanvasCharacters = 250_000;
 
 type TreeNode = JSONContent | ModelNode;
+type CanvasCommentTarget = { kind: 'position' } | { kind: 'range'; from: number; to: number };
 function isModelNode(node: TreeNode): node is ModelNode {
   return typeof (node as ModelNode).child === 'function';
 }
@@ -70,9 +71,19 @@ function tableCanvasCost(table: TreeNode): number | undefined {
   return extraNodes;
 }
 
-export function canvasDocumentSupported(document: TreeNode): boolean {
+export function canvasDocumentSupported(
+  document: TreeNode,
+  comments: readonly { target: CanvasCommentTarget }[] = [],
+): boolean {
   const frames = [{ node: document, index: -1 }];
   let nodes = 0;
+  for (const { target } of comments) {
+    if (target.kind === 'position' || target.from === target.to) {
+      // A point marker creates a button, its label, and a split text node.
+      nodes += 3;
+      if (nodes > maximumCanvasNodes) return false;
+    }
+  }
   let characters = 0;
   let formulaMarkup = 0;
   while (frames.length) {

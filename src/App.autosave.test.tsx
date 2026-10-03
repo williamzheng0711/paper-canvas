@@ -3,7 +3,7 @@ import { act, StrictMode, useEffect } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import App from './App';
-import { createMarkdownComment, parseMarkdownComments, relocateMarkdownComments, serializeMarkdownWithComments, type MarkdownComment } from './editor/comments';
+import { createMarkdownComment, parseMarkdownComments, relocateMarkdownComments, serializeMarkdownWithComments, type CommentPlacement, type MarkdownComment } from './editor/comments';
 import { documentToMarkdown, markdownToDocument } from './editor/markdown';
 import type { SwitchableEditorHandle } from './editor/search';
 import type { EditorFile } from './lib/files';
@@ -22,6 +22,7 @@ type CanvasProps = {
   canRedoComment?: boolean;
   onUndoComment?: () => void;
   onRedoComment?: () => void;
+  onCommentRequest?: (placement: CommentPlacement, coordinates: { x: number; y: number }) => void;
 };
 
 type SourceProps = {
@@ -154,8 +155,8 @@ vi.mock('./lib/files', async (importOriginal) => {
   chooseMarkdownFile: files.chooseMarkdownFile,
   clearDraft: files.clearDraft,
   confirmDiscardChanges: actual.confirmDiscardChanges,
-  documentToPortableMarkdown: (document: JSONContent) => {
-    return documentToMarkdown(document);
+  documentToPortableMarkdown: (document: JSONContent, comments: readonly MarkdownComment[] = []) => {
+    return serializeMarkdownWithComments(documentToMarkdown(document), comments);
   },
   exportMarkdownFile: files.exportMarkdownFile,
   exportPdfFile: files.exportPdfFile,
@@ -424,6 +425,50 @@ describe('App autosave cursor stability', () => {
     await act(async () => { readingModeButton('canvas').click(); await flushEffects(); });
     expect(readingModeButton('canvas').getAttribute('aria-pressed')).toBe('true');
     expect(harness.canvasProps?.initialDocument).toEqual(markdownToDocument('# Smaller\r\n\r\nRetained writing.\r\n'));
+  });
+
+  it('recovers excessive point comments in exact Source mode without dropping metadata', async () => {
+    const body = 'Exact writing 中文 🧪\r\n';
+    const base = createMarkdownComment(body, { kind: 'position', offset: 0 }, 'Note', '', 'base');
+    const comments = Array.from({ length: 4_000 }, (_, index) => ({ ...base, id: `point-${index}` }));
+    const sourceMarkdown = serializeMarkdownWithComments(body, comments);
+    await act(async () => root.unmount());
+    files.loadDraft.mockResolvedValueOnce({ name: 'Comments.md', document: markdownToDocument(body), comments, sourceMarkdown });
+    root = createRoot(host);
+    await act(async () => { root.render(<App />); await flushEffects(); });
+    expect(readingModeButton('source').getAttribute('aria-pressed')).toBe('true');
+    expect(harness.sourceProps?.value).toBe(sourceMarkdown);
+    expect(parseMarkdownComments(harness.sourceProps!.value).comments).toHaveLength(4_000);
+    expect(host.querySelectorAll('.comment-card')).toHaveLength(100);
+    await act(async () => { readingModeButton('canvas').click(); await flushEffects(); });
+    expect(readingModeButton('source').getAttribute('aria-pressed')).toBe('true');
+    expect(harness.sourceProps?.value).toBe(sourceMarkdown);
+    expect(host.querySelector('.status-message')?.textContent).toBe(getMessages().canvasViewLimited);
+  });
+
+  it('preserves a newly created point comment by switching to Source when its DOM crosses capacity', async () => {
+    const body = 'x\n';
+    const base = createMarkdownComment(body, { kind: 'position', offset: 0 }, 'Note', '', 'base');
+    const comments = Array.from({ length: 3_332 }, (_, index) => ({ ...base, id: `point-${index}` }));
+    await act(async () => root.unmount());
+    files.loadDraft.mockResolvedValueOnce({ name: 'Comments.md', document: markdownToDocument(body), comments });
+    root = createRoot(host);
+    await act(async () => { root.render(<App />); await flushEffects(); });
+    expect(readingModeButton('canvas').getAttribute('aria-pressed')).toBe('true');
+    await act(async () => { harness.canvasProps?.onCommentRequest?.({ target: { kind: 'position', offset: 0 } }, { x: 0, y: 0 }); });
+    await act(async () => namedButton(getMessages().commentNew).click());
+    const input = host.querySelector<HTMLTextAreaElement>('.comment-composer textarea')!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(input, 'Newest 中文 🧪 note');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => input.form!.dispatchEvent(new SubmitEvent('submit', { bubbles: true, cancelable: true })));
+    expect(readingModeButton('source').getAttribute('aria-pressed')).toBe('true');
+    const saved = parseMarkdownComments(harness.sourceProps!.value);
+    expect(saved.body).toBe(body);
+    expect(saved.comments).toHaveLength(3_333);
+    expect(saved.comments.at(-1)?.content).toBe('Newest 中文 🧪 note');
+    expect(saved.comments.slice(0, -1).map((comment) => comment.id)).toEqual(comments.map((comment) => comment.id));
   });
 
   it('keeps a newly oversized source edit intact when canvas, outline, or PDF is requested', async () => {
@@ -1849,6 +1894,60 @@ describe('App autosave cursor stability', () => {
     expect(files.allowDocumentImageFiles).toHaveBeenLastCalledWith(expect.objectContaining({ document: markdownToDocument(latest) }));
     expect(harness.canvasProps?.initialDocument).toEqual(markdownToDocument(latest));
     expect(readingModeButton('canvas').getAttribute('aria-pressed')).toBe('true');
+  });
+
+  it('authorizes newly typed images before outline navigation and includes typing during the wait', async () => {
+    await showNavigationTab(getMessages().outline);
+    await act(async () => {
+      toggleReadingModeButton()?.click();
+      await vi.advanceTimersByTimeAsync(50);
+      harness.sourceProps?.onChange('# Destination\n\n![first](first.svg)\n');
+      await vi.advanceTimersByTimeAsync(300);
+    });
+    let authorize!: () => void;
+    files.allowDocumentImageFiles.mockImplementationOnce(() => new Promise<void>((resolve) => { authorize = resolve; }));
+    await act(async () => {
+      Array.from(host.querySelectorAll<HTMLButtonElement>('.outline-list button'))
+        .find((button) => button.textContent === 'Destination')?.click();
+      await flushEffects();
+    });
+    expect(readingModeButton('source').getAttribute('aria-pressed')).toBe('true');
+    const latest = '# Destination\n\nLatest writing.\n\n![second](second.svg)\n';
+    await act(async () => { harness.sourceProps?.onChange(latest); authorize(); await flushEffects(); });
+    expect(files.allowDocumentImageFiles).toHaveBeenLastCalledWith(expect.objectContaining({ document: markdownToDocument(latest) }));
+    expect(harness.canvasProps?.initialDocument).toEqual(markdownToDocument(latest));
+    expect(harness.canvasProps?.outlineTarget).toEqual({ index: 0, request: 1 });
+  });
+
+  it('retains a same-path save baseline when image authorization finishes after the save', async () => {
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const original = 'Original writing.\n';
+    files.openRecent.mockResolvedValueOnce({
+      path: '/tmp/recent.md', name: 'recent.md', document: markdownToDocument(original),
+      sourceMarkdown: original, diskSourceMarkdown: original,
+    });
+    await act(async () => { (await recentFileButton()).click(); await flushEffects(); });
+    const latest = 'Latest writing.\n\n![new](new.svg)\n';
+    await act(async () => {
+      toggleReadingModeButton()?.click();
+      await vi.advanceTimersByTimeAsync(50);
+      harness.sourceProps?.onChange(latest);
+    });
+    let authorize!: () => void;
+    files.allowDocumentImageFiles.mockImplementationOnce(() => new Promise<void>((resolve) => { authorize = resolve; }));
+    await act(async () => { readingModeButton('canvas').click(); await flushEffects(); });
+    files.saveEditorFile.mockImplementation(async (file) => ({ ...file, diskSourceMarkdown: file.sourceMarkdown }));
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 's', metaKey: true, bubbles: true }));
+      await flushEffects();
+    });
+    await act(async () => { authorize(); await flushEffects(); });
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 's', metaKey: true, bubbles: true }));
+      await flushEffects();
+    });
+    expect(files.saveEditorFile).toHaveBeenLastCalledWith(expect.objectContaining({ diskSourceMarkdown: latest }), false);
+    confirm.mockRestore();
   });
 
   it('does not restore an older source preview after a new document replaces pending image authorization', async () => {

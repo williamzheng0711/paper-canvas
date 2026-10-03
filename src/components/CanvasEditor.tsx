@@ -458,7 +458,7 @@ export const CanvasEditor = memo(
         MarkdownTyping,
         QuoteTyping,
         IndentedListInput,
-        createCommentDecorationsExtension(markerClickRef),
+        createCommentDecorationsExtension(markerClickRef, () => onCapacityErrorRef.current?.(getMessages().canvasEditLimited)),
         DocumentSearch,
       ],
       content: initialDocument,

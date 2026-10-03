@@ -4,6 +4,7 @@ import { Plugin, PluginKey, type Transaction } from '@tiptap/pm/state';
 import { Decoration, DecorationSet } from '@tiptap/pm/view';
 import type { MutableRefObject } from 'react';
 import type { CommentStatus } from './comments';
+import { canvasDocumentSupported } from './canvasCapacity';
 
 export type CanvasCommentPosition = {
   id: string;
@@ -120,6 +121,7 @@ function buildDecorations(
 
 export function createCommentDecorationsExtension(
   markerClickRef: MutableRefObject<((id: string) => void) | undefined>,
+  onLimit: () => void = () => undefined,
 ): Extension {
   return Extension.create({
     name: 'paperCanvasComments',
@@ -127,6 +129,23 @@ export function createCommentDecorationsExtension(
       return [
         new Plugin<CommentDecorationsState>({
           key: commentDecorationsPluginKey,
+          filterTransaction: (transaction, state) => {
+            const requested = transaction.getMeta(commentDecorationsPluginKey) as CanvasCommentPosition[] | undefined;
+            if (!requested && !transaction.docChanged) return true;
+            const current = requested ?? commentDecorationsPluginKey.getState(state)?.positions ?? [];
+            if (!current.length) return true;
+            const positions = transaction.docChanged && !requested
+              ? current.map((position) => mapPosition(position, transaction).position)
+              : current;
+            const comments = positions.map((position) => ({
+              target: position.kind === 'position'
+                ? { kind: 'position' as const }
+                : { kind: 'range' as const, from: position.from, to: position.to },
+            }));
+            if (canvasDocumentSupported(transaction.doc, comments)) return true;
+            onLimit();
+            return false;
+          },
           state: {
             init: () => ({
               positions: [],

@@ -7,6 +7,21 @@ import { TableMap } from '@tiptap/pm/tables';
 import { TextSelection } from '@tiptap/pm/state';
 
 describe('large canvas capacity', () => {
+  it('includes point and collapsed-range comment widgets in the shared node budget', () => {
+    const document: JSONContent = { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'Body' }] }] };
+    const points = Array.from({ length: 12_000 }, () => ({ target: { kind: 'position' as const, offset: 1 } }));
+    const ranges = Array.from({ length: 12_000 }, () => ({ target: { kind: 'range' as const, from: 1, to: 2 } }));
+    const supportedCount = Math.floor((maximumCanvasNodes - 3) / 3);
+
+    expect(canvasDocumentSupported(document, points)).toBe(false);
+    expect(canvasDocumentSupported(document, points.slice(0, supportedCount))).toBe(true);
+    expect(canvasDocumentSupported(document, points.slice(0, supportedCount + 1))).toBe(false);
+    expect(canvasDocumentSupported(document, ranges)).toBe(true);
+    expect(canvasDocumentSupported(document, ranges.map(({ target }) => ({ target: { ...target, to: target.from } })))).toBe(false);
+    expect(points).toHaveLength(12_000);
+    expect(document.content?.[0].content?.[0].text).toBe('Body');
+  });
+
   it('rejects a sparse wide table before its automatic repair can exceed capacity', () => {
     const onLimit = vi.fn();
     const editor = new Editor({ element: document.createElement('div'), extensions: [...canvasNodesAndMarks(), CanvasCapacity.configure({ onLimit })], content: '<p>Original writing</p>', editorProps: { transformPastedHTML: sanitizePastedHtml } });

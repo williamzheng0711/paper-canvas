@@ -16,14 +16,14 @@ describe('canvas comment decorations', () => {
     document.body.replaceChildren();
   });
 
-  function createEditor(text = 'alpha beta') {
+  function createEditor(text = 'alpha beta', onLimit = () => undefined) {
     const host = document.createElement('div');
     document.body.append(host);
     const onCommentClick = vi.fn();
     const markerClickRef = { current: onCommentClick };
     const editor = new Editor({
       element: host,
-      extensions: [StarterKit, createCommentDecorationsExtension(markerClickRef)],
+      extensions: [StarterKit, createCommentDecorationsExtension(markerClickRef, onLimit)],
       content: {
         type: 'doc',
         content: [
@@ -129,6 +129,47 @@ describe('canvas comment decorations', () => {
     setPositions(editor, [position]);
     expect(host.querySelector('[data-comment-marker]')?.textContent).toBe('1');
     expect(host.querySelector('.comment-marker--needs-review')).toBeNull();
+  });
+
+  it('rejects excessive point decorations before building their DOM', () => {
+    const onLimit = vi.fn();
+    const { editor, host } = createEditor('alpha beta', onLimit);
+    const positions: CanvasCommentPosition[] = Array.from({ length: 12_000 }, (_, index) => ({
+      id: `point-${index}`, kind: 'position', from: 1, to: 1, status: 'active', number: index + 1,
+    }));
+    const before = editor.getJSON();
+
+    setPositions(editor, positions);
+
+    expect(onLimit).toHaveBeenCalledOnce();
+    expect(commentDecorationsPluginKey.getState(editor.state)?.positions).toEqual([]);
+    expect(host.querySelectorAll('[data-comment-marker]')).toHaveLength(0);
+    expect(editor.getJSON()).toEqual(before);
+    expect(positions).toHaveLength(12_000);
+    expect(editor.can().undo()).toBe(false);
+  });
+
+  it('rejects a range deletion that would create excessive widgets and preserves usable history', () => {
+    const onLimit = vi.fn();
+    const { editor, host } = createEditor('alpha beta', onLimit);
+    const positions: CanvasCommentPosition[] = Array.from({ length: 12_000 }, (_, index) => ({
+      id: `range-${index}`, kind: 'range', from: 1, to: 6, status: 'active', number: index + 1,
+    }));
+    setPositions(editor, positions);
+    const before = editor.getJSON();
+
+    editor.view.dispatch(editor.state.tr.delete(1, 6));
+
+    expect(onLimit).toHaveBeenCalledOnce();
+    expect(editor.getJSON()).toEqual(before);
+    expect(commentDecorationsPluginKey.getState(editor.state)?.positions).toEqual(positions);
+    expect(host.querySelectorAll('[data-comment-marker]')).toHaveLength(0);
+    expect(editor.can().undo()).toBe(false);
+    editor.view.dispatch(editor.state.tr.insertText('new ', 1));
+    expect(editor.commands.undo()).toBe(true);
+    expect(editor.getJSON()).toEqual(before);
+    expect(editor.commands.redo()).toBe(true);
+    expect(editor.state.doc.textContent).toBe('new alpha beta');
   });
 
   it('keeps repeated edits bounded with a large comment decoration set', () => {

@@ -148,7 +148,7 @@ function documentStateFromMarkdown(
 
 export default function App() {
   const [file, setFile] = useState<EditorFile>(newEditorFile);
-  const canvasSupported = useMemo(() => canvasDocumentSupported(file.document), [file.document]);
+  const canvasSupported = useMemo(() => canvasDocumentSupported(file.document, file.comments), [file.document, file.comments]);
   const [documentId, setDocumentId] = useState(0);
   const [editRevision, setEditRevision] = useState(0);
   const [dirty, setDirty] = useState(false);
@@ -375,6 +375,13 @@ export default function App() {
         const rawComments = relocateMarkdownComments(next, documentToPortableMarkdown(nextFile.document), body);
         const nextMarkdown = serializeMarkdownWithComments(body, rawComments);
         setExternalRawMarkdown(nextMarkdown);
+      } else if (!canvasDocumentSupported(nextFile.document, next)) {
+        const markdown = documentToPortableMarkdown(nextFile.document, next);
+        setExternalRawMarkdown(markdown);
+        sourceModeRef.current = true;
+        setSourceEditorSession(documentSessionRef.current);
+        setSourceMode(true);
+        setMessage(getMessages().canvasViewLimited);
       }
       if (options.markEdited !== false) markEdited();
     },
@@ -509,7 +516,7 @@ export default function App() {
           setFile(normalizedDraft);
           setDocumentId((id) => id + 1);
           documentSessionRef.current += 1;
-          const largeDocument = !canvasDocumentSupported(normalizedDraft.document);
+          const largeDocument = !canvasDocumentSupported(normalizedDraft.document, normalizedDraft.comments);
           if (sourceModeRef.current || largeDocument) {
             setSourceEditorSession(documentSessionRef.current);
             setExternalRawMarkdown(normalizedDraft.sourceMarkdown ?? documentToPortableMarkdown(normalizedDraft.document, normalizedDraft.comments));
@@ -608,7 +615,7 @@ export default function App() {
       setModeTransitioning(false);
       clearSourceCommentSync();
       const normalizedFile = { ...nextFile, comments: nextFile.comments ?? [] };
-      const largeDocument = !canvasDocumentSupported(normalizedFile.document);
+      const largeDocument = !canvasDocumentSupported(normalizedFile.document, normalizedFile.comments);
       if (largeDocument) normalizedFile.sourceMarkdown ??= documentToPortableMarkdown(normalizedFile.document, normalizedFile.comments);
       fileRef.current = normalizedFile;
       setFile(normalizedFile);
@@ -1342,7 +1349,7 @@ export default function App() {
         unselectedState = currentFile.sourceMarkdown === markdown
           ? { document: currentFile.document, comments: currentFile.comments ?? [], warning: currentFile.commentWarning }
           : documentStateFromMarkdown(markdown, assetPath);
-        if (!canvasDocumentSupported(unselectedState.document)) {
+        if (!canvasDocumentSupported(unselectedState.document, unselectedState.comments)) {
           setMessage(getMessages().canvasViewLimited);
           return;
         }
@@ -1350,7 +1357,7 @@ export default function App() {
         // before the preview requests them, including after a failed save.
         await allowDocumentImageFiles({ ...currentFile, document: unselectedState.document });
         if (documentSessionRef.current !== session || !sourceModeRef.current) return;
-      } while (markdown !== rawMarkdownRef.current || assetPath !== fileAssetSourcePath(fileRef.current));
+      } while (fileRef.current !== currentFile || markdown !== rawMarkdownRef.current || assetPath !== fileAssetSourcePath(fileRef.current));
       const parsedSelection = visibleEditorSelection()
         ? markdownToDocumentWithSelection(rawMarkdownRef.current, markdownSearch.current?.getMarkdownOffset?.())
         : undefined;
@@ -1475,36 +1482,11 @@ export default function App() {
 
   const closeExportMenu = () => exportMenu.current?.removeAttribute('open');
 
-  const jumpToOutline = (index: number) => {
+  const jumpToOutline = async (index: number) => {
     if (sourceMode) {
-      try {
-        clearSourceCommentSync();
-        const currentFile = fileRef.current;
-        const sourceState = currentFile.sourceMarkdown === rawMarkdownRef.current
-          ? { document: currentFile.document, comments: currentFile.comments ?? [], warning: currentFile.commentWarning }
-          : documentStateFromMarkdown(rawMarkdownRef.current, fileAssetSourcePath(currentFile));
-        if (!canvasDocumentSupported(sourceState.document)) {
-          setMessage(getMessages().canvasViewLimited);
-          return;
-        }
-        const documentChanged = !documentsEqual(currentFile.document, sourceState.document);
-        const nextFile = {
-          ...fileRef.current,
-          document: sourceState.document,
-          comments: sourceState.comments,
-          sourceMarkdown: rawMarkdownRef.current,
-          ...(sourceState.warning ? { commentWarning: sourceState.warning } : { commentWarning: undefined }),
-        };
-        fileRef.current = nextFile;
-        setFile(nextFile);
-        if (documentChanged) setDocumentId((id) => id + 1);
-        resetCommentHistory();
-        sourceModeRef.current = false;
-        setSourceMode(false);
-      } catch (error) {
-        setMessage(error instanceof Error ? error.message : getMessages().markdownParseFailed);
-        return;
-      }
+      const session = documentSessionRef.current;
+      await toggleSourceMode();
+      if (documentSessionRef.current !== session || sourceModeRef.current) return;
     }
     outlineRequest.current += 1;
     setOutlineTarget({ index, request: outlineRequest.current });
@@ -1563,7 +1545,7 @@ export default function App() {
           const sourceFile = fileRef.current;
           const sourceMarkdown = rawMarkdownRef.current;
           const sourceState = documentStateFromMarkdown(sourceMarkdown, renderedAssetPath);
-          if (!canvasDocumentSupported(sourceState.document)) throw new Error(getMessages().canvasViewLimited);
+          if (!canvasDocumentSupported(sourceState.document, sourceState.comments)) throw new Error(getMessages().canvasViewLimited);
           const nextFile = {
             ...sourceFile,
             document: sourceState.document,
