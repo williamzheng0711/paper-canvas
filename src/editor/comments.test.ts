@@ -9,6 +9,38 @@ import {
 } from './comments';
 
 describe('PaperCanvas Markdown comments metadata', () => {
+  it.each(['\n', '\r\n', '\r'])(
+    'reads valid comment metadata with %j separators without adding a newline to the authored body',
+    (ending) => {
+      const body = 'hello';
+      const comment = createMarkdownComment(body, { kind: 'range', from: 0, to: 5 }, 'Review', 'hello', 'id');
+      const source = serializeMarkdownWithComments(body, [comment]).replaceAll('\n', ending);
+      expect(parseMarkdownComments(source)).toEqual({ body, comments: [comment], status: 'valid' });
+    },
+  );
+
+  it.each(['\n', '\r\n', '\r'])(
+    'keeps an authored trailing %j line ending when comment metadata uses the same separator',
+    (ending) => {
+      const body = 'hello' + ending;
+      const comment = createMarkdownComment(body, { kind: 'range', from: 0, to: 5 }, 'Review', 'hello', 'id');
+      const original = serializeMarkdownWithComments(body, [comment]);
+      expect(parseMarkdownComments(original)).toEqual({ body, comments: [comment], status: 'valid' });
+      const source = body + original.slice(body.length).replaceAll('\n', ending);
+      expect(parseMarkdownComments(source)).toEqual({ body, comments: [comment], status: 'valid' });
+    },
+  );
+
+  it('retains literal CR-only comment metadata inside fenced source and accepts a standalone externally edited body', () => {
+    const legacy = '<!-- papercanvas-comments:v1\r{"version":1,"comments":[]}\r-->';
+    const literal = '```markdown\r' + legacy;
+    expect(parseMarkdownComments(literal)).toEqual({ body: literal, comments: [], status: 'invalid' });
+    const body = 'original';
+    const comment = createMarkdownComment(body, { kind: 'position', offset: 0 }, 'Review', '', 'id');
+    const edited = serializeMarkdownWithComments(body, [comment]).replaceAll('\n', '\r').replace(body, 'changed');
+    expect(parseMarkdownComments(edited)).toEqual({ body: 'changed\r', comments: [comment], status: 'valid' });
+  });
+
   it('leaves a comment-free Markdown document unchanged', () => {
     const markdown = '# 標題\n\n中文與 emoji 😀\n';
 

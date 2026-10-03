@@ -43,8 +43,9 @@ export type ParsedComments = {
   status: 'none' | 'valid' | 'invalid' | 'unknown-version';
 };
 
-const metadataOpeningPattern = new RegExp(`<!--\\s*${commentsMetadataMarker}:v\\d+\\r?\\n`, 'g');
-const metadataPattern = new RegExp(`^<!--\\s*${commentsMetadataMarker}:v(\\d+)\\r?\\n([\\s\\S]*?)\\r?\\n-->\\s*$`);
+const metadataLineEnding = '(?:\\r\\n|\\r|\\n)';
+const metadataOpeningPattern = new RegExp(`<!--\\s*${commentsMetadataMarker}:v\\d+${metadataLineEnding}`, 'g');
+const metadataPattern = new RegExp(`^<!--\\s*${commentsMetadataMarker}:v(\\d+)${metadataLineEnding}([\\s\\S]*?)${metadataLineEnding}-->\\s*$`);
 const metadataContextParser = unified().use(remarkParse);
 
 function clampOffset(value: unknown, length: number): number {
@@ -182,9 +183,11 @@ export function parseMarkdownComments(markdown: string): ParsedComments {
       return { body: markdown, comments: [], status: 'invalid' };
     }
     const fingerprintMatches = payload.bodyFingerprint === markdownFingerprint(body);
-    const insertedSeparator =
-      !fingerprintMatches && body.endsWith('\n') && payload.bodyFingerprint === markdownFingerprint(body.slice(0, -1));
-    if (insertedSeparator) body = body.slice(0, -1);
+    const separatorLength = /(?:\r\n|\r|\n)$/.exec(body)?.[0].length ?? 0;
+    const insertedSeparator = !fingerprintMatches && separatorLength > 0
+      ? (separatorLength === 2 ? [2, 1] : [1]).find((length) => payload.bodyFingerprint === markdownFingerprint(body.slice(0, -length)))
+      : undefined;
+    if (insertedSeparator) body = body.slice(0, -insertedSeparator);
     if (!fingerprintMatches && !insertedSeparator) {
       // Examples in a fence, raw HTML, or a quote are user text. A current
       // fingerprint still identifies our own metadata appended to an unclosed
