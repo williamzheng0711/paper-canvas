@@ -386,6 +386,12 @@ describe("renaming local image destinations without rewriting document content",
     );
   });
 
+  it("keeps image-looking text literal inside a Typora formula with escaped dollars", () => {
+    const source = '\uFEFFBefore \\(\\text{\\$5 ![literal](research.assets/math.svg)}\\) after\r\n\r\n![Actual](research.assets/actual.svg)\r\n';
+    expect(rename(source)).toBe(source.replace('research.assets/actual.svg', 'renamed.assets/actual.svg'));
+    expect(rebaseMarkdownImageAssets(source, oldPath, '/exports/copy.md')).toBe(source.replace('research.assets/actual.svg', '../notes/research.assets/actual.svg'));
+  });
+
   it("does not treat unmatched Typora math or escaped delimiters as a formula", () => {
     expect(rename(String.raw`\\( ![Actual](research.assets/a.png) \\)`)).toBe(
       String.raw`\\( ![Actual](renamed.assets/a.png) \\)`,

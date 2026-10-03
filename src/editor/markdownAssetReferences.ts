@@ -540,7 +540,10 @@ function maskTyporaMath(source: string): string {
     const normalized = normalizeLatexDelimiters(
       scan.slice(match.index, closing + 2),
     );
-    if (normalized.startsWith("$") && normalized.endsWith("$")) {
+    if (
+      (normalized.startsWith("$") && normalized.endsWith("$")) ||
+      normalized.startsWith('<span data-formula-kind="inline"')
+    ) {
       blank(match.index, closing + 2);
       inlineEnd = closing + 2;
     }

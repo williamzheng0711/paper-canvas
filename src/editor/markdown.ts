@@ -204,6 +204,10 @@ function isEscaped(text: string, index: number): boolean {
 
 type SourceRange = { start: number; end: number };
 
+function inlineFormulaRequiresHtml(latex: string): boolean {
+  return !latex || /[\r\n]|(?:^|[^$])\$(?:[^$]|$)/.test(latex);
+}
+
 function normalizeInlineLatexDelimiters(
   line: string,
   literalRanges: SourceRange[] = [],
@@ -255,7 +259,10 @@ function normalizeInlineLatexDelimiters(
       }
       const closing = nextLatexClosing;
       if (closing !== -1) {
-        result += `$${line.slice(cursor + 2, closing)}$`;
+        const latex = line.slice(cursor + 2, closing);
+        result += inlineFormulaRequiresHtml(latex) || latex.includes("$")
+          ? tableToHtml({ type: "inlineFormula", attrs: { latex } })
+          : `$${latex}$`;
         cursor = closing + 2;
         continue;
       }
@@ -787,10 +794,11 @@ function formulaFromHtml(source: string): string | undefined {
     "#39": "'",
     "#13": "\r",
     "#10": "\n",
+    "#36": "$",
   };
   const decode = (value: string) =>
     value.replace(
-      /&(amp|lt|gt|quot|#39|#13|#10);/g,
+      /&(amp|lt|gt|quot|#39|#13|#10|#36);/g,
       (_, entity: string) => entities[entity],
     );
   const latex = decode(match[1]);
@@ -1423,7 +1431,7 @@ function toMdast(node: JSONContent): MdNode | null {
     }
     case "inlineFormula": {
       const latex = String(node.attrs?.latex ?? "");
-      const requiresHtml = !latex || /[\r\n]|(?:^|[^$])\$(?:[^$]|$)/.test(latex);
+      const requiresHtml = inlineFormulaRequiresHtml(latex);
       return wrapInlineMarks(node, {
         // Inline math serializers rewrite newlines that resemble Markdown
         // blocks, and empty/single-dollar source needs a double-dollar fence

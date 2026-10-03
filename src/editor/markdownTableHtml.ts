@@ -187,7 +187,7 @@ export function tableToHtml(node: JSONContent): string {
       const latex = escapeHtml(node.attrs?.latex ?? "");
       return markedHtml(
         node,
-        `<span data-formula-kind="inline" latex="${latex}" data-latex="${latex}">${escapeHtml(`$${node.attrs?.latex ?? ""}$`)}</span>`,
+        `<span data-formula-kind="inline" latex="${latex}" data-latex="${latex}">${escapeHtml(`$${node.attrs?.latex ?? ""}$`).replace(/\$/g, "&#36;")}</span>`,
       );
     }
     case "blockFormula":

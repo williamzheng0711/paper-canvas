@@ -45,6 +45,38 @@ describe("PaperCanvas Markdown subset", () => {
     },
   );
 
+  it.each(["", "\\text{\\$5}", "a \\$ b", "$", "$$", "a$$b", "a$$$b"])(
+    "imports Typora inline formula content without dollar delimiters splitting it: %j",
+    (latex) => {
+      const source = `\\(${latex}\\)`;
+      const document = markdownToDocument(source);
+      expect(document.content?.[0].type).toBe("paragraph");
+      expect(document.content?.[0].content).toEqual([{ type: "inlineFormula", attrs: { latex } }]);
+      expect(markdownToDocument(documentToMarkdown(document))).toEqual(document);
+      const code = markdownToDocument("`" + source + "`");
+      expect(nodesOfType(code, "inlineFormula")).toHaveLength(0);
+      expect(code.content?.[0].content?.[0].text).toBe(source);
+    },
+  );
+
+  it("keeps adjacent dollar-containing Typora formulas separate without cross-tag math parsing", () => {
+    const source = "\\(\\$\\) \\(\\text{\\$5}\\)";
+    const document = markdownToDocument(source);
+    expect(document.content?.[0].content).toEqual([
+      { type: "inlineFormula", attrs: { latex: "\\$" } },
+      { type: "text", text: " " },
+      { type: "inlineFormula", attrs: { latex: "\\text{\\$5}" } },
+    ]);
+    expect(markdownToDocument(documentToMarkdown(document))).toEqual(document);
+  });
+
+  it("imports dense escaped-dollar Typora formulas without quadratic HTML/math parsing", () => {
+    const source = "\\(\\$\\) ".repeat(1000);
+    const started = performance.now();
+    expect(nodesOfType(markdownToDocument(source), "inlineFormula")).toHaveLength(1000);
+    expect(performance.now() - started).toBeLessThan(1500);
+  });
+
   it.each(["`\\)`", "<kbd>\\)</kbd>", "<!-- \\) -->"])(
     "ignores a Typora closing delimiter inside a literal %s",
     (literal) => {
