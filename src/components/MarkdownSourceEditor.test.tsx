@@ -2,6 +2,7 @@ import { act, createRef } from "react";
 import {
   indentLess,
   indentMore,
+  deleteTrailingWhitespace,
   isolateHistory,
   redo,
   undo,
@@ -69,6 +70,66 @@ describe("MarkdownSourceEditor search", () => {
     await act(async () => root.unmount());
     host.remove();
   });
+
+  it.each(["A\r \nB", "First\nA\r \nB", "First\r\nA\r \nB"])(
+    "preserves two line breaks when deleting between separate CR and LF in %j",
+    async (before) => {
+      let value = before;
+      await act(async () => root.render(
+        <MarkdownSourceEditor language="en" value={before} valueRevision={0} onChange={(next) => { value = next; }} />,
+      ));
+      const editor = EditorView.findFromDOM(host.querySelector(".cm-editor")!)!;
+      const from = editor.state.doc.toString().indexOf(" ");
+      editor.dispatch({ changes: { from, to: from + 1 } });
+      const after = before.replace("\r \n", "\r\r\n");
+      expect(value).toBe(after);
+      expect(editor.state.doc.toString()).toBe(after.replace(/\r\n?/g, "\n"));
+      expect(undo(editor)).toBe(true);
+      expect(value).toBe(before);
+      expect(redo(editor)).toBe(true);
+      expect(value).toBe(after);
+    },
+  );
+
+  it("retains blank lines through whitespace cleanup and its undo and redo", async () => {
+    const before = "A\r \nB";
+    let value = before;
+    await act(async () => root.render(
+      <MarkdownSourceEditor language="en" value={before} valueRevision={0} onChange={(next) => { value = next; }} />,
+    ));
+    const editor = EditorView.findFromDOM(host.querySelector(".cm-editor")!)!;
+    expect(deleteTrailingWhitespace(editor)).toBe(true);
+    expect(value).toBe("A\r\r\nB");
+    expect(editor.state.doc.toString()).toBe("A\n\nB");
+    expect(undo(editor)).toBe(true);
+    expect(value).toBe(before);
+    expect(redo(editor)).toBe(true);
+    expect(value).toBe("A\r\r\nB");
+  });
+
+  it.each(["![Image](images/a.png)\nA\r \nB", "A\r \nB\n![Image](images/a.png)"])(
+    "maps adjacent separator repairs through an external image rebase for %j",
+    async (before) => {
+      const onChange = vi.fn();
+      const render = (value: string, revision: number, previous?: string) => root.render(
+        <MarkdownSourceEditor language="en" value={value} valueRevision={revision}
+          externalChanges={previous ? imagePathSourceChanges(previous, value, "/notes/research.md", "/exports/copy.md") : undefined}
+          onChange={onChange} />,
+      );
+      await act(async () => render(before, 0));
+      const editor = EditorView.findFromDOM(host.querySelector(".cm-editor")!)!;
+      const from = editor.state.doc.toString().indexOf(" ");
+      editor.dispatch({ changes: { from, to: from + 1 } });
+      const edited = before.replace("\r \n", "\r\r\n");
+      expect(onChange).toHaveBeenLastCalledWith(edited);
+      const rebased = rebaseMarkdownImageAssets(edited, "/notes/research.md", "/exports/copy.md");
+      await act(async () => render(rebased, 1, edited));
+      expect(undo(editor)).toBe(true);
+      expect(onChange).toHaveBeenLastCalledWith(rebaseMarkdownImageAssets(before, "/notes/research.md", "/exports/copy.md"));
+      expect(redo(editor)).toBe(true);
+      expect(onChange).toHaveBeenLastCalledWith(rebased);
+    },
+  );
 
   it("retains exact mixed separators and native undo/redo while its source pane is hidden", async () => {
     const original = "# Original\r\n\r\nBody\nEnd\r";

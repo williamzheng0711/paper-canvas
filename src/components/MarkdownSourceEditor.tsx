@@ -108,7 +108,7 @@ function rawOffset(snapshot: SourceSnapshot, normalizedOffset: number): number {
   return offset + lineEndingCount(snapshot, offset, true);
 }
 
-type SeparatorRecord = { anchor: number; offset: number; value: string };
+type SeparatorRecord = { anchor: number; offset: number; value: string; affinity?: -1 | 1 };
 type SeparatorMetadata = {
   lineEnding: string;
   separators: ReadonlyMap<number, string>;
@@ -132,9 +132,51 @@ const restoreSeparators = StateEffect.define<readonly SeparatorRecord[]>({
   map: (records, changes) =>
     records.map((record) => ({
       ...record,
-      anchor: changes.mapPos(record.anchor, -1),
+      anchor: changes.mapPos(record.anchor, record.affinity ?? -1),
     })),
 });
+
+function separateAdjacentNewlines(separators: Map<number, string>) {
+  const repairs: { position: number; value: string }[] = [];
+  for (const [position, value] of separators) {
+    if (value === "\n" && separators.get(position - 1) === "\r") {
+      // Two logical breaks must not serialize as one CRLF after an edit joins
+      // them. Retain the CR and extend the following LF to its own CRLF.
+      repairs.push({ position, value });
+      separators.set(position, "\r\n");
+    }
+  }
+  return repairs;
+}
+
+const separatorMappings = new WeakMap<Transaction, {
+  separators: Map<number, string>;
+  repairs: { position: number; value: string }[];
+}>();
+
+function mappedSeparators(transaction: Transaction) {
+  const cached = separatorMappings.get(transaction);
+  if (cached) return cached;
+  const current = transaction.startState.field(separatorMetadata);
+  const separators = new Map<number, string>();
+  const previousSeparators = [...current.separators].sort(([left], [right]) => left - right);
+  let separatorIndex = 0;
+  // Walk unchanged ranges once, including large selections with many edits.
+  transaction.changes.iterGaps((from, mappedFrom, length) => {
+    while (separatorIndex < previousSeparators.length && previousSeparators[separatorIndex][0] < from) separatorIndex += 1;
+    while (separatorIndex < previousSeparators.length && previousSeparators[separatorIndex][0] < from + length) {
+      const [position, value] = previousSeparators[separatorIndex++];
+      separators.set(mappedFrom + position - from, value);
+    }
+  });
+  transaction.changes.iterChanges((_from, _to, fromB, _toB, inserted) => {
+    const text = inserted.toString();
+    for (let index = text.indexOf("\n"); index >= 0; index = text.indexOf("\n", index + 1)) separators.set(fromB + index, current.lineEnding);
+  });
+  const mapped = { separators, repairs: separateAdjacentNewlines(separators) };
+  separatorMappings.set(transaction, mapped);
+  return mapped;
+}
 
 const separatorMetadata = StateField.define<SeparatorMetadata>({
   create: (state) => sourceSeparators(sourceSnapshot(state.doc.toString())),
@@ -143,37 +185,7 @@ const separatorMetadata = StateField.define<SeparatorMetadata>({
       return current;
     let next = current;
     if (transaction.docChanged) {
-      const separators = new Map<number, string>();
-      const previousSeparators = [...current.separators].sort(
-        ([left], [right]) => left - right,
-      );
-      let separatorIndex = 0;
-      // Walk unchanged ranges once. Mapping each separator independently is
-      // quadratic for large selections with an edit on every selected line.
-      transaction.changes.iterGaps((from, mappedFrom, length) => {
-        while (
-          separatorIndex < previousSeparators.length &&
-          previousSeparators[separatorIndex][0] < from
-        )
-          separatorIndex += 1;
-        while (
-          separatorIndex < previousSeparators.length &&
-          previousSeparators[separatorIndex][0] < from + length
-        ) {
-          const [position, value] = previousSeparators[separatorIndex++];
-          separators.set(mappedFrom + position - from, value);
-        }
-      });
-      transaction.changes.iterChanges((_from, _to, fromB, _toB, inserted) => {
-        const text = inserted.toString();
-        for (
-          let index = text.indexOf("\n");
-          index >= 0;
-          index = text.indexOf("\n", index + 1)
-        )
-          separators.set(fromB + index, current.lineEnding);
-      });
-      next = { ...current, separators };
+      next = { ...current, separators: mappedSeparators(transaction).separators };
     }
     for (const effect of transaction.effects) {
       if (effect.is(replaceSeparators)) next = effect.value;
@@ -181,13 +193,14 @@ const separatorMetadata = StateField.define<SeparatorMetadata>({
         const separators = new Map(next.separators);
         for (const record of effect.value) {
           const position =
-            transaction.changes.mapPos(record.anchor, -1) + record.offset;
+            transaction.changes.mapPos(record.anchor, record.affinity ?? -1) + record.offset;
           if (transaction.newDoc.sliceString(position, position + 1) === "\n")
             separators.set(position, record.value);
         }
         next = { ...next, separators };
       }
     }
+    if (next !== current) separateAdjacentNewlines(next.separators as Map<number, string>);
     return next;
   },
 });
@@ -206,6 +219,12 @@ function deletedSeparators(transaction: Transaction): SeparatorRecord[] {
         records.push({ anchor, offset: position - from, value });
     }
   });
+  for (const { position, value } of mappedSeparators(transaction).repairs) {
+    const previousPosition = transaction.changes.invertedDesc.mapPos(position, 1);
+    if (previous.separators.get(previousPosition) === value) {
+      records.push({ anchor: position, offset: 0, value, affinity: 1 });
+    }
+  }
   return records;
 }
 
@@ -229,6 +248,8 @@ function applySourceChanges(
   snapshot: SourceSnapshot,
   changes: ChangeSet,
   metadata: SeparatorMetadata,
+  nextDocument: Text,
+  restore = false,
 ): SourceSnapshot {
   const parts: string[] = [];
   let cursor = 0;
@@ -248,7 +269,11 @@ function applySourceChanges(
     cursor = rawTo;
   });
   parts.push(snapshot.value.slice(cursor));
-  return sourceSnapshot(parts.join(""));
+  const next = sourceSnapshot(parts.join(""));
+  if (!restore && next.normalized.length === nextDocument.length) return next;
+  return sourceSnapshot(nextDocument.toString().replace(/\n/g, (_newline, index: number) =>
+    metadata.separators.get(index) ?? metadata.lineEnding,
+  ));
 }
 
 const markdownHighlightStyle = HighlightStyle.define([
@@ -383,6 +408,8 @@ export const MarkdownSourceEditor = memo(
                   rawSource.current,
                   update.changes,
                   update.state.field(separatorMetadata),
+                  update.state.doc,
+                  update.transactions.some((transaction) => transaction.effects.some((effect) => effect.is(restoreSeparators))),
                 );
                 rawSource.current = next;
                 onChangeRef.current(next.value);
