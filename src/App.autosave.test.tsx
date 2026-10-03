@@ -28,6 +28,9 @@ type CanvasProps = {
 type SourceProps = {
   value: string;
   valueRevision: number;
+  assetSourcePath?: string;
+  assetSourceOperation?: 'rebase' | 'rename';
+  assetSourceTransition?: { oldPath: string; newPath: string; operation: 'rebase' | 'rename' };
   onChange: (value: string) => void;
 };
 
@@ -1618,6 +1621,28 @@ describe('App autosave cursor stability', () => {
     }
   });
 
+  it('publishes the Save As asset origin even after the sole image was deleted', async () => {
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    try {
+    const oldPath = '/tmp/original/research.md';
+    const newPath = '/tmp/copy/research.md';
+    const sourceMarkdown = '![Image](images/a.png)\nBody';
+    files.openRecent.mockResolvedValueOnce({ path: oldPath, name: 'research.md', sourceMarkdown, document: markdownToDocument(sourceMarkdown) });
+    files.saveEditorFile.mockImplementationOnce(async (candidate: EditorFile) => rebaseEditorFileAssets(candidate, oldPath, newPath));
+    await act(async () => { (await recentFileButton()).click(); await flushEffects(); });
+    await act(async () => { readingModeButton('source').click(); await vi.advanceTimersByTimeAsync(50); });
+    expect(harness.sourceProps?.assetSourcePath).toBe(oldPath);
+    await act(async () => { harness.sourceProps!.onChange('\nBody'); });
+    const revision = harness.sourceProps!.valueRevision;
+    await act(async () => { documentAction(getMessages().saveAs).click(); await flushEffects(); });
+    expect(harness.sourceProps?.value).toBe('\nBody');
+    expect(harness.sourceProps?.valueRevision).toBe(revision);
+    expect(harness.sourceProps?.assetSourcePath).toBe(newPath);
+    } finally {
+      confirm.mockRestore();
+    }
+  });
+
   it.each(['source', 'canvas'] as const)('rebases latest %s edits exactly once when Save As finishes in a new directory', async (mode) => {
     const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
     try {
@@ -2177,6 +2202,17 @@ describe('App autosave cursor stability', () => {
     }
   });
 
+  it('publishes a rename history context even when the current source has no image', async () => {
+    await act(async () => { readingModeButton('source').click(); await vi.advanceTimersByTimeAsync(50); });
+    await act(async () => { harness.sourceProps?.onChange('\nBody'); });
+    const revision = harness.sourceProps!.valueRevision;
+    await submitRename();
+    expect(harness.sourceProps?.value).toBe('\nBody');
+    expect(harness.sourceProps?.valueRevision).toBe(revision);
+    expect(harness.sourceProps?.assetSourcePath).toBe('/tmp/renamed.md');
+    expect(harness.sourceProps?.assetSourceOperation).toBe('rename');
+  });
+
   it('updates live Markdown image paths when a source document is renamed', async () => {
     await act(async () => {
       toggleReadingModeButton()?.click();
@@ -2375,11 +2411,16 @@ describe('App autosave cursor stability', () => {
     expect(files.saveEditorFile).toHaveBeenCalledWith(expect.objectContaining({ path: '/tmp/renamed.md', document: markdownToDocument(rewritten) }), false, rewritten);
   });
 
-  it.each([false, true])('adopts a surviving rename path and preserves late source typing (assets moved=%s)', async (assetsRenamed) => {
+  it.each([
+    { assetsRenamed: false, withImage: false },
+    { assetsRenamed: true, withImage: false },
+    { assetsRenamed: false, withImage: true },
+    { assetsRenamed: true, withImage: true },
+  ])('adopts a surviving rename path and preserves late source typing (assets moved=$assetsRenamed, image=$withImage)', async ({ assetsRenamed, withImage }) => {
     let rejectRename!: (error: Error) => void;
     files.renameEditorFile.mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectRename = reject; }));
     await act(async () => { readingModeButton('source').click(); await vi.advanceTimersByTimeAsync(50); });
-    const initial = '# Notes\r\n\r\n![Diagram](research.assets/diagram.png)\r\n';
+    const initial = withImage ? '# Notes\r\n\r\n![Diagram](research.assets/diagram.png)\r\n' : '# Notes\r\n';
     await act(async () => { harness.sourceProps?.onChange(initial); });
     await submitRename();
     const latest = initial + '\r\nLatest unfinished * source.\r\n';
@@ -2392,9 +2433,29 @@ describe('App autosave cursor stability', () => {
     expect(host.querySelector('.document-name')?.textContent).toContain('renamed.md');
     expect(host.querySelector('.status-message')?.textContent).toBe('Source write failed');
     expect(harness.sourceProps?.value).toBe(expected);
+    expect(harness.sourceProps?.assetSourcePath).toBe('/tmp/renamed.md');
+    expect(harness.sourceProps?.assetSourceOperation).toBe(assetsRenamed ? 'rename' : 'rebase');
     await act(async () => { await vi.advanceTimersByTimeAsync(100); await vi.advanceTimersByTimeAsync(1000); await flushEffects(); });
     expect(files.saveEditorFile).toHaveBeenCalledWith(expect.objectContaining({ path: '/tmp/renamed.md', sourceMarkdown: expected }), false, expected);
     expect(files.saveEditorFile.mock.calls.every(([candidate]) => candidate.path !== '/tmp/research.md')).toBe(true);
+  });
+
+  it('publishes a companion-asset transition when rollback restores the original filename', async () => {
+    let rejectRename!: (error: Error) => void;
+    files.renameEditorFile.mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectRename = reject; }));
+    await act(async () => { readingModeButton('source').click(); await vi.advanceTimersByTimeAsync(50); });
+    await act(async () => { harness.sourceProps?.onChange('\r\nBody'); });
+    const revision = harness.sourceProps!.valueRevision;
+    await submitRename();
+    await act(async () => {
+      rejectRename(new FileRenameRecoveryError(new Error('Asset rollback failed'), '/tmp/research.md', '/tmp/renamed.md', '/tmp/research.md', true));
+      await flushEffects();
+    });
+    expect(harness.sourceProps?.value).toBe('\r\nBody');
+    expect(harness.sourceProps?.valueRevision).toBe(revision);
+    expect(harness.sourceProps?.assetSourcePath).toBe('/tmp/research.md');
+    expect(harness.sourceProps?.assetSourceTransition).toEqual({ oldPath: '/tmp/research.md', newPath: '/tmp/renamed.md', operation: 'rename' });
+    expect(host.querySelector('.status-message')?.textContent).toBe('Asset rollback failed');
   });
 
   it('flushes late canvas typing when rename rollback cannot restore the original path', async () => {

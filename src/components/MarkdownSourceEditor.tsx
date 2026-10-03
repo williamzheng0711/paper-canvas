@@ -44,7 +44,12 @@ import {
   type SwitchableEditorHandle,
 } from "../editor/search";
 import { getMessages, type Language } from "../i18n";
-import type { MarkdownSourceChanges } from "../editor/markdownAssetReferences";
+import {
+  imagePathSourceChanges,
+  rebaseMarkdownImageAssets,
+  renameMarkdownImageAssets,
+  type MarkdownSourceChanges,
+} from "../editor/markdownAssetReferences";
 import { boundedSourceSyntax } from "../editor/sourceSyntax";
 
 type Props = {
@@ -52,9 +57,15 @@ type Props = {
   value: string;
   valueRevision: number;
   externalChanges?: MarkdownSourceChanges;
+  assetSourcePath?: string;
+  assetSourceOperation?: "rebase" | "rename";
+  assetSourceTransition?: { oldPath: string; newPath: string; operation: "rebase" | "rename" };
+  onError?: (message: string) => void;
   onChange: (value: string) => void;
   onReady?: () => void;
 };
+
+const restoreImageOrigin = StateEffect.define<{ path: string; revision: number }>();
 
 type SourceSnapshot = {
   value: string;
@@ -338,6 +349,9 @@ function sameSourceProps(previous: Props, next: Props): boolean {
   return (
     previous.language === next.language &&
     previous.valueRevision === next.valueRevision &&
+    previous.assetSourcePath === next.assetSourcePath &&
+    previous.assetSourceOperation === next.assetSourceOperation &&
+    previous.assetSourceTransition === next.assetSourceTransition &&
     previous.onReady === next.onReady
   );
 }
@@ -345,7 +359,7 @@ function sameSourceProps(previous: Props, next: Props): boolean {
 /** A controlled CodeMirror surface for editable, syntax-coloured Markdown. */
 export const MarkdownSourceEditor = memo(
   forwardRef<SwitchableEditorHandle, Props>(function MarkdownSourceEditor(
-    { language, value, valueRevision, externalChanges, onChange, onReady },
+    { language, value, valueRevision, externalChanges, assetSourcePath, assetSourceOperation = "rebase", assetSourceTransition, onError, onChange, onReady },
     ref,
   ) {
     const host = useRef<HTMLDivElement>(null);
@@ -363,6 +377,10 @@ export const MarkdownSourceEditor = memo(
     const rawSource = useRef<SourceSnapshot>(sourceSnapshot(value));
     const onChangeRef = useRef(onChange);
     const onReadyRef = useRef(onReady);
+    const onErrorRef = useRef(onError);
+    const assetSourcePathRef = useRef(assetSourcePath);
+    const assetTransitions = useRef<Array<{ oldPath: string; newPath: string; operation: "rebase" | "rename" }>>([]);
+    const appliedAssetTransition = useRef<typeof assetSourceTransition>(undefined);
     const applyingExternalValue = useRef(false);
     const currentSearch = useRef<{
       query: string;
@@ -372,6 +390,7 @@ export const MarkdownSourceEditor = memo(
     }>({ query: "", active: -1 });
     onChangeRef.current = onChange;
     onReadyRef.current = onReady;
+    onErrorRef.current = onError;
 
     useLayoutEffect(() => {
       if (!host.current) return;
@@ -385,6 +404,8 @@ export const MarkdownSourceEditor = memo(
             history(),
             separatorMetadata.init(() => sourceSeparators(snapshot)),
             separatorHistory,
+            invertedEffects.of((transaction) => transaction.docChanged && assetSourcePathRef.current
+              ? [restoreImageOrigin.of({ path: assetSourcePathRef.current, revision: assetTransitions.current.length })] : []),
             bracketMatching(),
             highlightActiveLine(),
             keymap.of([...defaultKeymap, ...historyKeymap, indentWithTab]),
@@ -421,6 +442,52 @@ export const MarkdownSourceEditor = memo(
       const editor = new EditorView({
         state: createSourceState.current(rawSource.current),
         parent: host.current,
+        dispatchTransactions(transactions, target) {
+          const updates: Transaction[] = [];
+          try {
+            for (const transaction of transactions) {
+              updates.push(transaction);
+              const origin = transaction.effects.find((effect) => effect.is(restoreImageOrigin))?.value;
+              const destination = assetSourcePathRef.current;
+              if (!origin || !destination || origin.revision === assetTransitions.current.length || !transaction.docChanged) continue;
+              const restored: Array<{ from: number; to: number }> = [];
+              transaction.changes.iterChanges((_from, _to, from, to) => {
+                if (to > from) restored.push({ from, to });
+              });
+              let rewritten = transaction;
+              for (const transition of assetTransitions.current.slice(origin.revision)) {
+                const source = rewritten.newDoc.toString();
+                const rebased = transition.operation === "rename"
+                  ? renameMarkdownImageAssets(source, transition.oldPath, transition.newPath)
+                  : rebaseMarkdownImageAssets(source, transition.oldPath, transition.newPath);
+                const imageChanges = imagePathSourceChanges(source, rebased, transition.oldPath, transition.newPath, transition.operation)?.changes ?? [];
+                const changes = imageChanges.filter((change) => restored.some((range) =>
+                  change.from >= range.from && change.to <= range.to));
+                if (!changes.length) continue;
+                const repair = ChangeSet.of(changes.map(({ from, to, value: insert }) => ({ from, to, insert })), source.length);
+                for (const range of restored) {
+                  range.from = repair.mapPos(range.from, -1);
+                  range.to = repair.mapPos(range.to, 1);
+                }
+                // Compose the rewrite into the original history transaction.
+                // A separate non-history insertion would fall outside the redo
+                // deletion's boundary and leave part of the URL behind.
+                rewritten = transaction.startState.update(rewritten, {
+                  changes: repair,
+                  sequential: true,
+                  filter: false,
+                });
+              }
+              updates[updates.length - 1] = rewritten;
+            }
+          } catch (error) {
+            // A failed path rewrite must leave both the document and history
+            // untouched, so the user can retry without losing the undo step.
+            onErrorRef.current?.(error instanceof Error ? error.message : String(error));
+            return;
+          }
+          target.update(updates);
+        },
       });
       view.current = editor;
       queueMicrotask(() => {
@@ -431,6 +498,19 @@ export const MarkdownSourceEditor = memo(
         editor.destroy();
       };
     }, [contentAttributes]);
+
+    useLayoutEffect(() => {
+      const previous = assetSourcePathRef.current;
+      const explicitTransition = assetSourceTransition && assetSourceTransition !== appliedAssetTransition.current;
+      appliedAssetTransition.current = assetSourceTransition;
+      if (previous === assetSourcePath && !explicitTransition) return;
+      // Companion-folder rollback can fail even after the Markdown file was
+      // restored to its original path. Its asset transition is independent.
+      if (explicitTransition) assetTransitions.current.push({ ...assetSourceTransition });
+      else if (previous && assetSourcePath) assetTransitions.current.push({ oldPath: previous, newPath: assetSourcePath, operation: assetSourceOperation });
+      assetSourcePathRef.current = assetSourcePath;
+      view.current?.dispatch({ annotations: [isolateHistory.of("full"), Transaction.addToHistory.of(false)] });
+    }, [assetSourcePath, assetSourceOperation, assetSourceTransition]);
 
     useEffect(() => {
       view.current?.dispatch({

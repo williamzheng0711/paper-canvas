@@ -31,6 +31,7 @@ import {
 import {
   imagePathSourceChanges,
   rebaseMarkdownImageAssets,
+  renameMarkdownImageAssets,
 } from "../editor/markdownAssetReferences";
 
 describe("MarkdownSourceEditor search", () => {
@@ -69,6 +70,127 @@ describe("MarkdownSourceEditor search", () => {
   afterEach(async () => {
     await act(async () => root.unmount());
     host.remove();
+  });
+
+  it.each(["\n", "\r\n", "\r\n\r"])("rebases deleted image history after Save As with %j separators", async (ending) => {
+    const oldPath = "/notes/research.md";
+    const newPath = "/exports/copy.md";
+    const removed = "![Deleted](images/a.png)";
+    const initial = `${removed}${ending}![Kept](images/b.png)${ending}Body`;
+    let value = initial;
+    const onChange = (next: string) => { value = next; };
+    await act(async () => root.render(<MarkdownSourceEditor language="en" value={initial} valueRevision={0} assetSourcePath={oldPath} onChange={onChange} />));
+    const editor = EditorView.findFromDOM(host.querySelector(".cm-editor")!)!;
+    editor.dispatch({ changes: { from: 0, to: removed.length }, annotations: isolateHistory.of("full") });
+    const deleted = value;
+    const saved = rebaseMarkdownImageAssets(deleted, oldPath, newPath);
+    await act(async () => root.render(<MarkdownSourceEditor language="en" value={saved} valueRevision={1} assetSourcePath={newPath} externalChanges={imagePathSourceChanges(deleted, saved, oldPath, newPath)} onChange={onChange} />));
+    expect(undo(editor)).toBe(true);
+    expect(value).toBe(rebaseMarkdownImageAssets(initial, oldPath, newPath));
+    expect(value).not.toContain("../../notes");
+    expect(redo(editor)).toBe(true);
+    expect(value).toBe(saved);
+    expect(undo(editor)).toBe(true);
+    expect(value).toBe(rebaseMarkdownImageAssets(initial, oldPath, newPath));
+    expect(redo(editor)).toBe(true);
+    editor.dispatch({ changes: { from: editor.state.doc.length, insert: " after" }, annotations: isolateHistory.of("full") });
+    expect(value).toBe(saved + " after");
+    expect(undo(editor)).toBe(true);
+    expect(value).toBe(saved);
+    expect(redo(editor)).toBe(true);
+    expect(value).toBe(saved + " after");
+  });
+
+  it("keeps deleted image undo when Save As changes only its asset origin", async () => {
+    const initial = "![Image](images/a.png)\nBody";
+    let value = initial;
+    const onChange = vi.fn((next: string) => { value = next; });
+    await act(async () => root.render(<MarkdownSourceEditor language="en" value={initial} valueRevision={0} assetSourcePath="/notes/research.md" onChange={onChange} />));
+    const editor = EditorView.findFromDOM(host.querySelector(".cm-editor")!)!;
+    editor.dispatch({ changes: { from: 0, to: initial.indexOf("\n") } });
+    await act(async () => root.render(<MarkdownSourceEditor language="en" value={value} valueRevision={0} assetSourcePath="/exports/copy.md" onChange={onChange} />));
+    onChange.mockClear();
+    expect(undo(editor)).toBe(true);
+    expect(value).toBe("![Image](../notes/images/a.png)\nBody");
+    expect(onChange).toHaveBeenCalledTimes(1);
+    expect(redo(editor)).toBe(true);
+    expect(value).toBe("\nBody");
+  });
+
+  it("retains document and undo when restoring an image exceeds the path rewrite budget", async () => {
+    const image = "![Image](images/a.png)";
+    const initial = image + "\n" + "x".repeat(250_000);
+    let value = initial;
+    const onError = vi.fn();
+    const onChange = (next: string) => { value = next; };
+    await act(async () => root.render(<MarkdownSourceEditor language="en" value={initial} valueRevision={0} assetSourcePath="/notes/research.md" onError={onError} onChange={onChange} />));
+    const editor = EditorView.findFromDOM(host.querySelector(".cm-editor")!)!;
+    editor.dispatch({ changes: { from: 0, to: image.length } });
+    const deleted = value;
+    await act(async () => root.render(<MarkdownSourceEditor language="en" value={deleted} valueRevision={0} assetSourcePath="/exports/copy.md" onError={onError} onChange={onChange} />));
+    expect(undo(editor)).toBe(true);
+    expect(value).toBe(deleted);
+    expect(editor.state.doc.toString()).toBe(deleted);
+    expect(undoDepth(editor.state)).toBe(1);
+    expect(onError).toHaveBeenCalledOnce();
+  });
+
+  it("keeps old and new image origins in separate history groups around Save As", async () => {
+    const oldImage = "![Old](images/old.png)";
+    let value = oldImage + "\nBody";
+    const onChange = (next: string) => { value = next; };
+    await act(async () => root.render(<MarkdownSourceEditor language="en" value={value} valueRevision={0} assetSourcePath="/notes/research.md" onChange={onChange} />));
+    const editor = EditorView.findFromDOM(host.querySelector(".cm-editor")!)!;
+    editor.dispatch({ changes: { from: 0, to: oldImage.length }, userEvent: "delete" });
+    await act(async () => root.render(<MarkdownSourceEditor language="en" value={value} valueRevision={0} assetSourcePath="/exports/copy.md" onChange={onChange} />));
+    editor.dispatch({ changes: { from: 0, insert: "![New](images/new.png)" }, userEvent: "input.type" });
+    expect(undo(editor)).toBe(true);
+    expect(value).toBe("\nBody");
+    expect(undo(editor)).toBe(true);
+    expect(value).toBe("![Old](../notes/images/old.png)\nBody");
+    expect(redo(editor)).toBe(true);
+    expect(redo(editor)).toBe(true);
+    expect(value).toBe("![New](images/new.png)\nBody");
+  });
+
+  it("maps a deleted image through rename and successive Save As transitions", async () => {
+    const initial = "![Image](./research.assets/a.svg)\r\nBody";
+    let value = initial;
+    const onChange = (next: string) => { value = next; };
+    const render = (path: string, operation: "rebase" | "rename" = "rebase") => root.render(<MarkdownSourceEditor language="en" value={value} valueRevision={0} assetSourcePath={path} assetSourceOperation={operation} onChange={onChange} />);
+    await act(async () => render("/notes/research.md"));
+    const editor = EditorView.findFromDOM(host.querySelector(".cm-editor")!)!;
+    editor.dispatch({ changes: { from: 0, to: initial.indexOf("\r") } });
+    await act(async () => render("/notes/renamed.md", "rename"));
+    await act(async () => render("/exports/copy.md"));
+    await act(async () => render("/archive/final.md"));
+    const expected = rebaseMarkdownImageAssets(rebaseMarkdownImageAssets(renameMarkdownImageAssets(initial, "/notes/research.md", "/notes/renamed.md"), "/notes/renamed.md", "/exports/copy.md"), "/exports/copy.md", "/archive/final.md");
+    expect(undo(editor)).toBe(true);
+    expect(value).toBe(expected);
+    expect(redo(editor)).toBe(true);
+    expect(value).toBe("\r\nBody");
+    expect(undo(editor)).toBe(true);
+    expect(value).toBe(expected);
+  });
+
+  it.each(["/notes/research.md", "/notes/renamed.md"])("restores moved companion assets when rename recovery leaves %s", async (survivingPath) => {
+    const initial = "![Image](research.assets/a.svg)\r\nBody";
+    let value = initial;
+    const onChange = (next: string) => { value = next; };
+    await act(async () => root.render(<MarkdownSourceEditor language="en" value={value} valueRevision={0} assetSourcePath="/notes/research.md" onChange={onChange} />));
+    const editor = EditorView.findFromDOM(host.querySelector(".cm-editor")!)!;
+    editor.dispatch({ changes: { from: 0, to: initial.indexOf("\r") } });
+    const transition = { oldPath: "/notes/research.md", newPath: "/notes/renamed.md", operation: "rename" as const };
+    const renderRecovery = () => root.render(<MarkdownSourceEditor language="en" value={value} valueRevision={0} assetSourcePath={survivingPath} assetSourceOperation="rename" assetSourceTransition={transition} onChange={onChange} />);
+    await act(async () => renderRecovery());
+    await act(async () => renderRecovery());
+    expect(undo(editor)).toBe(true);
+    expect(value).toBe("![Image](renamed.assets/a.svg)\r\nBody");
+    expect(redo(editor)).toBe(true);
+    expect(value).toBe("\r\nBody");
+    await act(async () => root.render(<MarkdownSourceEditor language="en" value={value} valueRevision={0} assetSourcePath={survivingPath} onChange={onChange} />));
+    expect(undo(editor)).toBe(true);
+    expect(value).toBe("![Image](renamed.assets/a.svg)\r\nBody");
   });
 
   it.each(["A\r \nB", "First\nA\r \nB", "First\r\nA\r \nB"])(

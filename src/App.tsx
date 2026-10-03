@@ -180,6 +180,8 @@ export default function App() {
   const [renameRequest, setRenameRequest] = useState<{ name: string; session: number } | null>(null);
   const [rawMarkdownRevision, setRawMarkdownRevision] = useState(0);
   const rawMarkdownChangesRef = useRef<ReturnType<typeof imagePathSourceChanges>>(undefined);
+  const sourceAssetOperationRef = useRef<'rebase' | 'rename'>('rebase');
+  const sourceAssetTransitionRef = useRef<{ oldPath: string; newPath: string; operation: 'rename' }>(undefined);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResult, setSearchResult] = useState<SearchResult>({
@@ -772,6 +774,8 @@ export default function App() {
               if (!documentsEqual(liveFile.document, latest.document)) setDocumentId((id) => id + 1);
             }
             latest.diskSourceMarkdown = saved.diskSourceMarkdown;
+            sourceAssetOperationRef.current = 'rebase';
+            sourceAssetTransitionRef.current = undefined;
             fileRef.current = latest;
             setFile(latest);
             setSaveStatus('saving');
@@ -783,6 +787,8 @@ export default function App() {
           // not only against the parsed save candidate, so it is refreshed before
           // the next mode switch.
           const canvasDocumentChanged = !documentsEqual(fileRef.current.document, saved.document);
+          sourceAssetOperationRef.current = 'rebase';
+          sourceAssetTransitionRef.current = undefined;
           fileRef.current = saved;
           setFile(saved);
           if (canvasDocumentChanged) {
@@ -1127,6 +1133,8 @@ export default function App() {
             ? { oldPath: currentFile.path, newPath: renamed.path, operation: 'rename' }
             : undefined);
         }
+        sourceAssetOperationRef.current = 'rename';
+        sourceAssetTransitionRef.current = undefined;
         fileRef.current = nextFile;
         setFile(nextFile);
         if (documentChanged) setDocumentId((id) => id + 1);
@@ -1145,6 +1153,10 @@ export default function App() {
             ? { ...liveFile, ...documentStateFromMarkdown(rawMarkdownRef.current, fileAssetSourcePath(liveFile)), sourceMarkdown: rawMarkdownRef.current }
             : liveFile;
           const recovered = error.recover(latest);
+          sourceAssetOperationRef.current = error.assetsRenamed ? 'rename' : 'rebase';
+          sourceAssetTransitionRef.current = error.assetsRenamed
+            ? { oldPath: error.originalPath, newPath: error.targetPath, operation: 'rename' }
+            : undefined;
           if (sourceModeRef.current && recovered.sourceMarkdown !== rawMarkdownRef.current) {
             setExternalRawMarkdown(recovered.sourceMarkdown!, error.assetsRenamed
               ? { oldPath: error.originalPath, newPath: error.targetPath, operation: 'rename' }
@@ -2038,6 +2050,10 @@ export default function App() {
                 value={rawMarkdownRef.current}
                 valueRevision={rawMarkdownRevision}
                 externalChanges={rawMarkdownChangesRef.current}
+                assetSourcePath={fileAssetSourcePath(file)}
+                assetSourceOperation={sourceAssetOperationRef.current}
+                assetSourceTransition={sourceAssetTransitionRef.current}
+                onError={setMessage}
                 onReady={sourceReady}
                 onChange={(value) => {
                   rawMarkdownRef.current = value;
