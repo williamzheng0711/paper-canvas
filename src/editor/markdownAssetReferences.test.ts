@@ -80,6 +80,16 @@ describe("POSIX filenames containing literal backslashes", () => {
 });
 
 describe("renaming local image destinations without rewriting document content", () => {
+  it("rebases actual images after dense missing or nested TeX openings without quadratic searches", () => {
+    for (const closing of ["", "\\)"]) {
+      const literal = "\\(".repeat(40_000) + closing + "\r\n\r\n";
+      const source = literal + "![actual](research.assets/image.png)\r\n";
+      const started = performance.now();
+      expect(rebaseMarkdownImageAssets(source, oldPath, "/copies/copy.md")).toBe(source.replace("research.assets/image.png", "../notes/research.assets/image.png"));
+      expect(performance.now() - started).toBeLessThan(2000);
+    }
+  });
+
   it.each([
     ["/notes/research.md", "research&#46assets/image.png"],
     ["/notes/research&.md", "research&amp.assets/image.png"],

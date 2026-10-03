@@ -202,6 +202,8 @@ function normalizeInlineLatexDelimiters(
   let cursor = 0;
   let dollarDelimiter: "$" | "$$" | null = null;
   let rangeIndex = 0;
+  // Each closing delimiter is searched once, including a final missing close.
+  let nextLatexClosing: number | undefined;
 
   while (cursor < line.length) {
     const literal = literalRanges[rangeIndex];
@@ -226,10 +228,13 @@ function normalizeInlineLatexDelimiters(
       line.startsWith("\\(", cursor) &&
       !isEscaped(line, cursor)
     ) {
-      let closing = line.indexOf("\\)", cursor + 2);
-      while (closing !== -1 && isEscaped(line, closing)) {
-        closing = line.indexOf("\\)", closing + 2);
+      if (nextLatexClosing === undefined || (nextLatexClosing >= 0 && nextLatexClosing < cursor + 2)) {
+        nextLatexClosing = line.indexOf("\\)", cursor + 2);
+        while (nextLatexClosing !== -1 && isEscaped(line, nextLatexClosing)) {
+          nextLatexClosing = line.indexOf("\\)", nextLatexClosing + 2);
+        }
       }
+      const closing = nextLatexClosing;
       if (closing !== -1) {
         result += `$${line.slice(cursor + 2, closing)}$`;
         cursor = closing + 2;
@@ -261,6 +266,7 @@ export function normalizeLatexDelimiters(markdown: string): string {
   }
   if (hasExtremeNesting(literalRoot)) return markdown;
   groupInlineHtml(literalRoot, markdown);
+  if (hasExtremeNesting(literalRoot)) return markdown;
   const literalRanges: SourceRange[] = [];
   const collectLiteralRanges = (node: MdNode) => {
     if (["code", "inlineCode", "html"].includes(node.type)) {
@@ -599,6 +605,30 @@ function groupInlineHtml(
     ].includes(node.type)
   )
     return;
+  const pairedTags = new Map<number, number>();
+  const openTags = new Map<string, number[]>();
+  for (let index = 0; index < node.children.length; index += 1) {
+    const child = node.children[index];
+    const match = child.type === "html"
+      ? /^<(\/)?([A-Za-z][A-Za-z0-9-]*)\b(?:[^"'<>]|"[^"]*"|'[^']*')*>$/.exec(child.value ?? "")
+      : null;
+    if (!match || /^(?:br|hr|img|col)$/i.test(match[2])) continue;
+    const tag = match[2].toLowerCase();
+    const stack = openTags.get(tag) ?? [];
+    if (match[1]) {
+      const opening = stack.pop();
+      if (opening !== undefined) pairedTags.set(opening, index);
+    } else {
+      stack.push(index);
+      // Underline grouping creates recursive editor marks from a flat HTML
+      // token stream, which the parser's original AST depth check cannot see.
+      if (tag === "u" && stack.length > 256) {
+        if (safety) safety.preserve = true;
+        return;
+      }
+    }
+    openTags.set(tag, stack);
+  }
   const children: MdNode[] = [];
   for (let index = 0; index < node.children.length; index += 1) {
     const child = node.children[index];
@@ -617,22 +647,10 @@ function groupInlineHtml(
       continue;
     }
     const tag = opening[1].toLowerCase();
-    let depth = 1;
-    let closingIndex = index + 1;
-    for (; closingIndex < node.children.length; closingIndex += 1) {
-      const next = node.children[closingIndex];
-      if (next.type !== "html") continue;
-      const match =
-        /^<(\/)?([A-Za-z][A-Za-z0-9-]*)\b(?:[^"'<>]|"[^"]*"|'[^']*')*>$/.exec(
-          next.value ?? "",
-        );
-      if (match?.[2].toLowerCase() !== tag) continue;
-      depth += match[1] ? -1 : 1;
-      if (depth === 0) break;
-    }
+    const closingIndex = pairedTags.get(index);
     const start = child.position?.start.offset;
-    const end = node.children[closingIndex]?.position?.end.offset;
-    if (depth === 0 && start !== undefined && end !== undefined) {
+    const end = closingIndex === undefined ? undefined : node.children[closingIndex]?.position?.end.offset;
+    if (closingIndex !== undefined && start !== undefined && end !== undefined) {
       if (
         tag === "u" &&
         /^<u\s*>$/i.test(child.value ?? "") &&
@@ -1195,7 +1213,7 @@ export function markdownToDocument(markdown: string): JSONContent {
   if (hasExtremeNesting(root)) return preservedSourceDocument(source);
   const safety = { preserve: false };
   groupInlineHtml(root, normalized, [], safety);
-  if (safety.preserve) return preservedSourceDocument(source);
+  if (safety.preserve || hasExtremeNesting(root)) return preservedSourceDocument(source);
   resolveReferences(root, normalized);
   const converted = content(root.children);
   const document: JSONContent = {

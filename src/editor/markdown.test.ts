@@ -19,6 +19,30 @@ function nodesOfType(document: JSONContent, type: string): JSONContent[] {
 }
 
 describe("PaperCanvas Markdown subset", () => {
+  it("normalizes a long line of unfinished TeX openings without repeatedly searching its remaining suffix", () => {
+    const source = "\\(".repeat(80_000);
+    const started = performance.now();
+    expect(normalizeLatexDelimiters(source)).toBe(source);
+    expect(performance.now() - started).toBeLessThan(1500);
+  });
+
+  it("pairs a long run of unfinished inline HTML tags without rescanning every following tag", () => {
+    const source = "Before " + "<kbd>".repeat(10_000);
+    const started = performance.now();
+    const document = markdownToDocument(source);
+    expect(nodesOfType(document, "inlineHtmlPreview")).toHaveLength(10_000);
+    expect(documentToMarkdown(document)).toContain(source);
+    expect(performance.now() - started).toBeLessThan(1500);
+  });
+
+  it.each([0, 240])("preserves source when semantic underline grouping creates extreme nesting inside %i quote levels", (quotes) => {
+    const levels = quotes ? 30 : 2000;
+    const source = "> ".repeat(quotes) + "Before " + "<u>".repeat(levels) + "x 🧪" + "</u>".repeat(levels);
+    const document = markdownToDocument(source);
+    expect(nodesOfType(document, "unsupportedMarkdown")[0].attrs?.source).toBe(source);
+    expect(documentToMarkdown(document)).toBe(source);
+  });
+
   it.each(["\n", "\r\n", "\r"])(
     "imports Typora display formulas consistently with %j line endings",
     (ending) => {

@@ -516,18 +516,32 @@ function maskTyporaMath(source: string): string {
     while (index > 0 && scan[--index] === "\\") slashes += 1;
     return slashes % 2 === 1;
   };
+  let inlineEnd = 0;
+  let lineEnd: number | undefined;
+  let nextClosing: number | undefined;
   for (const match of scan.matchAll(/\\\(/g)) {
+    if (match.index < inlineEnd) continue;
     if (escaped(match.index)) continue;
-    const lineEnd = scan.indexOf("\n", match.index);
-    let closing = scan.indexOf("\\)", match.index + 2);
-    while (closing >= 0 && escaped(closing))
-      closing = scan.indexOf("\\)", closing + 2);
-    if (closing < 0 || (lineEnd >= 0 && closing > lineEnd)) continue;
+    if (lineEnd === undefined || (lineEnd >= 0 && lineEnd < match.index)) {
+      const nextCr = scan.indexOf("\r", match.index);
+      const nextLf = scan.indexOf("\n", match.index);
+      lineEnd = nextCr < 0 ? nextLf : nextLf < 0 ? nextCr : Math.min(nextCr, nextLf);
+    }
+    if (nextClosing === undefined || (nextClosing >= 0 && nextClosing < match.index + 2)) {
+      nextClosing = scan.indexOf("\\)", match.index + 2);
+      while (nextClosing >= 0 && escaped(nextClosing))
+        nextClosing = scan.indexOf("\\)", nextClosing + 2);
+    }
+    const closing = nextClosing;
+    if (closing < 0) break;
+    if (lineEnd >= 0 && closing > lineEnd) continue;
     const normalized = normalizeLatexDelimiters(
       scan.slice(match.index, closing + 2),
     );
-    if (normalized.startsWith("$") && normalized.endsWith("$"))
+    if (normalized.startsWith("$") && normalized.endsWith("$")) {
       blank(match.index, closing + 2);
+      inlineEnd = closing + 2;
+    }
   }
   for (const match of scan.matchAll(
     /^[^\S\r\n]*\\\[[\s\S]*?\\\][^\S\r\n]*$/gm,
