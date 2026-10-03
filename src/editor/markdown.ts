@@ -303,13 +303,25 @@ export function normalizeLatexDelimiters(markdown: string): string {
   const collectLiteralRanges = (node: MdNode) => {
     const start = node.position?.start.offset;
     const end = node.position?.end.offset;
-    if (["code", "inlineCode", "html", "image", "definition"].includes(node.type)) {
+    if (["code", "inlineCode", "html", "image"].includes(node.type)) {
       if (start !== undefined && end !== undefined)
         literalRanges.push({
           start,
           end,
-          phrasingOnly: node.type === "image" || node.type === "definition",
+          phrasingOnly: node.type === "image",
         });
+      return;
+    }
+    if (node.type === "definition" && start !== undefined && end !== undefined) {
+      // Matching reference labels must retain the same normalization. Only
+      // the suffix after their unescaped closing bracket is a literal URL.
+      let labelEnd = start + 1;
+      while (labelEnd < end) {
+        if (markdown[labelEnd] === "\\") labelEnd += 2;
+        else if (markdown[labelEnd] === "]") break;
+        else labelEnd += 1;
+      }
+      literalRanges.push({ start: labelEnd, end, phrasingOnly: true });
       return;
     }
     if (node.type === "link" && start !== undefined && end !== undefined) {

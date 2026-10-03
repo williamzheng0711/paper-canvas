@@ -288,6 +288,22 @@ describe("PaperCanvas Markdown subset", () => {
   });
 
   it.each([
+    "[Math \\(x\\)]\n\n[Math \\(x\\)]: notes\\(draft\\).md",
+    "[Math \\(x\\)][]\n\n[Math \\(x\\)]: notes\\(draft\\).md",
+    "[Math \\(x\\)][\\(ref\\)]\n\n[\\(ref\\)]: notes\\(draft\\).md",
+    "[Math \\(x\\)][ref\\]\\(key\\)]\n\n[ref\\]\\(key\\)]: notes\\(draft\\).md",
+  ])("keeps math-looking reference labels matched while preserving their literal destination: %s", (source) => {
+    const document = markdownToDocument(source);
+    expect(nodesOfType(document, "inlineFormula")).toEqual([{
+      type: "inlineFormula",
+      attrs: { latex: "x" },
+      marks: [{ type: "link", attrs: { href: "notes(draft).md" } }],
+    }]);
+    expect(nodesOfType(document, "unsupportedMarkdown")).toHaveLength(0);
+    expect(markdownToDocument(documentToMarkdown(document))).toEqual(document);
+  });
+
+  it.each([
     "\\[\\text{![literal](notes\\(draft\\).png)}\\]",
     "\\begin{align}\\text{[literal](notes\\(draft\\).md)}\\end{align}",
   ])("keeps link-looking source literal inside a complete Typora display formula: %s", (source) => {
