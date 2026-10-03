@@ -27,6 +27,7 @@ import { canvasNodesAndMarks } from '../editor/canvasSchema';
 import { CanvasCapacity } from '../editor/canvasCapacity';
 import { replaceDocumentPreservingSelection } from '../editor/documentSync';
 import { documentToMarkdown } from '../editor/markdown';
+import { decodePaperImages } from '../editor/PaperImage';
 import { insertPastedFormula, insertPastedMarkdown, sanitizePastedHtml } from '../editor/paste';
 import { activateDocumentLink, documentLinkTarget } from '../editor/linkNavigation';
 import { scrollToOutlineHeading } from '../editor/outline';
@@ -801,7 +802,7 @@ export const CanvasEditor = memo(
         })();
       },
       isFocused: () => editor ? editor.view.hasFocus() || Boolean(focusedFormulaSelection(editor.view)) : false,
-      requestMeasure: () => undefined,
+      requestMeasure: () => { if (editor) decodePaperImages(editor.view.dom); },
     }),
     [editor, flushCommentMapping],
   );

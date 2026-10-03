@@ -21,6 +21,13 @@ function clipboardOriginalSource(element: HTMLElement): string | null {
     : null;
 }
 
+const imageDecoders = new WeakMap<HTMLImageElement, () => void>();
+
+/** Refresh cached image pixels when a retained canvas becomes visible again. */
+export function decodePaperImages(root: ParentNode): void {
+  root.querySelectorAll<HTMLImageElement>("img").forEach((image) => imageDecoders.get(image)?.());
+}
+
 export const PaperImage = Image.extend<PaperImageOptions>({
   addOptions() {
     return {
@@ -153,6 +160,8 @@ export const PaperImage = Image.extend<PaperImageOptions>({
       if (!image) return nodeView;
       let currentNode = props.node;
       let previousSource = image.getAttribute("src");
+      let destroyed = false;
+      let decodeGeneration = 0;
       const originalDisplay = image.style.display;
       const fallback = document.createElement("span");
       fallback.className = "image-load-fallback";
@@ -188,12 +197,26 @@ export const PaperImage = Image.extend<PaperImageOptions>({
         fallback.style.display = "block";
         reveal();
       };
+      const decodeImage = () => {
+        if (typeof image.decode !== "function" || destroyed) return;
+        const generation = ++decodeGeneration;
+        const source = image.getAttribute("src");
+        try {
+          // Some cached SVGs load while the canvas is hidden but remain blank
+          // until decoded. This refresh is deliberately independent of saves.
+          void image.decode().then(() => {
+            if (!destroyed && generation === decodeGeneration && source === image.getAttribute("src") && image.naturalWidth > 0) showImage();
+          }, () => undefined);
+        } catch { /* Load/error events still handle unsupported decoders. */ }
+      };
+      imageDecoders.set(image, decodeImage);
       image.addEventListener("error", showFallback);
       image.addEventListener("load", showImage);
       if (image.complete) {
         if (image.naturalWidth > 0) showImage();
         else showFallback();
       }
+      decodeImage();
       const update = nodeView.update?.bind(nodeView);
       if (update) {
         nodeView.update = (node, decorations, innerDecorations) => {
@@ -205,12 +228,16 @@ export const PaperImage = Image.extend<PaperImageOptions>({
             previousSource = source;
             showImage();
             if (image.complete && image.naturalWidth === 0) showFallback();
+            decodeImage();
           } else if (fallback.style.display !== "none") syncFallback();
           return true;
         };
       }
       const destroy = nodeView.destroy?.bind(nodeView);
       nodeView.destroy = () => {
+        destroyed = true;
+        decodeGeneration += 1;
+        imageDecoders.delete(image);
         image.removeEventListener("error", showFallback);
         image.removeEventListener("load", showImage);
         destroy?.();
