@@ -91,9 +91,13 @@ export function completeTypedTable(state: EditorState): Transaction | null {
       : [
           schema.nodes.tableRow.create(
             null,
-            parsed[index].map((cell) =>
+            parsed[index].map((cell, column) =>
               schema.nodes[index === 0 ? "tableHeader" : "tableCell"].create(
-                null,
+                {
+                  textAlign: parsed[1][column].text.startsWith(":")
+                    ? parsed[1][column].text.endsWith(":") ? "center" : "left"
+                    : parsed[1][column].text.endsWith(":") ? "right" : null,
+                },
                 cellContent(node, cell.from, cell.to, schema),
               ),
             ),

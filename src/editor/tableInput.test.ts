@@ -9,6 +9,7 @@ import {
 import { afterEach, expect, it } from "vitest";
 import { MarkdownTyping } from "./markdownTyping";
 import { InlineFormula } from "./Formula";
+import { PaperTableCell, PaperTableHeader } from "./PaperTable";
 const editors: Editor[] = [];
 afterEach(() => editors.splice(0).forEach((e) => e.destroy()));
 it("turns completed pipe rows into a table on a blank line without losing inline content", () => {
@@ -99,6 +100,35 @@ it("decodes escaped cell pipes without losing formatting", () => {
     editor.state.doc.firstChild?.lastChild?.firstChild?.firstChild?.firstChild;
   expect(text?.text).toBe("a|b");
   expect(text?.marks[0].type.name).toBe("bold");
+});
+
+it("retains typed table column alignment through conversion and history", () => {
+  const editor = new Editor({
+    extensions: [
+      StarterKit,
+      Table,
+      TableRow,
+      PaperTableHeader,
+      PaperTableCell,
+      MarkdownTyping,
+    ],
+    content:
+      "<p>| Left | Center | Right | Plain |</p><p>| :--- | :---: | ---: | --- |</p><p>| a | b | c | d |</p><p></p>",
+  });
+  editors.push(editor);
+  const before = editor.getJSON();
+  editor.commands.setTextSelection(editor.state.doc.content.size - 1);
+  editor.commands.keyboardShortcut("Enter");
+  const table = editor.state.doc.firstChild!;
+  expect(table.type.name).toBe("table");
+  table.forEach((row) => {
+    expect(Array.from({ length: row.childCount }, (_, index) => row.child(index).attrs.textAlign))
+      .toEqual(["left", "center", "right", null]);
+  });
+  editor.commands.undo();
+  expect(editor.getJSON()).toEqual(before);
+  editor.commands.redo();
+  expect(editor.state.doc.firstChild!.firstChild!.child(2).attrs.textAlign).toBe("right");
 });
 
 it.each([
