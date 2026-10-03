@@ -227,6 +227,68 @@ The final continuation run passed 1,463 tests across 74 frontend test files and
 builds. Full frontend verification used two workers to avoid performance-test
 contention; focused adversarial probes retained their original time limits.
 
+## Ordinary writing continuation
+
+- Type a GFM table with left, center, and right separator alignment. Paste its
+  rich HTML into Canvas, then use Tab in the final cell to continue the table.
+  Every new cell must inherit its column alignment; Undo/Redo must retain it.
+- Preserve code-fence metadata and inactive duplicate reference definitions
+  while editing nearby prose. Copy preserved blocks without losing their source
+  or throwing a clipboard serialization error.
+- Replace an entire inline-code span inside prose with plain text, formula-looking
+  text, and multiple lines. Keep its code style and the surrounding prose;
+  a selection containing both plain and code text must retain native paste behavior.
+- Press Enter twice between writing, then save/reopen and switch modes. Keep the
+  interior empty paragraph. Adjacent Typora formulas must remain separate after
+  unrelated edits, and code marks on native formulas/footnotes must survive saves.
+- Paste images with only width or only height, then save/reopen. Keep the specified
+  dimension, title, and alt text. Saving a pasted image must not create a separate
+  Undo step; Undo removes the paste and Redo restores its persisted resource.
+- Delete the sole image, Rename its companion folder, then Undo/Redo and save.
+  Repeat with cross-directory Save As, resizing, multiple file moves, preserved
+  HTML image sources, and partial rename recovery. Restored images must use the
+  current physical and portable paths, including images held only by history.
+  If rewriting a restored path exceeds the existing capacity/rewrite budget,
+  report the limit before changing the editor or either history branch.
+- Add a comment, prepend writing in Source, save, reopen, and locate the comment.
+  A stale footer must relocate a unique anchor; an ambiguous stale anchor must
+  request review. Current comments on repeated text must retain their positions.
+- Save and reopen filenames containing spaces, parentheses, and percent signs.
+  Escaped URL parentheses in image/link destinations and titles must stay literal;
+  Typora formulas in ordinary link labels must still render.
+- Change a formula, image description, or heading in Source, save, and return to
+  Canvas. Undo/Redo must retain user-authored edits; only saved asset-path refreshes
+  may bypass a separate history step.
+- Export a Markdown copy over the active source, including a symlink alias. The
+  application must explain that Save should be used and retain the original bytes.
+  Subsequent normal Save must remain available.
+- Quit while an unnamed document's first Save dialog is pending. Finish, cancel,
+  fail, and type during that save; retain pending writing and recovery appropriately.
+  New/Open must flush pending Canvas input before testing whether discard is needed.
+- Fail or cancel an OS-requested file open at startup. Retain the recoverable
+  draft and permit immediate retry of the same file; successful duplicate requests
+  remain coalesced.
+
+This continuation exercised 75,000 successful seeded Markdown/schema round trips
+and 1,280 actions across 64 short editing sessions, with complete Undo/Redo replay.
+Browser checks retained an ordinary bilingual document through 30 mode cycles and
+20 Source editing/Undo/Redo cycles. A 350-section, approximately 59 kB multilingual
+draft retained its writing through editing, exact Undo/Redo, Source conversion, and
+search of all 350 repeated paragraphs. Native checks reproduced and verified code
+paste, authored spacing, adjacent formulas, continued table alignment, image
+dimensions, image history through Save/Rename/Save As, and comment relocation.
+A one-page rich PDF was rendered and visually checked for formulas, table alignment,
+spacing, code, image size, footnotes, and absence of application controls.
+The final run passed 1,583 tests across 80 frontend test files and 63 native tests,
+plus type checking, lint, formatting, web builds, and native QA/production builds.
+The final native build also verified parenthesized image paths through edit/save/
+reopen, saved Source formula Undo/Redo, and first-save pasted-image Undo/Redo.
+The production application was reinstalled at `/Applications/PaperCanvas.app` and
+launched from that exact path. Its executable matched the release build; existing
+settings and file permissions remained semantically equivalent and the recovery
+draft remained byte-identical. Isolated QA settings, recovery, and permissions
+were restored from their pre-campaign copies after closing the test application.
+
 Composition and delayed-operation regressions are
 also exercised by the automated editor and application suites. Real IME
 behavior and Windows-native dialogs still require their platform manual checks.
