@@ -28,6 +28,23 @@ describe("shared canvas attribute validation", () => {
     }
   });
 
+  it("keeps two formulas pasted beside each other through Source mode and reopen", () => {
+    const editor = new Editor({ element: document.createElement("div"), extensions: canvasNodesAndMarks(), content: markdownToDocument("Before after.") });
+    try {
+      editor.commands.setTextSelection(8);
+      editor.commands.insertContent([{ type: "inlineFormula", attrs: { latex: "x" } }, { type: "inlineFormula", attrs: { latex: "y" } }]);
+      const before = editor.getJSON();
+      expect(before.content?.[0].content?.filter((node) => node.type === "inlineFormula")).toHaveLength(2);
+      const source = documentToMarkdown(before);
+      editor.commands.setContent(markdownToDocument(source));
+      expect(editor.getJSON()).toEqual(before);
+      expect(editor.state.doc.textContent).toBe("Before after.");
+      expect(() => editor.state.doc.check()).not.toThrow();
+    } finally {
+      editor.destroy();
+    }
+  });
+
   it.each([
     {
       html: '<table><colgroup><col width="80"><col width="120"></colgroup><tbody><tr><td rowspan="0">Spanning writing</td><td>One</td></tr><tr><td>Two</td></tr><tr><td>Three</td></tr></tbody></table>',

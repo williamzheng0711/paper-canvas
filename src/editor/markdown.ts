@@ -261,7 +261,11 @@ function normalizeInlineLatexDelimiters(
       const closing = nextLatexClosing;
       if (closing !== -1) {
         const latex = line.slice(cursor + 2, closing);
-        result += inlineFormulaRequiresHtml(latex) || latex.includes("$")
+        const touchesFormula =
+          result.endsWith("$") ||
+          line[closing + 2] === "$" ||
+          line.startsWith("\\(", closing + 2);
+        result += inlineFormulaRequiresHtml(latex) || latex.includes("$") || touchesFormula
           ? tableToHtml({ type: "inlineFormula", attrs: { latex } })
           : `$${latex}$`;
         cursor = closing + 2;
@@ -1342,12 +1346,16 @@ function toMdastChildren(node: JSONContent): MdNode[] {
   while (lastWriting >= 0 && isEmptyParagraph(children[lastWriting]))
     lastWriting -= 1;
   return children.flatMap((child, index) => {
+    const adjacentFormula =
+      child.type === "inlineFormula" &&
+      (children[index - 1]?.type === "inlineFormula" ||
+        children[index + 1]?.type === "inlineFormula");
     // Standard HTML preserves authored spacing between blocks without saving
     // the Canvas's automatic trailing paragraph or changing blank Markdown.
     const converted: MdNode | null =
       isEmptyParagraph(child) && index > firstWriting && index < lastWriting
         ? { type: "html", value: "<p></p>" }
-        : toMdast(child);
+        : toMdast(child, adjacentFormula);
     if (!converted) return [];
     return [
       child.type === "image" &&
@@ -1360,7 +1368,10 @@ function toMdastChildren(node: JSONContent): MdNode[] {
   });
 }
 
-function toMdast(node: JSONContent): MdNode | null {
+function toMdast(
+  node: JSONContent,
+  preserveFormulaBoundary = false,
+): MdNode | null {
   const childNodes = toMdastChildren(node);
   if (node.type === "text") {
     return wrapInlineMarks(node, {
@@ -1457,11 +1468,13 @@ function toMdast(node: JSONContent): MdNode | null {
     }
     case "inlineFormula": {
       const latex = String(node.attrs?.latex ?? "");
-      const requiresHtml = inlineFormulaRequiresHtml(latex);
+      const requiresHtml =
+        preserveFormulaBoundary || inlineFormulaRequiresHtml(latex);
       return wrapInlineMarks(node, {
         // Inline math serializers rewrite newlines that resemble Markdown
         // blocks, and empty/single-dollar source needs a double-dollar fence
-        // which Typora interprets as display math. Inert HTML keeps its kind.
+        // which Typora interprets as display math. Adjacent dollar fences merge
+        // separate formulas. Inert HTML keeps their kind and boundaries.
         type: requiresHtml ? "html" : "inlineMath",
         value: requiresHtml
           ? tableToHtml({ ...node, marks: undefined })
@@ -1519,17 +1532,7 @@ function cellInlineChildren(node: JSONContent): MdNode[] {
     (child) => child.type === "paragraph",
   );
   return paragraphs.flatMap((paragraph) => {
-    const children = mergeInlineMarks(
-      (paragraph.content ?? []).flatMap((child) => {
-        // remark-gfm flattens Markdown hard breaks into a space in cells. HTML
-        // breaks fit on one table row and retain the authored line boundary.
-        const converted =
-          child.type === "hardBreak"
-            ? { type: "html", value: "<br>" }
-            : toMdast(child);
-        return converted ? [converted] : [];
-      }),
-    );
+    const children = mergeInlineMarks(toMdastChildren(paragraph));
     return paragraphs.length > 1
       ? [
           { type: "html", value: "<p>" },

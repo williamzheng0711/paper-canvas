@@ -110,6 +110,36 @@ describe("PaperCanvas Markdown subset", () => {
     expect(markdownToDocument(documentToMarkdown(document))).toEqual(document);
   });
 
+  it.each(["\\(x\\)\\(y\\)", "$x$\\(y\\)", "\\(x\\)$y$"])(
+    "imports adjacent formula boundaries without merging %s",
+    (source) => {
+      const document = markdownToDocument(source);
+      expect(nodesOfType(document, "inlineFormula").map((node) => node.attrs?.latex)).toEqual(["x", "y"]);
+      expect(markdownToDocument(documentToMarkdown(document))).toEqual(document);
+    },
+  );
+
+  it.each(["Paragraph", "# Heading", "| Header |\n| --- |\n| Cell |"])(
+    "keeps adjacent marked formula nodes separate inside %s",
+    (source) => {
+      for (const marks of [undefined, [{ type: "bold" }], [{ type: "italic" }], [{ type: "strike" }], [{ type: "underline" }], [{ type: "link", attrs: { href: "https://example.com", title: "Title" } }]]) {
+        const document = markdownToDocument(source);
+        const block = document.content![0];
+        const paragraph = block.type === "table" ? block.content![0].content![0].content![0] : block;
+        paragraph.content = ["x", "y", "z"].map((latex) => ({ type: "inlineFormula", attrs: { latex }, ...(marks ? { marks } : {}) }));
+        const saved = documentToMarkdown(document);
+        expect(markdownToDocument(saved)).toEqual(document);
+        expect(nodesOfType(markdownToDocument(saved), "inlineFormula").map((node) => node.attrs?.latex)).toEqual(["x", "y", "z"]);
+      }
+    },
+  );
+
+  it("keeps ordinary separated formulas in readable Markdown math syntax", () => {
+    const source = "$x$ $y$";
+    expect(documentToMarkdown(markdownToDocument(source))).toBe(source + "\n");
+    expect(normalizeLatexDelimiters("\\(x\\) \\(y\\)")).toBe(source);
+  });
+
   it("imports dense escaped-dollar Typora formulas without quadratic HTML/math parsing", () => {
     const source = "\\(\\$\\) ".repeat(1000);
     const started = performance.now();
