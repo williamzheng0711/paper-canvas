@@ -211,10 +211,12 @@ function normalizeInlineLatexDelimiters(
   let cursor = 0;
   let dollarDelimiter: "$" | "$$" | null = null;
   let rangeIndex = 0;
+  let closingRangeIndex = 0;
   // Each closing delimiter is searched once, including a final missing close.
   let nextLatexClosing: number | undefined;
 
   while (cursor < line.length) {
+    while (literalRanges[rangeIndex]?.end <= cursor) rangeIndex += 1;
     const literal = literalRanges[rangeIndex];
     if (literal && cursor >= literal.start) {
       result += line.slice(cursor, literal.end);
@@ -239,8 +241,15 @@ function normalizeInlineLatexDelimiters(
     ) {
       if (nextLatexClosing === undefined || (nextLatexClosing >= 0 && nextLatexClosing < cursor + 2)) {
         nextLatexClosing = line.indexOf("\\)", cursor + 2);
-        while (nextLatexClosing !== -1 && isEscaped(line, nextLatexClosing)) {
-          nextLatexClosing = line.indexOf("\\)", nextLatexClosing + 2);
+        while (nextLatexClosing !== -1) {
+          while (literalRanges[closingRangeIndex]?.end <= nextLatexClosing)
+            closingRangeIndex += 1;
+          const literalClosing = literalRanges[closingRangeIndex];
+          if (literalClosing && literalClosing.start <= nextLatexClosing)
+            nextLatexClosing = line.indexOf("\\)", literalClosing.end);
+          else if (isEscaped(line, nextLatexClosing))
+            nextLatexClosing = line.indexOf("\\)", nextLatexClosing + 2);
+          else break;
         }
       }
       const closing = nextLatexClosing;
@@ -1410,11 +1419,13 @@ function toMdast(node: JSONContent): MdNode | null {
     }
     case "inlineFormula": {
       const latex = String(node.attrs?.latex ?? "");
+      const requiresHtml = !latex || /[\r\n]|(?:^|[^$])\$(?:[^$]|$)/.test(latex);
       return wrapInlineMarks(node, {
         // Inline math serializers rewrite newlines that resemble Markdown
-        // blocks. Existing inert formula HTML retains every source character.
-        type: /[\r\n]/.test(latex) ? "html" : "inlineMath",
-        value: /[\r\n]/.test(latex)
+        // blocks, and empty/single-dollar source needs a double-dollar fence
+        // which Typora interprets as display math. Inert HTML keeps its kind.
+        type: requiresHtml ? "html" : "inlineMath",
+        value: requiresHtml
           ? tableToHtml({ ...node, marks: undefined })
           : latex,
       });

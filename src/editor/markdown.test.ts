@@ -19,6 +19,31 @@ function nodesOfType(document: JSONContent, type: string): JSONContent[] {
 }
 
 describe("PaperCanvas Markdown subset", () => {
+  it.each(["", "$", "x$y", "\\$", "$$", "a$$b", "a$$$b", "$$ + $x", "a $ b $ c"])(
+    "preserves inline formula kind and source when dollar fencing would look like display math: %j",
+    (latex) => {
+      for (const marks of [undefined, [{ type: "bold" }], [{ type: "underline" }]]) {
+        const document: JSONContent = {
+          type: "doc",
+          content: [{ type: "paragraph", content: [{ type: "inlineFormula", attrs: { latex }, ...(marks ? { marks } : {}) }] }],
+        };
+        expect(markdownToDocument(documentToMarkdown(document))).toEqual(document);
+      }
+    },
+  );
+
+  it.each(["`\\)`", "<kbd>\\)</kbd>", "<!-- \\) -->"])(
+    "ignores a Typora closing delimiter inside a literal %s",
+    (literal) => {
+      const unmatched = "Before \\( x " + literal + " after";
+      expect(normalizeLatexDelimiters(unmatched)).toBe(unmatched);
+      expect(nodesOfType(markdownToDocument(unmatched), "inlineFormula")).toHaveLength(0);
+      const matched = "Before \\( x " + literal + " y \\) after";
+      expect(normalizeLatexDelimiters(matched)).toBe("Before $ x " + literal + " y $ after");
+      expect(nodesOfType(markdownToDocument(matched), "inlineFormula")[0].attrs?.latex).toBe("x " + literal + " y");
+    },
+  );
+
   it.each(["\n", "\r\n", "\r"])(
     "preserves unterminated container HTML without growing blank %j separators on each save",
     (ending) => {

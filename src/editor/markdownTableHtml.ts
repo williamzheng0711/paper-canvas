@@ -183,11 +183,13 @@ export function tableToHtml(node: JSONContent): string {
         ? `<a${attribute("href", node.attrs.linkHref)}${attribute("title", node.attrs.linkTitle)}>${image}</a>`
         : image;
     }
-    case "inlineFormula":
+    case "inlineFormula": {
+      const latex = escapeHtml(node.attrs?.latex ?? "");
       return markedHtml(
         node,
-        `<span data-formula-kind="inline"${attribute("latex", node.attrs?.latex)}${attribute("data-latex", node.attrs?.latex)}>${escapeHtml(`$${node.attrs?.latex ?? ""}$`)}</span>`,
+        `<span data-formula-kind="inline" latex="${latex}" data-latex="${latex}">${escapeHtml(`$${node.attrs?.latex ?? ""}$`)}</span>`,
       );
+    }
     case "blockFormula":
       return `<div data-formula-kind="block"${attribute("latex", node.attrs?.latex)}${attribute("data-latex", node.attrs?.latex)}><pre>${escapeHtml(`$$\n${node.attrs?.latex ?? ""}\n$$`)}</pre></div>`;
     case "footnoteReference":
