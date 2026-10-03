@@ -671,6 +671,7 @@ export default function App() {
     async (nextFile: EditorFile) => {
       const request = openRequest.current;
       const session = documentSessionRef.current;
+      if (!sourceModeRef.current) flushCanvasChanges();
       if (
         dirtyRef.current &&
         !(await confirmDiscardChanges(getMessages().confirmDiscardAndOpen))
@@ -682,7 +683,7 @@ export default function App() {
       setRecent(await loadRecent());
       return true;
     },
-    [loadFile],
+    [flushCanvasChanges, loadFile],
   );
 
   const openExternalMarkdownFiles = useCallback(
@@ -1072,13 +1073,14 @@ export default function App() {
     const request = ++openRequest.current;
     const session = documentSessionRef.current;
     try {
+      if (!sourceModeRef.current) flushCanvasChanges();
       if (dirtyRef.current && !(await confirmDiscardChanges(getMessages().confirmDiscardAndNew))) return;
       if (request !== openRequest.current || session !== documentSessionRef.current) return;
       loadFile(newEditorFile());
     } catch (error) {
       if (request === openRequest.current && session === documentSessionRef.current) setMessage(error instanceof Error ? error.message : String(error));
     }
-  }, [loadFile]);
+  }, [flushCanvasChanges, loadFile]);
 
   const renameFile = useCallback(async (nextName: string, session: number) => {
     if (!nextName.trim() || documentSessionRef.current !== session) return;

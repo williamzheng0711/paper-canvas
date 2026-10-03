@@ -1038,6 +1038,30 @@ describe('App autosave cursor stability', () => {
     }
   });
 
+  it.each(['new', 'open'] as const)('checks pending clean-canvas writing before confirming %s', async (action) => {
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const original = markdownToDocument('Saved $x$.\n');
+    files.chooseMarkdownFile.mockResolvedValueOnce({ path: '/notes/saved.md', name: 'saved.md', document: original });
+    try {
+      await act(async () => { documentAction(getMessages().open).click(); await flushEffects(); });
+      expect(host.querySelector('.dirty-dot')).toBeNull();
+      confirm.mockClear().mockReturnValue(false);
+      const pending = markdownToDocument('Saved $x + visible input$.\n');
+      let unflushed = true;
+      harness.searchHandle.flushCommentMapping.mockImplementation(() => {
+        if (!unflushed) return;
+        unflushed = false;
+        harness.canvasProps?.onChange(pending);
+      });
+      if (action === 'open') files.chooseMarkdownFile.mockResolvedValueOnce({ path: '/notes/other.md', name: 'other.md', document: markdownToDocument('Other file.\n') });
+      await act(async () => { documentAction(getMessages()[action]).click(); await flushEffects(); });
+      expect(confirm).toHaveBeenCalledOnce();
+      expect(host.querySelector('.document-name')?.textContent).toContain('saved.md');
+      expect(harness.canvasProps?.initialDocument).toEqual(pending);
+      expect(host.querySelector('.dirty-dot')).not.toBeNull();
+    } finally { confirm.mockRestore(); }
+  });
+
   it('keeps the canvas session mounted when edited source refreshes its document', async () => {
     const mounts = harness.canvasMounts;
     const unmounts = harness.canvasUnmounts;
