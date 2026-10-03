@@ -513,6 +513,23 @@ async fn clear_recovery_draft(app: AppHandle) -> Result<(), String> {
         .map_err(|error| error.to_string())?
 }
 
+fn asset_directory_cannot_exist(error: &std::io::Error) -> bool {
+    if error.kind() == std::io::ErrorKind::NotFound {
+        return true;
+    }
+    // A valid document can have a longer, impossible derived companion name.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    if error.raw_os_error() == Some(rustix::io::Errno::NAMETOOLONG.raw_os_error()) {
+        return true;
+    }
+    #[cfg(windows)]
+    if error.raw_os_error() == Some(206) {
+        // ERROR_FILENAME_EXCED_RANGE
+        return true;
+    }
+    false
+}
+
 fn document_asset_directory(path: &Path) -> Result<PathBuf, String> {
     if !path.is_absolute()
         || path
@@ -537,7 +554,7 @@ fn document_asset_directory(path: &Path) -> Result<PathBuf, String> {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
             return Err("The image asset path must be a regular directory.".into());
         }
-        Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error.to_string()),
+        Err(error) if !asset_directory_cannot_exist(&error) => return Err(error.to_string()),
         _ => {}
     }
     Ok(directory)
@@ -1952,6 +1969,38 @@ mod tests {
         }
         assert!(document_asset_directory(Path::new("relative.md")).is_err());
         assert!(document_asset_directory(&root.join("../outside.md")).is_err());
+    }
+
+    #[test]
+    fn text_document_renames_ignore_impossible_long_ascii_companion_names() {
+        assert_long_text_document_can_be_renamed(format!("{}.md", "n".repeat(252)));
+    }
+
+    #[test]
+    fn text_document_renames_ignore_impossible_long_unicode_companion_names() {
+        // APFS and Windows limit Unicode names by character units; Linux
+        // filesystems commonly limit their encoded bytes instead.
+        let count = if cfg!(any(target_os = "macos", windows)) {
+            126
+        } else {
+            42
+        };
+        assert_long_text_document_can_be_renamed(format!("{}.md", "研究".repeat(count)));
+    }
+
+    fn assert_long_text_document_can_be_renamed(name: String) {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join(name);
+        let target = directory.path().join("short.md");
+        let original = "\u{feff}# Original 中文 🧪\r\nUnrelated writing\0\r\n";
+        std::fs::write(&source, original).unwrap();
+        let companions = document_rename_asset_directories(&source, &target, true).unwrap();
+        assert!(!companions[0].exists());
+        assert!(!companions[1].exists());
+        rename_without_replacement(&source, &target).unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), original.as_bytes());
+        assert!(!source.exists());
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
     }
 
     #[cfg(unix)]
