@@ -213,6 +213,31 @@ async fn read_markdown_file(app: AppHandle, path: String) -> Result<tauri::ipc::
     .map_err(|error| error.to_string())?
 }
 
+fn check_regular_file_write_access(path: &Path) -> std::io::Result<()> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true);
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // Do not wait for a reader if the checked file was replaced by a pipe.
+        options.custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32);
+    }
+    let metadata = options.open(path)?.metadata()?;
+    if !metadata.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "The document destination must be a regular file.",
+        ));
+    }
+    if metadata.permissions().readonly() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "The destination is read-only.",
+        ));
+    }
+    Ok(())
+}
+
 fn replace_file_atomically(
     path: &Path,
     write: impl FnOnce(&mut File) -> std::io::Result<()>,
@@ -253,10 +278,7 @@ fn replace_file_atomically_checked(
             if metadata.permissions().readonly() {
                 return Err("The destination is read-only.".into());
             }
-            std::fs::OpenOptions::new()
-                .write(true)
-                .open(&target)
-                .map_err(|error| error.to_string())?;
+            check_regular_file_write_access(&target).map_err(|error| error.to_string())?;
         }
         Ok(_) => return Err("The document destination must be a regular file.".into()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -280,10 +302,7 @@ fn replace_file_atomically_checked(
             if metadata.permissions().readonly() {
                 return Err("The destination is read-only.".into());
             }
-            std::fs::OpenOptions::new()
-                .write(true)
-                .open(&target)
-                .map_err(|error| error.to_string())?;
+            check_regular_file_write_access(&target).map_err(|error| error.to_string())?;
             temporary
                 .as_file()
                 .set_permissions(metadata.permissions())
@@ -301,9 +320,9 @@ fn replace_file_atomically_checked(
         if path.canonicalize().ok().as_ref() != expected_target.as_ref() {
             return Err("DOCUMENT_CHANGED_ON_DISK".into());
         }
-        let actual = match std::fs::read(&target) {
-            Ok(contents) => contents,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+        let actual = match read_regular_file(&target) {
+            Ok(Some(contents)) => contents,
+            Ok(None) => {
                 return Err("DOCUMENT_CHANGED_ON_DISK".into());
             }
             Err(error) => return Err(error.to_string()),
@@ -1705,6 +1724,70 @@ mod tests {
             .unwrap()
             .file_type()
             .is_fifo());
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn document_write_access_rejects_a_replacement_pipe_without_a_rescue_reader() {
+        use std::os::unix::fs::OpenOptionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("document.md");
+        std::fs::write(&path, b"Original writing").unwrap();
+        assert!(std::fs::metadata(&path).unwrap().is_file());
+        std::fs::remove_file(&path).unwrap();
+        assert!(std::process::Command::new("mkfifo")
+            .arg(&path)
+            .status()
+            .unwrap()
+            .success());
+        let write_path = path.clone();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let writer = std::thread::spawn(move || {
+            sender
+                .send(check_regular_file_write_access(&write_path))
+                .unwrap();
+        });
+        let result = receiver.recv_timeout(std::time::Duration::from_millis(250));
+        if result.is_err() {
+            // Bound the old blocking-write regression too.
+            let _rescue = std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32)
+                .open(&path)
+                .unwrap();
+            writer.join().unwrap();
+        } else {
+            writer.join().unwrap();
+        }
+        assert!(result
+            .expect("write access must fail without a rescue reader")
+            .is_err());
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn document_write_access_rejects_an_open_pipe_and_retains_regular_file_bytes() {
+        use std::os::unix::fs::OpenOptionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("document.md");
+        std::fs::write(&path, b"Original writing").unwrap();
+        check_regular_file_write_access(&path).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"Original writing");
+        std::fs::remove_file(&path).unwrap();
+        assert!(std::process::Command::new("mkfifo")
+            .arg(&path)
+            .status()
+            .unwrap()
+            .success());
+        let _reader = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32)
+            .open(&path)
+            .unwrap();
+        assert_eq!(
+            check_regular_file_write_access(&path).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidInput
+        );
     }
 
     #[test]
