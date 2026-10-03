@@ -786,12 +786,7 @@ function textNode(value: string | undefined): JSONContent {
   return { type: "text", text: value ?? "" };
 }
 
-function formulaFromHtml(source: string): string | undefined {
-  const match =
-    /^<span data-formula-kind="inline" latex="([^"]*)" data-latex="([^"]*)">([\s\S]*)<\/span>$/.exec(
-      source,
-    );
-  if (!match) return undefined;
+function decodeSerializedHtml(value: string): string {
   const entities: Record<string, string> = {
     amp: "&",
     lt: "<",
@@ -802,11 +797,19 @@ function formulaFromHtml(source: string): string | undefined {
     "#10": "\n",
     "#36": "$",
   };
-  const decode = (value: string) =>
-    value.replace(
-      /&(amp|lt|gt|quot|#39|#13|#10|#36);/g,
-      (_, entity: string) => entities[entity],
+  return value.replace(
+    /&(amp|lt|gt|quot|#39|#13|#10|#36);/g,
+    (_, entity: string) => entities[entity],
+  );
+}
+
+function formulaFromHtml(source: string): string | undefined {
+  const match =
+    /^<span data-formula-kind="inline" latex="([^"]*)" data-latex="([^"]*)">([\s\S]*)<\/span>$/.exec(
+      source,
     );
+  if (!match) return undefined;
+  const decode = decodeSerializedHtml;
   const latex = decode(match[1]);
   // Recognize only the inert formula HTML emitted by our own lossless
   // serializer, keeping ordinary user HTML as its original preview source.
@@ -819,6 +822,28 @@ function formulaFromHtml(source: string): string | undefined {
   )
     return undefined;
   return candidates.find((value) => value.includes(selectionMarker)) ?? latex;
+}
+
+function codeMarkedAtomFromHtml(source: string): JSONContent | undefined {
+  // Recognize only the code wrapper and inert atom HTML emitted below.
+  const wrapper = /^<code>([\s\S]*)<\/code>$/.exec(source);
+  if (!wrapper) return undefined;
+  const latex = formulaFromHtml(wrapper[1]);
+  if (latex !== undefined)
+    return { type: "inlineFormula", attrs: { latex }, marks: [{ type: "code" }] };
+  const reference =
+    /^<sup data-footnote-reference=""(?: data-footnote-identifier="([^"]*)")?(?: data-footnote-label="([^"]*)")?>([\s\S]*)<\/sup>$/.exec(wrapper[1]);
+  if (!reference) return undefined;
+  const identifier = decodeSerializedHtml(reference[1] ?? "");
+  const label = decodeSerializedHtml(reference[2] ?? "");
+  const clean = (value: string) => value.replaceAll(selectionMarker, "");
+  if (clean(decodeSerializedHtml(reference[3])) !== clean(label || identifier))
+    return undefined;
+  return {
+    type: "footnoteReference",
+    attrs: { identifier, label },
+    marks: [{ type: "code" }],
+  };
 }
 
 function imageDimension(value: unknown): number | null {
@@ -1175,6 +1200,11 @@ function fromMdast(
         },
       ];
     case "html": {
+      const codeAtom = codeMarkedAtomFromHtml(node.value ?? "");
+      if (codeAtom)
+        return context === "inline"
+          ? [codeAtom]
+          : [{ type: "paragraph", content: [codeAtom] }];
       const latex = formulaFromHtml(node.value ?? "");
       if (latex !== undefined) {
         const formula = { type: "inlineFormula", attrs: { latex } };
@@ -1393,11 +1423,19 @@ function toMdast(
     case "blockquote":
       return { type: "blockquote", children: childNodes };
     case "footnoteReference":
-      return wrapInlineMarks(node, {
-        type: "footnoteReference",
-        identifier: String(node.attrs?.identifier ?? ""),
-        label: String(node.attrs?.label ?? node.attrs?.identifier ?? ""),
-      });
+      return wrapInlineMarks(
+        node,
+        node.marks?.some((mark) => mark.type === "code")
+          ? {
+              type: "html",
+              value: `<code>${tableToHtml({ ...node, marks: undefined })}</code>`,
+            }
+          : {
+              type: "footnoteReference",
+              identifier: String(node.attrs?.identifier ?? ""),
+              label: String(node.attrs?.label ?? node.attrs?.identifier ?? ""),
+            },
+      );
     case "footnoteDefinition":
       return {
         type: "footnoteDefinition",
@@ -1468,17 +1506,17 @@ function toMdast(
     }
     case "inlineFormula": {
       const latex = String(node.attrs?.latex ?? "");
+      const code = node.marks?.some((mark) => mark.type === "code");
       const requiresHtml =
-        preserveFormulaBoundary || inlineFormulaRequiresHtml(latex);
+        code || preserveFormulaBoundary || inlineFormulaRequiresHtml(latex);
+      const html = requiresHtml ? tableToHtml({ ...node, marks: undefined }) : "";
       return wrapInlineMarks(node, {
         // Inline math serializers rewrite newlines that resemble Markdown
         // blocks, and empty/single-dollar source needs a double-dollar fence
         // which Typora interprets as display math. Adjacent dollar fences merge
         // separate formulas. Inert HTML keeps their kind and boundaries.
         type: requiresHtml ? "html" : "inlineMath",
-        value: requiresHtml
-          ? tableToHtml({ ...node, marks: undefined })
-          : latex,
+        value: code ? `<code>${html}</code>` : requiresHtml ? html : latex,
       });
     }
     case "blockFormula":

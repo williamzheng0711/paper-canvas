@@ -140,6 +140,19 @@ describe("PaperCanvas Markdown subset", () => {
     expect(normalizeLatexDelimiters("\\(x\\) \\(y\\)")).toBe(source);
   });
 
+  it.each([
+    '<code><span data-formula-kind="inline" latex="x" data-latex="y">&#36;x&#36;</span></code>',
+    '<code><sup data-footnote-reference="" data-footnote-identifier="note" data-footnote-label="note">different</sup></code>',
+    '<code class="custom"><span data-formula-kind="inline" latex="x" data-latex="x">&#36;x&#36;</span></code>',
+    '<code>literal $x$</code>',
+  ])("preserves ordinary or mismatched code HTML as its exact source: %s", (source) => {
+    const document = markdownToDocument(source);
+    expect(nodesOfType(document, "inlineFormula")).toHaveLength(0);
+    expect(nodesOfType(document, "footnoteReference")).toHaveLength(0);
+    expect(documentToMarkdown(document)).toContain(source);
+    expect(markdownToDocument(documentToMarkdown(document))).toEqual(document);
+  });
+
   it("imports dense escaped-dollar Typora formulas without quadratic HTML/math parsing", () => {
     const source = "\\(\\$\\) ".repeat(1000);
     const started = performance.now();

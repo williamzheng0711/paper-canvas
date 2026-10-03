@@ -66,6 +66,52 @@ describe("shared canvas attribute validation", () => {
   );
 
   it.each([
+    'Before $x$ after[^note].\n\n[^note]: Footnote body.',
+    '# Before $x$ after[^note].\n\n[^note]: Footnote body.',
+    '| Header |\n| --- |\n| Before $a\\|b$ after[^note]. |\n\n[^note]: Footnote body.',
+  ])("keeps inline-code formatting on formulas and footnotes after the actual command: %s", (source) => {
+    const editor = new Editor({ element: document.createElement("div"), extensions: canvasNodesAndMarks(), content: markdownToDocument(source) });
+    try {
+      editor.commands.selectAll();
+      expect(editor.commands.toggleCode()).toBe(true);
+      const before = editor.getJSON();
+      const atoms: JSONContent[] = [];
+      editor.state.doc.descendants((node) => {
+        if (node.type.name === "inlineFormula" || node.type.name === "footnoteReference") atoms.push(node.toJSON());
+      });
+      expect(atoms).toHaveLength(2);
+      expect(atoms.every((atom) => atom.marks?.some((mark) => mark.type === "code"))).toBe(true);
+      const saved = documentToMarkdown(before);
+      expect(saved).toContain("<code><span data-formula-kind");
+      expect(saved).toContain("<code><sup data-footnote-reference");
+      editor.commands.setContent(markdownToDocument(saved));
+      expect(editor.getJSON()).toEqual(before);
+      expect(documentToMarkdown(editor.getJSON())).toBe(saved);
+      expect(() => editor.state.doc.check()).not.toThrow();
+    } finally {
+      editor.destroy();
+    }
+  });
+
+  it("keeps overlapping formatting around code-marked formula and footnote atoms", () => {
+    const editor = new Editor({ element: document.createElement("div"), extensions: canvasNodesAndMarks(), content: markdownToDocument('Before \\(\\text{\\$5}\\) after[^中文].\n\n[^中文]: Footnote body.') });
+    try {
+      editor.commands.selectAll();
+      editor.commands.toggleBold();
+      editor.commands.toggleItalic();
+      editor.commands.toggleStrike();
+      editor.commands.toggleUnderline();
+      editor.commands.toggleCode();
+      const before = editor.getJSON();
+      editor.commands.setContent(markdownToDocument(documentToMarkdown(before)));
+      expect(editor.getJSON()).toEqual(before);
+      expect(() => editor.state.doc.check()).not.toThrow();
+    } finally {
+      editor.destroy();
+    }
+  });
+
+  it.each([
     {
       html: '<table><colgroup><col width="80"><col width="120"></colgroup><tbody><tr><td rowspan="0">Spanning writing</td><td>One</td></tr><tr><td>Two</td></tr><tr><td>Three</td></tr></tbody></table>',
       colspan: 1, rowspan: 3,
