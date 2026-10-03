@@ -103,12 +103,16 @@ fn get_response(
         let ranges = if let Ok(ranges) = HttpRange::parse(&range_header, len) {
             ranges
                 .iter()
+                .filter(|range| range.length > 0)
                 // map the output to spec range <start-end>, example: 0-499
                 .map(|r| (r.start, r.start + r.length - 1))
                 .collect::<Vec<_>>()
         } else {
             return not_satisfiable();
         };
+        if ranges.is_empty() {
+            return not_satisfiable();
+        }
 
         /// The Maximum bytes we send in one range
         const MAX_LEN: u64 = 1000 * 1024;
@@ -406,6 +410,29 @@ mod tests {
     }
 
     #[test]
+    fn empty_image_suffix_ranges_and_empty_range_headers_are_unsatisfiable() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("empty.svg");
+        fs::write(&path, b"").unwrap();
+        for range in ["bytes=-1", "bytes=-18446744073709551615", ""] {
+            let result = response(
+                request(&path, "GET", Some(range)),
+                "tauri://localhost",
+                |_| true,
+            );
+            assert_eq!(result.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+            assert_eq!(result.headers()[CONTENT_RANGE], "bytes */0");
+            assert!(result.body().is_empty());
+        }
+        fs::write(&path, b"ordinary image").unwrap();
+        let result = response(request(&path, "GET", Some("")), "tauri://localhost", |_| {
+            true
+        });
+        assert_eq!(result.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+        assert_eq!(result.headers()[CONTENT_RANGE], "bytes */14");
+    }
+
+    #[test]
     fn full_reads_and_range_limit_support_larger_images_without_whole_file_range_reads() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("large.png");
@@ -422,6 +449,26 @@ mod tests {
         assert_eq!(range.body().len(), 1_024_000);
         assert_eq!(range.headers()[CONTENT_RANGE], "bytes 0-1023999/1100000");
         assert!(allocate_buffer(u64::MAX).is_err());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_allowed_sparse_image_larger_than_address_space_returns_an_allocation_error() {
+        use std::os::unix::fs::MetadataExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sparse.svg");
+        let file = fs::File::create(&path).unwrap();
+        let sparse_length = 1_u64 << 50;
+        file.set_len(sparse_length).unwrap();
+        drop(file);
+        assert_eq!(fs::metadata(&path).unwrap().blocks(), 0);
+
+        let result = response(request(&path, "GET", None), "tauri://localhost", |_| true);
+        assert_eq!(result.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(String::from_utf8_lossy(result.body()).contains("allocation"));
+        assert_eq!(fs::metadata(&path).unwrap().len(), sparse_length);
+        assert_eq!(fs::metadata(&path).unwrap().blocks(), 0);
     }
 
     #[test]

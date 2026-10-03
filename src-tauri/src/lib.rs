@@ -999,15 +999,25 @@ fn begin_webview_pdf_export(
 }
 
 #[cfg(target_os = "macos")]
-#[tauri::command]
-async fn export_pdf(app: AppHandle, webview: tauri::Webview, path: String) -> Result<(), String> {
-    let target = PathBuf::from(&path);
-    if !is_absolute_pdf_path(&target) {
+fn pdf_export_target(selected: &Path, allowed: impl Fn(&Path) -> bool) -> Result<PathBuf, String> {
+    if !is_absolute_pdf_path(selected) {
         return Err("PDF export requires an absolute .pdf path.".to_string());
     }
-    if !app.fs_scope().is_allowed(&target) {
+    let target = if selected.is_symlink() {
+        selected.canonicalize().map_err(|error| error.to_string())?
+    } else {
+        selected.to_path_buf()
+    };
+    if !allowed(&target) {
         return Err("The selected PDF path is outside the granted file scope.".to_string());
     }
+    Ok(target)
+}
+
+#[cfg(target_os = "macos")]
+#[tauri::command]
+async fn export_pdf(app: AppHandle, webview: tauri::Webview, path: String) -> Result<(), String> {
+    let target = pdf_export_target(Path::new(&path), |path| app.fs_scope().is_allowed(path))?;
     let temporary_target = temporary_pdf_path(&target)?;
 
     let (sender, mut receiver) = tauri::async_runtime::channel(1);
@@ -2148,6 +2158,37 @@ mod tests {
         assert!(is_absolute_pdf_path(&uppercase_extension));
         assert!(!is_absolute_pdf_path(&wrong_extension));
         assert!(!is_absolute_pdf_path(&relative));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn selected_relative_pdf_symlinks_use_the_dialogs_physical_grant() {
+        let directory = tempfile::tempdir().unwrap();
+        let physical = directory.path().join("physical.pdf");
+        let alias = directory.path().join("selected.pdf");
+        std::fs::write(&physical, b"Previous PDF bytes").unwrap();
+        std::os::unix::fs::symlink("physical.pdf", &alias).unwrap();
+        let granted = physical.canonicalize().unwrap();
+
+        // Tauri's save dialog grants the canonical file as well as its alias.
+        // Check that file directly: its scope's relative-link lookup otherwise
+        // resolves the link text against the process working directory.
+        let selected = pdf_export_target(&alias, |path| path == granted).unwrap();
+        assert_eq!(selected, granted);
+        assert!(pdf_export_target(&alias, |_| false).is_err());
+        assert!(pdf_export_target(&directory.path().join("relative.pdf"), |_| false).is_err());
+        let temporary = directory.path().join("printed.pdf");
+        std::fs::write(&temporary, b"%PDF-1.7\nUpdated PDF bytes\n%%EOF\n").unwrap();
+        commit_completed_pdf(&temporary, &selected).unwrap();
+        assert_eq!(
+            std::fs::read(&physical).unwrap(),
+            b"%PDF-1.7\nUpdated PDF bytes\n%%EOF\n"
+        );
+        assert!(alias.is_symlink());
+        assert_eq!(
+            std::fs::read_link(alias).unwrap(),
+            PathBuf::from("physical.pdf")
+        );
     }
 
     #[cfg(target_os = "macos")]
