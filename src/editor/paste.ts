@@ -18,6 +18,17 @@ function containsFormula(node: JSONContent): boolean {
   );
 }
 
+function pastingIntoCode(view: EditorView): boolean {
+  const { selection, schema, storedMarks } = view.state;
+  const { $from, $to, from, to } = selection;
+  if ($from.parent.type.spec.code) return true;
+  const code = schema.marks.code;
+  return Boolean(code && $from.parent.isTextblock && (
+    code.isInSet(storedMarks ?? $from.marks()) ||
+    ($from.sameParent($to) && view.state.doc.rangeHasMark(from, to, code))
+  ));
+}
+
 /** Parse mixed plain-text Markdown only when it contains explicit math. */
 export function markdownDocumentFromClipboard(
   text: string,
@@ -29,6 +40,7 @@ export function markdownDocumentFromClipboard(
 
 /** Insert mixed Markdown/math as a structural slice instead of one formula. */
 export function insertPastedMarkdown(view: EditorView, text: string): boolean {
+  if (pastingIntoCode(view)) return false;
   const document = markdownDocumentFromClipboard(text);
   if (!document) return false;
   const parsed = view.state.schema.nodeFromJSON(document);
@@ -48,6 +60,7 @@ export function insertPastedMarkdown(view: EditorView, text: string): boolean {
 
 /** Insert standalone TeX, including source pasted into prewritten delimiters. */
 export function insertPastedFormula(view: EditorView, text: string): boolean {
+  if (pastingIntoCode(view)) return false;
   const formula = formulaFromClipboard(text);
   const { selection, schema } = view.state;
   const $from = selection.$from;
