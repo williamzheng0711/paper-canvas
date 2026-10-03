@@ -430,6 +430,20 @@ button {
   font-size: 11px;
   white-space: nowrap;
 }
+.document-search__note {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  margin: 0;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-raised);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
 .document-search button {
   width: 27px;
   height: 27px;

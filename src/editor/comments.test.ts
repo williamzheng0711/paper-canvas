@@ -9,6 +9,18 @@ import {
 } from './comments';
 
 describe('PaperCanvas Markdown comments metadata', () => {
+  it('keeps oversized stale or legacy comment metadata as exact source without a full contextual parse', () => {
+    const body = '\\('.repeat(Math.ceil(5 * 1024 * 1024 / 2));
+    const comment = createMarkdownComment(body, { kind: 'position', offset: body.length }, 'Review', '', 'id');
+    const valid = serializeMarkdownWithComments(body, [comment]);
+    expect(parseMarkdownComments(valid)).toEqual({ body, comments: [comment], status: 'valid' });
+    for (const source of [valid.replace('\\(', 'changed'), body + '\n<!-- papercanvas-comments:v1\n{"version":1,"comments":[]}\n-->']) {
+      const started = performance.now();
+      expect(parseMarkdownComments(source)).toEqual({ body: source, comments: [], status: 'invalid' });
+      expect(performance.now() - started).toBeLessThan(1000);
+    }
+  });
+
   it.each(['\n', '\r\n', '\r'])(
     'reads valid comment metadata with %j separators without adding a newline to the authored body',
     (ending) => {

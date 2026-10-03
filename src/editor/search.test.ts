@@ -4,6 +4,8 @@ import { NodeSelection, TextSelection } from "@tiptap/pm/state";
 import DOMPurify from "dompurify";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { HtmlPreview, InlineHtmlPreview } from "./HtmlPreview";
+import { maximumCanvasNodes } from "./canvasCapacity";
+import { commentDecorationsPluginKey, createCommentDecorationsExtension } from "./commentDecorations";
 import {
   clearDocumentSearch,
   documentSearchPluginKey,
@@ -32,6 +34,97 @@ afterEach(() => {
 });
 
 describe("document search", () => {
+  it("bounds dense highlight DOM while preserving every match, wraparound, editing, and history", () => {
+    const text = "x ".repeat(25_000);
+    const editor = new Editor({
+      extensions: [StarterKit, DocumentSearch], content: { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text }] }] },
+      editorProps: { handleScrollToSelection: () => true },
+    });
+    editors.push(editor);
+    const before = editor.getJSON();
+    expect(searchDocument(editor, "x", "reset")).toEqual({ current: 1, total: 25_000, highlightsLimited: true });
+    expect(documentSearchPluginKey.getState(editor.state)?.matches).toHaveLength(25_000);
+    const nodes = document.createTreeWalker(editor.view.dom, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT);
+    let renderedNodes = 1;
+    while (nodes.nextNode()) renderedNodes += 1;
+    expect(renderedNodes).toBeLessThanOrEqual(maximumCanvasNodes);
+
+    expect(searchDocument(editor, "x", "previous")).toEqual({ current: 25_000, total: 25_000, highlightsLimited: true });
+    expect(editor.state.selection.from).toBe(49_999);
+    expect(editor.view.dom.querySelector(".document-search-match--active")?.textContent).toBe("x");
+    expect(searchDocument(editor, "x", "next")).toEqual({ current: 1, total: 25_000, highlightsLimited: true });
+    expect(editor.state.selection.from).toBe(1);
+    expect(editor.getJSON()).toEqual(before);
+    expect(editor.can().undo()).toBe(false);
+    editor.commands.insertContentAt(1, "x ");
+    expect(searchDocument(editor, "x", "refresh").total).toBe(25_001);
+    expect(editor.commands.undo()).toBe(true);
+    expect(editor.getJSON()).toEqual(before);
+    expect(searchDocument(editor, "x", "refresh").total).toBe(25_000);
+    expect(editor.commands.redo()).toBe(true);
+    expect(searchDocument(editor, "x", "refresh").total).toBe(25_001);
+    clearDocumentSearch(editor);
+    expect(editor.view.dom.querySelectorAll(".document-search-match")).toHaveLength(0);
+    expect(documentSearchPluginKey.getState(editor.state)?.highlightsLimited).toBe(false);
+  });
+
+  it("does not limit repeated matches that share one rendered HTML atom", () => {
+    const editor = new Editor({
+      extensions: [StarterKit, HtmlPreview, DocumentSearch],
+      content: { type: "doc", content: [{ type: "htmlPreview", attrs: { source: `<p>${"x ".repeat(5_000)}</p>` } }] },
+      editorProps: { handleScrollToSelection: () => true },
+    });
+    editors.push(editor);
+    expect(searchDocument(editor, "x", "reset")).toEqual({ current: 1, total: 5_000 });
+    expect(searchDocument(editor, "x", "previous")).toEqual({ current: 5_000, total: 5_000 });
+    expect(editor.state.selection).toBeInstanceOf(NodeSelection);
+    expect(documentSearchPluginKey.getState(editor.state)?.decorations.find()).toHaveLength(1);
+  });
+
+  it("shares the highlight budget with comment widgets and refreshes it on metadata changes", () => {
+    const editor = new Editor({
+      extensions: [StarterKit, createCommentDecorationsExtension({ current: undefined }), DocumentSearch],
+      content: { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: "x ".repeat(5_000) }] }] },
+      editorProps: { handleScrollToSelection: () => true },
+    });
+    editors.push(editor);
+    searchDocument(editor, "x", "reset");
+    const withoutComments = documentSearchPluginKey.getState(editor.state)!.decorations.find().length;
+    const positions = Array.from({ length: 1_000 }, (_, index) => ({
+      id: `point-${index}`, kind: "position", from: 1, to: 1, status: "active", number: index + 1,
+    }));
+    editor.view.dispatch(editor.state.tr.setMeta(commentDecorationsPluginKey, positions));
+    const withComments = documentSearchPluginKey.getState(editor.state)!.decorations.find().length;
+    expect(withComments).toBeLessThan(withoutComments);
+    expect(withComments * 3 + positions.length * 3 + 3).toBeLessThanOrEqual(maximumCanvasNodes);
+    expect(documentSearchPluginKey.getState(editor.state)?.matches).toHaveLength(5_000);
+    expect(editor.view.dom.querySelector(".document-search-match--active")?.textContent).toBe("x");
+    editor.view.dispatch(editor.state.tr.setMeta(commentDecorationsPluginKey, []));
+    expect(documentSearchPluginKey.getState(editor.state)?.decorations.find()).toHaveLength(withoutComments);
+    expect(editor.can().undo()).toBe(false);
+  });
+
+  it("reserves newly collapsed range widgets before rendering a document edit", () => {
+    const editor = new Editor({
+      extensions: [StarterKit, createCommentDecorationsExtension({ current: undefined }), DocumentSearch],
+      content: { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: "x ".repeat(5_000) }] }] },
+      editorProps: { handleScrollToSelection: () => true },
+    });
+    editors.push(editor);
+    const positions = Array.from({ length: 1_000 }, (_, index) => ({
+      id: `range-${index}`, kind: "range", from: 1, to: 2, status: "active", number: index + 1,
+    }));
+    editor.view.dispatch(editor.state.tr.setMeta(commentDecorationsPluginKey, positions));
+    searchDocument(editor, "x", "reset");
+    const previousCount = documentSearchPluginKey.getState(editor.state)!.decorations.find().length;
+    editor.view.dispatch(editor.state.tr.delete(1, 2));
+    const current = documentSearchPluginKey.getState(editor.state)!;
+    expect(editor.view.dom.querySelectorAll("[data-comment-marker]")).toHaveLength(1_000);
+    expect(current.matches).toHaveLength(4_999);
+    expect(current.decorations.find().length).toBeLessThan(previousCount);
+    expect(current.decorations.find().length * 3 + 3_000 + 3).toBeLessThanOrEqual(maximumCanvasNodes);
+  });
+
   it("finds readable inline HTML and selects its atom range without changing the document", () => {
     const editor = new Editor({
       extensions: [StarterKit, InlineHtmlPreview, DocumentSearch],

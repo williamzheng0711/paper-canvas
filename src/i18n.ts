@@ -40,6 +40,8 @@ const zhHant = {
   findTypeToSearch: '輸入文字以搜尋',
   findNoResults: '找不到結果',
   findResults: (current: number, total: number) => `${current} / ${total}`,
+  findHighlightsLimited: '匹配標示受到限制，仍可逐一瀏覽全部結果。',
+  outlineLimited: '大型原始碼的大綱僅顯示部分縮短的標題。完整內容已保留。',
   findPrevious: '上一個結果（Shift + Enter）',
   findNext: '下一個結果（Enter）',
   closeFind: '關閉搜尋（Esc）',
@@ -159,6 +161,7 @@ const zhHant = {
   invalidFilename: '請輸入有效的檔名。',
   filenameExists: '目標檔名已存在，請使用另一個名稱。',
   assetsDirectoryExists: '目標圖片 assets 目錄已存在，請先選擇另一個檔名。',
+  assetRewriteLimited: '這份大型文件可能包含圖片，無法安全更新圖片路徑。請先儲存至原位置，或縮短文件後再重新命名、另存或導出。完整內容已保留。',
   untitledFilename: '未命名.md',
 };
 
@@ -198,6 +201,8 @@ const zhHans: Messages = {
   findTypeToSearch: '输入文字以搜索',
   findNoResults: '找不到结果',
   findResults: (current, total) => `${current} / ${total}`,
+  findHighlightsLimited: '匹配标示受到限制，仍可逐一浏览全部结果。',
+  outlineLimited: '大型源码的大纲仅显示部分缩短的标题。完整内容已保留。',
   findPrevious: '上一个结果（Shift + Enter）',
   findNext: '下一个结果（Enter）',
   closeFind: '关闭搜索（Esc）',
@@ -316,6 +321,7 @@ const zhHans: Messages = {
   invalidFilename: '请输入有效的文件名。',
   filenameExists: '目标文件名已存在，请使用其他名称。',
   assetsDirectoryExists: '目标图片 assets 目录已存在，请先选择其他文件名。',
+  assetRewriteLimited: '这份大型文档可能包含图片，无法安全更新图片路径。请先保存到原位置，或缩短文档后再重命名、另存或导出。完整内容已保留。',
   untitledFilename: '未命名.md',
 };
 
@@ -353,6 +359,8 @@ const en: Messages = {
   findTypeToSearch: 'Type to search',
   findNoResults: 'No results',
   findResults: (current, total) => `${current} / ${total}`,
+  findHighlightsLimited: 'Highlighting is limited; you can navigate every result.',
+  outlineLimited: 'This large source shows a limited outline with shortened headings. All writing is preserved.',
   findPrevious: 'Previous result (Shift + Enter)',
   findNext: 'Next result (Enter)',
   closeFind: 'Close find (Esc)',
@@ -471,6 +479,7 @@ const en: Messages = {
   invalidFilename: 'Enter a valid filename.',
   filenameExists: 'That filename already exists. Choose another one.',
   assetsDirectoryExists: 'The target image assets folder already exists. Choose another filename.',
+  assetRewriteLimited: 'This large document may contain images, so image paths cannot be updated safely. Save at its current location, or shorten it before renaming, saving elsewhere, or exporting. All writing is preserved.',
   untitledFilename: 'Untitled.md',
 };
 

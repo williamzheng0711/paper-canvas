@@ -19,7 +19,7 @@ import { documentsEqual } from './editor/documentSync';
 import { canvasDocumentSupported } from './editor/canvasCapacity';
 import { htmlPreviewText } from './editor/HtmlPreview';
 import { markdownToDocument } from './editor/markdown';
-import { collectOutline } from './editor/outline';
+import { collectOutlineResult } from './editor/outline';
 import { imagePathSourceChanges, mapImagePathComments, renameMarkdownImageAssets } from './editor/markdownAssetReferences';
 import { captureViewport, restoreViewport, type ViewportSnapshot } from './editor/modeTransition';
 import type { SearchDirection, SearchResult, SwitchableEditorHandle } from './editor/search';
@@ -104,24 +104,36 @@ function documentMetrics(document: JSONContent): {
   const walk = (node: JSONContent): void => {
     const html = node.type === 'htmlPreview' || node.type === 'inlineHtmlPreview';
     const inline = node.type === 'inlineHtmlPreview';
+    const rawSource = node.type === 'unsupportedMarkdown';
     const content = html
       ? htmlPreviewText(String(node.attrs?.source ?? ''), inline ? 'inline' : 'block', { preserveEdges: inline })
+      : rawSource ? String(node.attrs?.source ?? '')
       : node.text ?? '';
-    characterParts.push(html ? content.replace(/\n/g, '') : content);
+    characterParts.push(rawSource ? content.replace(/[\r\n]/g, '') : html ? content.replace(/\n/g, '') : content);
     wordParts.push(content);
     node.content?.forEach(walk);
     if (['paragraph', 'heading', 'codeBlock', 'hardBreak', 'htmlPreview'].includes(node.type ?? '')) wordParts.push('\n');
   };
   walk(document);
-  const characters = [...characterParts.join('').trim()].length;
+  let characters = 0;
+  for (const character of characterParts.join('').trim()) {
+    if (character) characters += 1;
+  }
   const text = wordParts.join('').trim();
-  const cjk = (text.match(/[\u3400-\u9fff\uf900-\ufaff]/g) ?? []).length;
-  const nonCjkWords = text
-    .replace(/[\u3400-\u9fff\uf900-\ufaff]/g, ' ')
-    .trim()
-    .split(/\s+/)
-    .filter(Boolean).length;
-  return { characters, words: cjk + nonCjkWords };
+  let words = 0;
+  let inWord = false;
+  for (const character of text) {
+    const code = character.charCodeAt(0);
+    if ((code >= 0x3400 && code <= 0x9fff) || (code >= 0xf900 && code <= 0xfaff)) {
+      words += 1;
+      inWord = false;
+    } else if (/\s/.test(character)) inWord = false;
+    else if (!inWord) {
+      words += 1;
+      inWord = true;
+    }
+  }
+  return { characters, words };
 }
 
 function documentStateFromMarkdown(
@@ -522,6 +534,7 @@ export default function App() {
             setExternalRawMarkdown(normalizedDraft.sourceMarkdown ?? documentToPortableMarkdown(normalizedDraft.document, normalizedDraft.comments));
             sourceModeRef.current = true;
             setSourceMode(true);
+            setSourceOutline(collectOutlineResult(normalizedDraft.document));
           }
           advanceRevision();
           persistedDraft.current = { session: documentSessionRef.current, revision: editRevisionRef.current };
@@ -641,7 +654,7 @@ export default function App() {
       setSourceMode(largeDocument);
       if (largeDocument) {
         setExternalRawMarkdown(normalizedFile.sourceMarkdown!);
-        setSourceOutline(collectOutline(normalizedFile.document));
+        setSourceOutline(collectOutlineResult(normalizedFile.document));
       }
       setOutlineTarget(undefined);
       setNewCommentTarget(null);
@@ -1329,7 +1342,7 @@ export default function App() {
       fileRef.current = nextFile;
       setFile(nextFile);
       setExternalRawMarkdown(markdown);
-      setSourceOutline(collectOutline(currentFile.document));
+      setSourceOutline(collectOutlineResult(currentFile.document));
       sourceModeRef.current = true;
       setSourceEditorSession(documentSessionRef.current);
       setSourceMode(true);
@@ -1429,9 +1442,10 @@ export default function App() {
     return () => window.removeEventListener('keydown', shortcuts);
   }, [closeSearch, newFile, openFile, openSearch, saveCurrent, searchOpen]);
 
-  const canvasOutline = useMemo(() => collectOutline(file.document), [file.document]);
+  const canvasOutline = useMemo(() => collectOutlineResult(file.document), [file.document]);
   const [sourceOutline, setSourceOutline] = useState(canvasOutline);
-  const outline = sourceMode ? sourceOutline : canvasOutline;
+  const outlineResult = sourceMode ? sourceOutline : canvasOutline;
+  const outline = outlineResult.headings;
   const [metrics, setMetrics] = useState(() => documentMetrics(file.document));
 
   const metricsTimerRef = useRef<number | undefined>(undefined);
@@ -1454,7 +1468,7 @@ export default function App() {
           : markdownToDocument(parseMarkdownComments(rawMarkdownRef.current).body)
         : canvasSearch.current?.getDocument?.() ?? fileRef.current.document;
       const next = documentMetrics(currentDocument);
-      if (sourceModeRef.current) setSourceOutline(collectOutline(currentDocument));
+      if (sourceModeRef.current) setSourceOutline(collectOutlineResult(currentDocument));
       setMetrics((current) =>
         current.characters === next.characters && current.words === next.words ? current : next,
       );
@@ -1899,6 +1913,9 @@ export default function App() {
           <button type="button" aria-label={text.closeFind} title={text.closeFind} onClick={closeSearch}>
             ×
           </button>
+          {searchResult.highlightsLimited && (
+            <p className="document-search__note" role="status">{text.findHighlightsLimited}</p>
+          )}
         </form>
       )}
       <section className="workspace">
@@ -1922,6 +1939,7 @@ export default function App() {
             </div>
             <div className="sidebar-content">
               <section id="outline-panel" role="tabpanel" aria-labelledby="outline-tab" hidden={sidebarTab !== 'outline'}>
+                {outlineResult.limited && <p className="outline-empty" role="status">{text.outlineLimited}</p>}
                 {outline.length === 0 ? (
                   <p className="muted">{text.noHeadings}</p>
                 ) : (

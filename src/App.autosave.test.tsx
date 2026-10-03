@@ -5,7 +5,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import App from './App';
 import { createMarkdownComment, parseMarkdownComments, relocateMarkdownComments, serializeMarkdownWithComments, type CommentPlacement, type MarkdownComment } from './editor/comments';
 import { documentToMarkdown, markdownToDocument } from './editor/markdown';
-import type { SwitchableEditorHandle } from './editor/search';
+import type { SearchResult, SwitchableEditorHandle } from './editor/search';
 import type { EditorFile } from './lib/files';
 import type * as FileLibrary from './lib/files';
 import { FileRenameRecoveryError, rebaseEditorFileAssets } from './lib/files';
@@ -39,7 +39,7 @@ const harness = vi.hoisted(() => ({
   sourceMounts: 0,
   sourceUnmounts: 0,
   searchHandle: {
-    search: vi.fn<(query: string, direction: 'reset' | 'next' | 'previous' | 'refresh') => { current: number; total: number }>(
+    search: vi.fn<(query: string, direction: 'reset' | 'next' | 'previous' | 'refresh') => SearchResult>(
       () => ({ current: 0, total: 0 }),
     ),
     clearSearch: vi.fn(),
@@ -469,6 +469,19 @@ describe('App autosave cursor stability', () => {
     expect(saved.comments).toHaveLength(3_333);
     expect(saved.comments.at(-1)?.content).toBe('Newest 中文 🧪 note');
     expect(saved.comments.slice(0, -1).map((comment) => comment.id)).toEqual(comments.map((comment) => comment.id));
+  });
+
+  it('shows a bounded outline notice while retaining the entire oversized source', async () => {
+    const sourceMarkdown = Array.from({ length: 600 }, (_, index) => `# Heading ${index}\n\n${'x'.repeat(600)}\n\n`).join('');
+    await act(async () => root.unmount());
+    files.loadDraft.mockResolvedValueOnce({ name: 'Many headings.md', document: markdownToDocument(sourceMarkdown), sourceMarkdown });
+    root = createRoot(host);
+    await act(async () => { root.render(<App />); await flushEffects(); await vi.advanceTimersByTimeAsync(300); });
+    expect(readingModeButton('source').getAttribute('aria-pressed')).toBe('true');
+    expect(host.querySelectorAll('.outline-list button')).toHaveLength(500);
+    expect(host.querySelector('#outline-panel [role="status"]')?.textContent).toBe(getMessages().outlineLimited);
+    expect(harness.sourceProps?.value).toBe(sourceMarkdown);
+    expect(host.querySelector('.statusbar')?.textContent).toContain(getMessages().metrics(2_400, sourceMarkdown.replace(/[\r\n]/g, '').trim().length));
   });
 
   it('keeps a newly oversized source edit intact when canvas, outline, or PDF is requested', async () => {
@@ -1780,6 +1793,24 @@ describe('App autosave cursor stability', () => {
     expect(host.querySelector('.document-search')).toBeNull();
     expect(harness.searchHandle.clearSearch).toHaveBeenCalledOnce();
     expect(harness.searchHandle.focus).toHaveBeenCalledOnce();
+  });
+
+  it('explains bounded highlights while preserving the complete search count and navigation', async () => {
+    harness.searchHandle.getSelectedText.mockReturnValue('x');
+    harness.searchHandle.search.mockReturnValue({ current: 1, total: 125_000, highlightsLimited: true });
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'f', metaKey: true, bubbles: true }));
+      await flushEffects();
+    });
+    expect(host.querySelector('.document-search__result')?.textContent).toBe('1 / 125000');
+    expect(host.querySelector('.document-search__note')?.textContent).toBe(getMessages().findHighlightsLimited);
+    harness.searchHandle.search.mockReturnValue({ current: 125_000, total: 125_000, highlightsLimited: true });
+    await act(async () => host.querySelector<HTMLInputElement>('input[type="search"]')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })));
+    expect(harness.searchHandle.search).toHaveBeenLastCalledWith('x', 'next');
+    expect(host.querySelector('.document-search__result')?.textContent).toBe('125000 / 125000');
+    harness.searchHandle.search.mockReturnValue({ current: 1, total: 3 });
+    await act(async () => host.querySelector<HTMLInputElement>('input[type="search"]')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })));
+    expect(host.querySelector('.document-search__note')).toBeNull();
   });
 
   it('applies and persists an adjusted line spacing without marking the document dirty', async () => {

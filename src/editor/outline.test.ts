@@ -8,9 +8,68 @@ import { focusFormulaSource, InlineFormula } from './Formula';
 import { InlineHtmlPreview } from './HtmlPreview';
 import { FootnoteDefinition, FootnoteReference } from './Footnote';
 import { markdownToDocument } from './markdown';
-import { collectOutline, renderedHeadingText, scrollToOutlineHeading } from './outline';
+import { collectOutline, collectOutlineResult, maximumSourceOutlineHeadings, renderedHeadingText, scrollToOutlineHeading } from './outline';
 
 describe('outline navigation', () => {
+  it('keeps bounded ATX and setext navigation for oversized exact source while excluding code and HTML deceptions', () => {
+    const source = '\uFEFF# Large heading\r\n\r\n' +
+      '```markdown\r\n# Fenced deception\r\nSetext code\r\n---\r\n```\r\n\r\n' +
+      '    # Indented deception\r\n\t# Tab deception\r\n\r\n' +
+      '<div>\r\n# HTML deception\r\n</div>\r\n\r\n' +
+      '<!--\r\n# Comment deception\r\n-->\r\n\r\n' +
+      '<pre>\r\n# Raw deception\r\n</pre>\r\n\r\n' +
+      'Setext **section**\r\n===\r\n\r\n## Cost $x^2$ <kbd>Ctrl</kbd>\r\n\r\n' +
+      'Retained writing.\r\n\r\n'.repeat(15_000);
+    const document = markdownToDocument(source);
+    expect(document.content?.[0].type).toBe('unsupportedMarkdown');
+    expect(collectOutline(document)).toEqual([
+      { level: 1, text: 'Large heading' },
+      { level: 1, text: 'Setext section' },
+      { level: 2, text: 'Cost x^2 Ctrl' },
+    ]);
+    expect(collectOutlineResult(document).limited).toBe(false);
+    expect(document.content?.[0].attrs?.source).toBe(source);
+  });
+
+  it('bounds oversized source outline entries and candidate labels without constructing a giant sidebar', () => {
+    const source = Array.from({ length: maximumSourceOutlineHeadings + 10 }, (_, index) => `# Heading ${index}\n\n`).join('') + 'x'.repeat(300_000);
+    const outline = collectOutlineResult(markdownToDocument(source));
+    expect(outline.headings).toHaveLength(maximumSourceOutlineHeadings);
+    expect(outline.headings[0].text).toBe('Heading 0');
+    expect(outline.headings.at(-1)?.text).toBe(`Heading ${maximumSourceOutlineHeadings - 1}`);
+    expect(outline.limited).toBe(true);
+    const label = collectOutlineResult(markdownToDocument('# ' + '🧪'.repeat(300) + '\n\n' + 'x'.repeat(300_000)));
+    expect(label.headings[0].text).toBe('🧪'.repeat(200) + '…');
+    expect(label.limited).toBe(true);
+    const giant = collectOutlineResult(markdownToDocument('# ' + 'x'.repeat(25_000) + '\n\n# Short\n\n' + 'x'.repeat(300_000)));
+    expect(giant.headings).toEqual([{ level: 1, text: 'Short' }]);
+    expect(giant.limited).toBe(true);
+  });
+
+  it.each([
+    '> Foo\n---\n\n# Real',
+    '- ```\n  # Fake\n\n# Real',
+    '- > # Nested\n\n# Real',
+    '- Item\n\n    ### Nested\n\n# Real',
+    '```\n- ```\n# Fake\n```\n\n# Real',
+    '> ```\n> > ```\n> # Fake\n> ```\n\n# Real',
+    '- ```\n  - ```\n  # Fake\n  ```\n\n# Real',
+  ])('keeps source outline container boundaries and code contents consistent with ordinary parsing: %s', (source) => {
+    const expected = collectOutline(markdownToDocument(source));
+    const oversized = source + '\n\n' + 'x'.repeat(300_000);
+    expect(collectOutline(markdownToDocument(oversized))).toEqual(expected);
+  });
+
+  it('bounds total candidate parsing for dense adversarial headings', () => {
+    const source = ('# ' + '\\('.repeat(9000) + '\n\n').repeat(500);
+    const started = performance.now();
+    const result = collectOutlineResult(markdownToDocument(source));
+    expect(result.headings.length).toBeGreaterThan(0);
+    expect(result.headings.length).toBeLessThan(500);
+    expect(result.limited).toBe(true);
+    expect(performance.now() - started).toBeLessThan(1500);
+  });
+
   it('labels formulas and inline HTML using authored content rather than editor controls', () => {
     const document = markdownToDocument(
       '# Cost $x^2$\n\n## Use <kbd>Ctrl</kbd> &amp; <sup>2</sup>\n\n### $\\alpha$\n\n## <!-- hidden -->',

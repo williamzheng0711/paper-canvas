@@ -5,9 +5,13 @@ import {
   Plugin,
   PluginKey,
   TextSelection,
+  type EditorState,
+  type Transaction,
 } from "@tiptap/pm/state";
 import { Decoration, DecorationSet } from "@tiptap/pm/view";
 import { htmlPreviewText } from "./HtmlPreview";
+import { remainingCanvasNodes } from "./canvasCapacity";
+import { commentDecorationsPluginKey, mapCanvasCommentPosition, type CanvasCommentPosition } from "./commentDecorations";
 import type {
   DocumentSelectionAnchor,
   MarkdownSelection,
@@ -23,6 +27,7 @@ export type SearchMatch = {
 export type SearchResult = {
   current: number;
   total: number;
+  highlightsLimited?: boolean;
 };
 
 export type SearchableEditorHandle = {
@@ -65,6 +70,7 @@ type DocumentSearchState = {
   matches: SearchMatch[];
   active: number;
   decorations: DecorationSet;
+  highlightsLimited: boolean;
 };
 
 type SearchMeta = Pick<DocumentSearchState, "query" | "matches" | "active">;
@@ -198,7 +204,8 @@ function buildDecorations(
   document: ProseMirrorNode,
   matches: SearchMatch[],
   active: number,
-): DecorationSet {
+  limit: number,
+): Pick<DocumentSearchState, "decorations" | "highlightsLimited"> {
   const ranges = new Map<string, { match: SearchMatch; active: boolean }>();
   matches.forEach((match, index) => {
     const key = `${match.from}:${match.to}`;
@@ -208,9 +215,12 @@ function buildDecorations(
       active: index === active || Boolean(previous?.active),
     });
   });
-  return DecorationSet.create(
+  const uniqueRanges = Array.from(ranges.values());
+  const activeRange = uniqueRanges.findIndex((range) => range.active);
+  const start = Math.max(0, Math.min(uniqueRanges.length - limit, activeRange - Math.floor(limit / 2)));
+  return { highlightsLimited: uniqueRanges.length > limit, decorations: DecorationSet.create(
     document,
-    Array.from(ranges.values(), ({ match, active: isActive }) => {
+    uniqueRanges.slice(start, start + limit).map(({ match, active: isActive }) => {
       const attributes = {
         class: isActive
           ? "document-search-match document-search-match--active"
@@ -220,7 +230,21 @@ function buildDecorations(
         ? Decoration.node(match.from, match.to, attributes)
         : Decoration.inline(match.from, match.to, attributes);
     }),
-  );
+  ) };
+}
+
+function highlightLimit(transaction: Transaction, state: EditorState): number {
+  const requested = transaction.getMeta(commentDecorationsPluginKey) as CanvasCommentPosition[] | undefined;
+  const current = requested ?? commentDecorationsPluginKey.getState(state)?.positions ?? [];
+  const positions = transaction.docChanged && !requested
+    ? current.map((position) => mapCanvasCommentPosition(position, transaction).position)
+    : current;
+  const comments = positions.map((position) => ({ target: position.kind === "position"
+    ? { kind: "position" as const }
+    : { kind: "range" as const, from: position.from, to: position.to },
+  }));
+  // Highlight spans split the surrounding text into two additional DOM nodes.
+  return Math.max(0, Math.floor(remainingCanvasNodes(transaction.doc, comments) / 3));
 }
 
 function closestMatch(matches: SearchMatch[], position: number): number {
@@ -270,19 +294,24 @@ function createDocumentSearchPlugin(): Plugin<DocumentSearchState> {
         matches: [],
         active: -1,
         decorations: DecorationSet.empty,
+        highlightsLimited: false,
       }),
-      apply: (transaction, current) => {
+      apply: (transaction, current, state) => {
         const meta = transaction.getMeta(documentSearchPluginKey) as
           SearchMeta | undefined;
         if (meta) {
           return {
             ...meta,
-            decorations: buildDecorations(
+            ...buildDecorations(
               transaction.doc,
               meta.matches,
               meta.active,
+              highlightLimit(transaction, state),
             ),
           };
+        }
+        if (transaction.getMeta(commentDecorationsPluginKey) && current.query) {
+          return { ...current, ...buildDecorations(transaction.doc, current.matches, current.active, highlightLimit(transaction, state)) };
         }
         if (!transaction.docChanged || !current.query) return current;
 
@@ -314,7 +343,7 @@ function createDocumentSearchPlugin(): Plugin<DocumentSearchState> {
           query: current.query,
           matches,
           active,
-          decorations: buildDecorations(transaction.doc, matches, active),
+          ...buildDecorations(transaction.doc, matches, active, highlightLimit(transaction, state)),
         };
       },
     },
@@ -339,7 +368,7 @@ export function searchDocument(
   direction: SearchDirection,
 ): SearchResult {
   const previous = documentSearchPluginKey.getState(editor.state);
-  const matches = findDocumentMatches(editor.state.doc, query);
+  const matches = previous?.query === query ? previous.matches : findDocumentMatches(editor.state.doc, query);
   const active = resolveActiveMatch(
     matches,
     query,
@@ -370,7 +399,9 @@ export function searchDocument(
       ?.scrollIntoView?.({ block: "center", inline: "nearest" });
   }
 
-  return { current: active + 1, total: matches.length };
+  return { current: active + 1, total: matches.length,
+    ...(documentSearchPluginKey.getState(editor.state)?.highlightsLimited ? { highlightsLimited: true } : {}),
+  };
 }
 
 export function clearDocumentSearch(editor: Editor): void {

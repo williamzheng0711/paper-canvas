@@ -9,6 +9,8 @@ import {
   imagePathSourceChanges,
 } from "./markdownAssetReferences";
 import { localAssetPath } from "../lib/localAssets";
+import { getMessages } from "../i18n";
+import { maximumCanvasCharacters } from "./documentLimits";
 import {
   createMarkdownComment,
   markdownFingerprint,
@@ -20,6 +22,36 @@ const oldPath = "/notes/research.md";
 const newPath = "/notes/renamed.md";
 const rename = (source: string) =>
   renameMarkdownImageAssets(source, oldPath, newPath);
+
+describe("bounded path updates for large source", () => {
+  it.each(["\\(", "`x`", "paragraph\r\n\r\n"])(
+    "changes image-free file locations without parsing dense %j writing",
+    (unit) => {
+      const source = "\uFEFF" + unit.repeat(Math.ceil(5 * 1024 * 1024 / unit.length));
+      const started = performance.now();
+      expect(rename(source)).toBe(source);
+      expect(rebaseMarkdownImageAssets(source, oldPath, "/exports/copy.md")).toBe(source);
+      expect(imagePathSourceChanges(source, source, oldPath, "/exports/copy.md")).toEqual({ previousValue: source, changes: [] });
+      expect(performance.now() - started).toBeLessThan(1000);
+    },
+  );
+
+  it.each(["![Image](research.assets/image.svg)", "![Image][reference]\n\n[reference]: research.assets/image.svg", '<IMG\r\nSRC="research.assets/image.svg">'])(
+    "rejects a large possible image before parsing or rewriting: %s",
+    (image) => {
+      const source = "\\(".repeat(maximumCanvasCharacters) + "\r\n\r\n" + image;
+      const original = source;
+      const started = performance.now();
+      expect(() => rename(source)).toThrow(getMessages().assetRewriteLimited);
+      expect(() => rebaseMarkdownImageAssets(source, oldPath, "/exports/copy.md")).toThrow(getMessages().assetRewriteLimited);
+      expect(() => imagePathSourceChanges(source, source, oldPath, "/exports/copy.md")).toThrow(getMessages().assetRewriteLimited);
+      expect(source).toBe(original);
+      expect(renameMarkdownImageAssets(source, oldPath, oldPath)).toBe(source);
+      expect(rebaseMarkdownImageAssets(source, oldPath, "/notes/copy.md")).toBe(source);
+      expect(performance.now() - started).toBeLessThan(1000);
+    },
+  );
+});
 
 describe("image edits in UTF-8 BOM documents", () => {
   it.each(["\n", "\r\n", "\r"])(

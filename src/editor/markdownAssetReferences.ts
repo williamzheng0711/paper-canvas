@@ -2,7 +2,9 @@ import { unified } from "unified";
 import remarkParse from "remark-parse";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
+import { getMessages } from "../i18n";
 import { isWindowsFilePath, localAssetPath } from "../lib/localAssets";
+import { maximumCanvasCharacters } from "./documentLimits";
 import { normalizeLatexDelimiters } from "./markdown";
 import { htmlCommentEndOffset } from "./htmlSafety";
 import {
@@ -633,6 +635,11 @@ function markdownImageEdits(
   source: string,
   rewrite: DestinationRewrite,
 ): SourceEdit[] {
+  // Every supported image syntax contains one of these tokens. Image-free
+  // writing needs no Markdown parse when its file location changes.
+  if (!source.includes("![") && !/<img\b/i.test(source)) return [];
+  if (source.length > maximumCanvasCharacters)
+    throw new Error(getMessages().assetRewriteLimited);
   // remark removes a leading BOM before assigning offsets. Keep its syntax
   // positions aligned with the original bytes when applying image-path edits.
   const offset = source.startsWith('\uFEFF') ? 1 : 0;

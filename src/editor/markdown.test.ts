@@ -19,6 +19,19 @@ function nodesOfType(document: JSONContent, type: string): JSONContent[] {
 }
 
 describe("PaperCanvas Markdown subset", () => {
+  it.each(["\\(", "`x", "# Heading\r\n\r\nParagraph.\r\n\r\n"])(
+    "preserves oversized %j source before unbounded Markdown parsing can stall",
+    (chunk) => {
+      const source = "\uFEFF" + chunk.repeat(Math.ceil(5 * 1024 * 1024 / chunk.length));
+      const started = performance.now();
+      const document = markdownToDocument(source);
+      expect(document.content).toHaveLength(1);
+      expect(document.content?.[0].type).toBe("unsupportedMarkdown");
+      expect(documentToMarkdown(document)).toBe(source);
+      expect(performance.now() - started).toBeLessThan(1000);
+    },
+  );
+
   it.each(["", "$", "x$y", "\\$", "$$", "a$$b", "a$$$b", "$$ + $x", "a $ b $ c"])(
     "preserves inline formula kind and source when dollar fencing would look like display math: %j",
     (latex) => {

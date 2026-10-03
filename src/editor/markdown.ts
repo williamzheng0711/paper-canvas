@@ -13,6 +13,7 @@ import { isDisplayLatexEnvironment } from "./formulaInput";
 import { isHtmlPreviewCandidate } from "./htmlSafety";
 import { requiresHtmlTable, tableToHtml } from "./markdownTableHtml";
 import { selectionMarker } from "./selectionMarker";
+import { maximumCanvasCharacters } from "./documentLimits";
 
 const astralCharacter = "[\\uD800-\\uDBFF][\\uDC00-\\uDFFF]";
 const astralTextEdges = new RegExp(
@@ -1225,6 +1226,9 @@ function hasAmbiguousHtmlParagraph(
 
 export function markdownToDocument(markdown: string): JSONContent {
   const source = parseMarkdownComments(markdown).body;
+  // Parsing dense Markdown can stall long before the Canvas DOM limit is
+  // checked. Source mode retains every character without building that tree.
+  if (source.length > maximumCanvasCharacters) return preservedSourceDocument(source);
   // CommonMark replaces literal NULs with U+FFFD; a lossless source atom keeps
   // those bytes recoverable instead of silently modifying the opened file.
   if (source.includes("\0")) return preservedSourceDocument(source);

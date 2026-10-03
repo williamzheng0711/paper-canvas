@@ -1,6 +1,7 @@
 import type { JSONContent } from '@tiptap/core';
 import { unified } from 'unified';
 import remarkParse from 'remark-parse';
+import { maximumCanvasCharacters } from './documentLimits';
 
 export const commentsMetadataVersion = 1;
 export const commentsMetadataMarker = 'papercanvas-comments';
@@ -189,6 +190,10 @@ export function parseMarkdownComments(markdown: string): ParsedComments {
       : undefined;
     if (insertedSeparator) body = body.slice(0, -insertedSeparator);
     if (!fingerprintMatches && !insertedSeparator) {
+      // A stale footer in oversized source cannot be proved to be standalone
+      // without reparsing the whole document. Keep every byte as source.
+      if (body.length > maximumCanvasCharacters)
+        return { body: markdown, comments: [], status: 'invalid' };
       // Examples in a fence, raw HTML, or a quote are user text. A current
       // fingerprint still identifies our own metadata appended to an unclosed
       // construct, while standalone older or externally edited blocks work.

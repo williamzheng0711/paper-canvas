@@ -4,11 +4,11 @@ import { Plugin } from '@tiptap/pm/state';
 import { TableMap } from '@tiptap/pm/tables';
 import { canvasNodesAndMarks } from './canvasSchema';
 import { formulaPreview, maximumFormulaPreviewMarkup } from './formulaRendering';
+import { maximumCanvasCharacters, maximumCanvasNodes } from './documentLimits';
 
 // Very large editable DOM trees stall native accessibility queries. Source
 // mode keeps the complete document editable without building that DOM tree.
-export const maximumCanvasNodes = 10_000;
-export const maximumCanvasCharacters = 250_000;
+export { maximumCanvasCharacters, maximumCanvasNodes } from './documentLimits';
 
 type TreeNode = JSONContent | ModelNode;
 type CanvasCommentTarget = { kind: 'position' } | { kind: 'range'; from: number; to: number };
@@ -71,17 +71,17 @@ function tableCanvasCost(table: TreeNode): number | undefined {
   return extraNodes;
 }
 
-export function canvasDocumentSupported(
+export function remainingCanvasNodes(
   document: TreeNode,
   comments: readonly { target: CanvasCommentTarget }[] = [],
-): boolean {
+): number {
   const frames = [{ node: document, index: -1 }];
   let nodes = 0;
   for (const { target } of comments) {
     if (target.kind === 'position' || target.from === target.to) {
       // A point marker creates a button, its label, and a split text node.
       nodes += 3;
-      if (nodes > maximumCanvasNodes) return false;
+      if (nodes > maximumCanvasNodes) return -1;
     }
   }
   let characters = 0;
@@ -95,19 +95,19 @@ export function canvasDocumentSupported(
         const value = frame.node.attrs?.[key];
         if (typeof value === 'string') characters += value.length;
       }
-      if (nodes > maximumCanvasNodes || characters > maximumCanvasCharacters) return false;
+      if (nodes > maximumCanvasNodes || characters > maximumCanvasCharacters) return -1;
       const type = isModelNode(frame.node) ? frame.node.type.name : frame.node.type;
       if (type === 'inlineFormula' || type === 'blockFormula') {
         const preview = formulaPreview(String(frame.node.attrs?.latex ?? ''), type === 'blockFormula');
         nodes += preview.nodes + 3;
         formulaMarkup += preview.html?.length ?? 0;
-        if (nodes > maximumCanvasNodes || formulaMarkup > maximumFormulaPreviewMarkup) return false;
+        if (nodes > maximumCanvasNodes || formulaMarkup > maximumFormulaPreviewMarkup) return -1;
       }
       if (type === 'table') {
         const cost = tableCanvasCost(frame.node);
-        if (cost === undefined) return false;
+        if (cost === undefined) return -1;
         nodes += cost;
-        if (nodes > maximumCanvasNodes) return false;
+        if (nodes > maximumCanvasNodes) return -1;
       }
       const source = frame.node.attrs?.source;
       if ((type === 'htmlPreview' || type === 'inlineHtmlPreview') && typeof source === 'string') {
@@ -117,7 +117,7 @@ export function canvasDocumentSupported(
         const openingTags = /<\s*(?:[!?]|[A-Za-z][A-Za-z0-9:-]*(?=[\s/>]))/g;
         while (openingTags.exec(source)) {
           nodes += 1;
-          if (nodes > maximumCanvasNodes) return false;
+          if (nodes > maximumCanvasNodes) return -1;
         }
       }
       frame.index = 0;
@@ -131,7 +131,14 @@ export function canvasDocumentSupported(
     frame.index += 1;
     frames.push({ node: child, index: -1 });
   }
-  return true;
+  return maximumCanvasNodes - nodes;
+}
+
+export function canvasDocumentSupported(
+  document: TreeNode,
+  comments: readonly { target: CanvasCommentTarget }[] = [],
+): boolean {
+  return remainingCanvasNodes(document, comments) >= 0;
 }
 
 export const CanvasCapacity = Extension.create<{ onLimit: () => void }>({

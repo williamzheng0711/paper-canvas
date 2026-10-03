@@ -56,10 +56,14 @@ describe('opened document image access', () => {
     expect(opened.document.content?.some((node) => node.attrs?.alt === 'Unavailable')).toBe(true);
   });
 
-  it('skips HTML DOM inspection for source-only oversized documents while retaining ordinary image references', async () => {
+  it('retains oversized source without inspecting or authorizing its images until the source is small enough to render', async () => {
     mocks.source = 'a'.repeat(maximumCanvasCharacters + 1) + '\n\n<div><img src="large-html.svg"></div>\n\n![Ordinary](ordinary.svg)\n';
     const opened = await openMarkdownFile(path);
     expect(opened.sourceMarkdown).toBe(mocks.source);
+    expect(opened.document.content?.[0].type).toBe('unsupportedMarkdown');
+    expect(mocks.invoke.mock.calls.some(([command]) => command === 'allow_document_image_files')).toBe(false);
+    mocks.source = '![Ordinary](ordinary.svg)\n';
+    await openMarkdownFile(path);
     expect(mocks.invoke).toHaveBeenCalledWith('allow_document_image_files', { path, images: ['/tmp/outside-home/ordinary.svg'] });
   });
 

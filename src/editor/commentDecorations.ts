@@ -26,7 +26,7 @@ function clampPosition(position: number, document: ProseMirrorNode): number {
   return Math.min(Math.max(0, Math.round(position)), document.content.size);
 }
 
-function mapPosition(
+export function mapCanvasCommentPosition(
   position: CanvasCommentPosition,
   transaction: Transaction,
 ): { position: CanvasCommentPosition; targetChanged: boolean } {
@@ -135,7 +135,7 @@ export function createCommentDecorationsExtension(
             const current = requested ?? commentDecorationsPluginKey.getState(state)?.positions ?? [];
             if (!current.length) return true;
             const positions = transaction.docChanged && !requested
-              ? current.map((position) => mapPosition(position, transaction).position)
+              ? current.map((position) => mapCanvasCommentPosition(position, transaction).position)
               : current;
             const comments = positions.map((position) => ({
               target: position.kind === 'position'
@@ -160,7 +160,7 @@ export function createCommentDecorationsExtension(
                 };
               }
               if (!transaction.docChanged) return current;
-              const mapped = current.positions.map((position) => mapPosition(position, transaction));
+              const mapped = current.positions.map((position) => mapCanvasCommentPosition(position, transaction));
               const positions = mapped.map((result) => result.position);
               const targetChanged = mapped.some((result) => result.targetChanged);
               return {
