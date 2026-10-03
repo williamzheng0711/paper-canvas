@@ -117,6 +117,102 @@ fn validate_markdown_save_path(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn resolved_markdown_path(path: &Path, allow_missing: bool) -> Result<PathBuf, String> {
+    validate_markdown_save_path(path)?;
+    let resolved = match path.canonicalize() {
+        Ok(resolved) => {
+            if !std::fs::metadata(&resolved)
+                .map_err(|error| error.to_string())?
+                .is_file()
+            {
+                return Err("The Markdown document must be a regular file.".into());
+            }
+            resolved
+        }
+        Err(error) if allow_missing && error.kind() == std::io::ErrorKind::NotFound => {
+            // A dangling symlink must not silently become a different document.
+            if std::fs::symlink_metadata(path).is_ok() {
+                return Err("The Markdown document link target no longer exists.".into());
+            }
+            path.parent()
+                .ok_or("The document directory is invalid.")?
+                .canonicalize()
+                .map_err(|error| error.to_string())?
+                .join(
+                    path.file_name()
+                        .ok_or("The document filename is invalid.")?,
+                )
+        }
+        Err(error) => return Err(error.to_string()),
+    };
+    validate_markdown_save_path(&resolved)?;
+    Ok(resolved)
+}
+
+fn frontend_document_path(path: &str) -> String {
+    // Windows canonicalization uses verbatim prefixes. The frontend resolves
+    // Markdown URLs using ordinary drive/UNC roots, so display that spelling
+    // while retaining the same physical file and its exact scope grant.
+    if let Some(unc) = path.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{unc}");
+    }
+    if let Some(drive) = path.strip_prefix(r"\\?\") {
+        let bytes = drive.as_bytes();
+        if bytes.first().is_some_and(u8::is_ascii_alphabetic)
+            && bytes.get(1) == Some(&b':')
+            && bytes.get(2) == Some(&b'\\')
+        {
+            return drive.to_owned();
+        }
+    }
+    path.to_owned()
+}
+
+#[tauri::command]
+async fn resolve_markdown_document_path(
+    app: AppHandle,
+    path: String,
+    allow_missing: bool,
+) -> Result<String, String> {
+    let path = PathBuf::from(path);
+    if !app.fs_scope().is_allowed(&path) {
+        return Err("The document path is outside the granted file scope.".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let resolved = resolved_markdown_path(&path, allow_missing)?;
+        // Mirror the dialog's selected file grant at its physical path only.
+        app.fs_scope()
+            .allow_file(&resolved)
+            .map_err(|error| error.to_string())?;
+        app.state::<tauri::scope::Scopes>()
+            .allow_file(&resolved)
+            .map_err(|error| error.to_string())?;
+        resolved
+            .to_str()
+            .map(frontend_document_path)
+            .ok_or_else(|| "The document path is not valid UTF-8.".into())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn read_markdown_file(app: AppHandle, path: String) -> Result<tauri::ipc::Response, String> {
+    let path = PathBuf::from(path);
+    validate_markdown_save_path(&path)?;
+    if !app.fs_scope().is_allowed(&path) {
+        return Err("The document path is outside the granted file scope.".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let contents = read_regular_file(&path)
+            .map_err(|error| error.to_string())?
+            .ok_or("The Markdown document no longer exists.")?;
+        Ok(tauri::ipc::Response::new(contents))
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 fn replace_file_atomically(
     path: &Path,
     write: impl FnOnce(&mut File) -> std::io::Result<()>,
@@ -968,6 +1064,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             take_opened_files,
+            resolve_markdown_document_path,
+            read_markdown_file,
             write_markdown_file,
             read_recovery_draft,
             write_recovery_draft,
@@ -1012,6 +1110,104 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn canonical_windows_document_spelling_keeps_drive_and_unc_image_roots() {
+        for (canonical, frontend) in [
+            (r"\\?\C:\Users\研究\draft.md", r"C:\Users\研究\draft.md"),
+            (r"\\?\UNC\server\share\draft.md", r"\\server\share\draft.md"),
+            (r"\\server\share\draft.md", r"\\server\share\draft.md"),
+            (r"C:\Users\draft.md", r"C:\Users\draft.md"),
+            (r"/tmp/\\?\C:\literal.md", r"/tmp/\\?\C:\literal.md"),
+            (r"\\?\Volume{123}\draft.md", r"\\?\Volume{123}\draft.md"),
+        ] {
+            assert_eq!(frontend_document_path(canonical), frontend);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn markdown_paths_resolve_document_and_parent_symlinks_before_asset_placement() {
+        let directory = tempfile::tempdir().unwrap();
+        let real = directory.path().join("real");
+        let links = directory.path().join("links");
+        std::fs::create_dir(&real).unwrap();
+        std::fs::create_dir(&links).unwrap();
+        let target = real.join("original.md");
+        std::fs::write(&target, b"\xef\xbb\xbf# Physical writing\r\n").unwrap();
+        let alias = links.join("alias.md");
+        std::os::unix::fs::symlink("../real/original.md", &alias).unwrap();
+        let physical = target.canonicalize().unwrap();
+        assert_eq!(resolved_markdown_path(&alias, false).unwrap(), physical);
+        assert_eq!(resolved_markdown_path(&alias, true).unwrap(), physical);
+        assert_eq!(
+            read_regular_file(&physical).unwrap().unwrap(),
+            b"\xef\xbb\xbf# Physical writing\r\n"
+        );
+        let parent_alias = links.join("directory");
+        std::os::unix::fs::symlink(&real, &parent_alias).unwrap();
+        assert_eq!(
+            resolved_markdown_path(&parent_alias.join("new.md"), true).unwrap(),
+            real.canonicalize().unwrap().join("new.md")
+        );
+        assert!(resolved_markdown_path(&parent_alias.join("new.md"), false).is_err());
+        assert!(std::fs::symlink_metadata(&alias)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn markdown_paths_reject_dangling_looping_and_non_markdown_symlinks() {
+        let directory = tempfile::tempdir().unwrap();
+        let alias = directory.path().join("alias.md");
+        std::os::unix::fs::symlink("missing.md", &alias).unwrap();
+        assert!(resolved_markdown_path(&alias, true).is_err());
+        std::fs::remove_file(&alias).unwrap();
+        std::os::unix::fs::symlink("alias.md", &alias).unwrap();
+        assert!(resolved_markdown_path(&alias, true).is_err());
+        std::fs::remove_file(&alias).unwrap();
+        let other = directory.path().join("image.svg");
+        std::fs::write(&other, b"original image").unwrap();
+        std::os::unix::fs::symlink(&other, &alias).unwrap();
+        assert!(resolved_markdown_path(&alias, true).is_err());
+        assert_eq!(std::fs::read(&other).unwrap(), b"original image");
+    }
+
+    #[test]
+    fn markdown_reads_preserve_exact_bytes_and_reject_directories() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("document.md");
+        let bytes = b"\xef\xbb\xbf# UTF-8 \xf0\x9f\xa7\xaa\r\ninvalid:\xff\0";
+        std::fs::write(&target, bytes).unwrap();
+        assert_eq!(read_regular_file(&target).unwrap().unwrap(), bytes);
+        std::fs::remove_file(&target).unwrap();
+        std::fs::create_dir(&target).unwrap();
+        assert!(resolved_markdown_path(&target, false).is_err());
+        assert_eq!(
+            read_regular_file(&target).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn markdown_fifo_opens_are_rejected_without_waiting_for_a_writer() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("document.md");
+        assert!(std::process::Command::new("mkfifo")
+            .arg(&target)
+            .status()
+            .unwrap()
+            .success());
+        assert!(resolved_markdown_path(&target, false).is_err());
+        assert!(resolved_markdown_path(&target, true).is_err());
+        assert_eq!(
+            read_regular_file(&target).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+    }
 
     #[test]
     fn markdown_saves_validate_absolute_supported_paths() {

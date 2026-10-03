@@ -6,7 +6,10 @@ const mocks = vi.hoisted(() => ({ recovery: null as string | null, invoke: vi.fn
 vi.mock('@tauri-apps/api/core', () => ({
   isTauri: () => true,
   convertFileSrc: (path: string) => `asset://${encodeURIComponent(path)}`,
-  invoke: mocks.invoke,
+  invoke: async (command: string, args?: { path: string }) => {
+    if (command === 'resolve_markdown_document_path') return args!.path;
+    return mocks.invoke(command, args);
+  },
 }));
 vi.mock('@tauri-apps/plugin-dialog', () => ({ save: mocks.save, open: vi.fn(), confirm: vi.fn() }));
 vi.mock('@tauri-apps/plugin-store', () => ({ Store: { load: async () => ({ get: async () => [], set: vi.fn() }) } }));

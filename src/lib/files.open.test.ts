@@ -14,7 +14,10 @@ const harness = vi.hoisted(() => ({
 vi.mock("@tauri-apps/api/core", () => ({
   isTauri: () => true,
   convertFileSrc: (path: string) => `asset://${encodeURIComponent(path)}`,
-  invoke: vi.fn(),
+  invoke: async (command: string, args?: { path: string }) => {
+    if (command === 'resolve_markdown_document_path') return args!.path;
+    if (command === 'read_markdown_file') return harness.read(args!.path);
+  },
 }));
 vi.mock("@tauri-apps/plugin-fs", () => ({
   readFile: harness.read,

@@ -37,7 +37,8 @@ describe('saving documents', () => {
   beforeEach(() => {
     vi.resetAllMocks();
     mocks.invoke.mockImplementation(async (command: string, args?: { path: string; contents: string }) => {
-      if (command === 'write_markdown_file') return mocks.writeMarkdown(args!.path, args!.contents);
+      if (command === 'resolve_markdown_document_path') return args!.path;
+    if (command === 'write_markdown_file') return mocks.writeMarkdown(args!.path, args!.contents);
     });
     mocks.mkdir.mockImplementation(async () => {
       if (!mocks.invoke.mock.calls.some(([command]) => command === 'allow_document_assets')) {

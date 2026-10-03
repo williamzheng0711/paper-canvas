@@ -46,7 +46,13 @@ describe("native document rename", () => {
   beforeEach(() => {
     vi.resetAllMocks();
     mocks.invoke.mockImplementation(async (command: string, args?: { path: string; contents: string; source: string; target: string }) => {
-      if (command === 'write_markdown_file') return mocks.writeMarkdown(args!.path, args!.contents);
+      if (command === 'resolve_markdown_document_path') return args!.path;
+      if (command === 'read_markdown_file') {
+        const source = mocks.entries.get(args!.path);
+        if (typeof source !== 'string') throw new Error(`File missing: ${args!.path}`);
+        return new TextEncoder().encode(source);
+      }
+    if (command === 'write_markdown_file') return mocks.writeMarkdown(args!.path, args!.contents);
       if (command === 'rename_document_entry') return mocks.renameEntry(args!.source, args!.target);
     });
     mocks.entries.clear();

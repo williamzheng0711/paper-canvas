@@ -367,7 +367,9 @@ export async function allowDocumentImageFiles(file: EditorFile): Promise<void> {
 }
 
 async function readMarkdownFile(path: string): Promise<string> {
-  const bytes = await readFile(path);
+  const bytes = isTauri()
+    ? new Uint8Array(await invoke<number[] | ArrayBuffer>('read_markdown_file', { path }))
+    : await readFile(path);
   try {
     // Preserve a UTF-8 BOM and refuse replacement characters that would turn
     // an unchanged save into silent corruption of a differently encoded file.
@@ -377,16 +379,22 @@ async function readMarkdownFile(path: string): Promise<string> {
   }
 }
 
+async function resolveMarkdownDocumentPath(path: string, allowMissing = false): Promise<string> {
+  return isTauri() ? invoke<string>('resolve_markdown_document_path', { path, allowMissing }) : path;
+}
+
 export async function openMarkdownFile(path: string): Promise<EditorFile> {
   const text = getMessages();
   if (!isTauri()) throw new Error(text.externalFilesDesktopOnly);
   if (!isMarkdownFilePath(path)) throw new Error(text.markdownFilesOnly);
+  const requestedPath = path;
+  path = await resolveMarkdownDocumentPath(path);
   const markdown = await readMarkdownFile(path);
   const file = editorFileFromMarkdown(markdown, path);
   await allowDocumentImageFiles(file);
   // History is supplementary. An unavailable settings store must not block a
   // document that was read successfully, including files opened by the OS.
-  await rememberRecent({ path, name: file.name }).catch(() => undefined);
+  await rememberRecent({ path, name: file.name }, requestedPath).catch(() => undefined);
   return file;
 }
 
@@ -398,7 +406,7 @@ export async function chooseSavePath(defaultName: string): Promise<string | null
     defaultPath: isMarkdownFilePath(defaultName) ? defaultName : `${defaultName}.md`,
     filters: [{ name: 'Markdown', extensions: ['md', 'markdown'] }],
   });
-  return selected;
+  return selected ? resolveMarkdownDocumentPath(selected, true) : null;
 }
 
 function markdownExportName(name: string): string {
@@ -465,6 +473,7 @@ function renameDocumentEntry(source: string, target: string): Promise<void> {
 
 /** Exports a Markdown copy without changing the active document path. */
 export async function exportMarkdownFile(markdown: string, defaultName: string, sourcePath?: string): Promise<string | null> {
+  validateUnicodeSource(markdown);
   const text = getMessages();
   const name = markdownExportName(defaultName);
   if (!isTauri()) {
@@ -472,12 +481,13 @@ export async function exportMarkdownFile(markdown: string, defaultName: string, 
     return name;
   }
 
-  const selected = await save({
+  let selected = await save({
     title: text.exportMarkdownDialog,
     defaultPath: name,
     filters: [{ name: 'Markdown', extensions: ['md'] }],
   });
   if (!selected) return null;
+  selected = await resolveMarkdownDocumentPath(selected, true);
   const exportedMarkdown = sourcePath ? rebaseMarkdownImageAssets(markdown, sourcePath, selected) : markdown;
   await writeMarkdownFile(selected, exportedMarkdown);
   return fileName(selected);
@@ -837,16 +847,19 @@ export async function openRecent(recent: RecentFile): Promise<EditorFile | null>
   if (!(await exists(recent.path))) return null;
 
   let markdown: string;
+  let path: string;
   try {
-    markdown = await readMarkdownFile(recent.path);
+    path = await resolveMarkdownDocumentPath(recent.path);
+    markdown = await readMarkdownFile(path);
   } catch (error) {
     // The file may be removed after the existence check. Keep other failures,
     // such as denied access, distinguishable from a genuinely stale entry.
     if (!(await exists(recent.path))) return null;
     throw error;
   }
-  const file = editorFileFromMarkdown(markdown, recent.path, recent.name);
+  const file = editorFileFromMarkdown(markdown, path, path === recent.path ? recent.name : fileName(path));
   await allowDocumentImageFiles(file);
+  if (path !== recent.path) await rememberRecent({ path, name: file.name }, recent.path).catch(() => undefined);
   return file;
 }
 
@@ -896,7 +909,19 @@ function restoreDraftOrThrow(value: unknown): EditorFile | null {
 }
 
 async function restoreDraftWithAssets(value: unknown): Promise<EditorFile | null> {
-  const draft = restoreDraftOrThrow(value);
+  let draft = restoreDraftOrThrow(value);
+  if (draft?.recoverySourcePath) {
+    // Origin resolution is supplementary; unavailable old files must never
+    // prevent the recovery of the writing itself.
+    const origin = await resolveMarkdownDocumentPath(draft.recoverySourcePath, true).catch(() => draft!.recoverySourcePath!);
+    if (origin !== draft.recoverySourcePath) {
+      draft = {
+        ...draft,
+        recoverySourcePath: origin,
+        document: hydrateDocumentAssets(restoreRelativeImagePaths(draft.document), origin),
+      };
+    }
+  }
   if (draft) await allowDocumentImageFiles(draft);
   return draft;
 }

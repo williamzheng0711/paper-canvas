@@ -15,6 +15,7 @@ vi.mock("@tauri-apps/api/core", () => ({
   isTauri: () => true,
   convertFileSrc: (path: string) => path,
   invoke: async (command: string, args?: { path: string; contents: string }) => {
+    if (command === 'resolve_markdown_document_path') return args!.path;
     if (command === 'write_markdown_file') return mocks.writeMarkdown(args!.path, args!.contents);
   },
 }));

@@ -37,6 +37,12 @@ beforeEach(() => {
   vi.resetAllMocks();
   mocks.entries.clear();
   mocks.invoke.mockImplementation(async (command: string, args?: { path: string; contents: string; expectedContents?: string; source: string; target: string }) => {
+    if (command === 'resolve_markdown_document_path') return args!.path;
+    if (command === 'read_markdown_file') {
+      const bytes = mocks.entries.get(args!.path);
+      if (!bytes) throw new Error('Missing file');
+      return bytes;
+    }
     if (command === 'write_markdown_file') {
       if (args!.expectedContents !== undefined) {
         const current = mocks.entries.get(args!.path);

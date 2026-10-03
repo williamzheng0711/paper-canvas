@@ -7,7 +7,11 @@ const mocks = vi.hoisted(() => ({ source: '', recovery: null as string | null, i
 vi.mock('@tauri-apps/api/core', () => ({
   isTauri: () => true,
   convertFileSrc: (path: string) => `asset:${path}`,
-  invoke: mocks.invoke,
+  invoke: async (command: string, args?: { path: string }) => {
+    if (command === 'resolve_markdown_document_path') return args!.path;
+    if (command === 'read_markdown_file') return new TextEncoder().encode(mocks.source);
+    return mocks.invoke(command, args);
+  },
 }));
 vi.mock('@tauri-apps/plugin-fs', () => ({
   readFile: async () => new TextEncoder().encode(mocks.source),

@@ -35,6 +35,8 @@ beforeEach(() => {
     return bytes;
   });
   mocks.invoke.mockImplementation(async (command: string, args: { path: string; contents: string; source: string; target: string }) => {
+    if (command === 'resolve_markdown_document_path') return args!.path;
+    if (command === 'read_markdown_file') return mocks.readFile(args!.path);
     if (command === 'write_markdown_file') mocks.entries.set(args.path, new TextEncoder().encode(args.contents));
     if (command === 'rename_document_entry') {
       const bytes = mocks.entries.get(args.source);
@@ -59,7 +61,7 @@ describe('lossless UTF-8 file reads', () => {
     await expect(openMarkdownFile(path)).rejects.toThrow(getMessages().unsupportedMarkdownEncoding);
     await expect(openRecent({ path, name: 'encoding.md' })).rejects.toThrow(getMessages().unsupportedMarkdownEncoding);
     expect(mocks.storeSet).not.toHaveBeenCalled();
-    expect(mocks.invoke).not.toHaveBeenCalled();
+    expect(mocks.invoke.mock.calls.some(([command]) => !['resolve_markdown_document_path', 'read_markdown_file'].includes(command))).toBe(false);
     expect(mocks.entries.get(path)).toEqual(original);
   });
 
