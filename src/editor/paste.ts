@@ -52,7 +52,9 @@ export function insertPastedFormula(view: EditorView, text: string): boolean {
   const { selection, schema } = view.state;
   const $from = selection.$from;
   const $to = selection.$to;
-  if ($from.sameParent($to) && $from.parent.type.name === "paragraph") {
+  let plainParagraph = $from.parent.type.name === "paragraph";
+  $from.parent.forEach((child) => { if (!child.isText) plainParagraph = false; });
+  if ($from.sameParent($to) && plainParagraph) {
     const insertedText = formula?.latex ?? text;
     const parsed = displayFormulaAfterTextInsertion({
       parentText: $from.parent.textContent,
