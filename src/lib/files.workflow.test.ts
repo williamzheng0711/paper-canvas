@@ -146,3 +146,43 @@ it.each([
   if (target.kind === 'range') expect(parsed.body.slice(target.from, target.to)).toBe(targetText);
   expect([...boundary.entries.keys()].filter((path) => path.includes('.assets/image-'))).toEqual([renamedImagePath]);
 });
+
+it('preserves ordinary rich Markdown through Source save, Rename, Save As and a later Canvas edit', async () => {
+  const original = '# Ordinary note\n\nFirst.\n\n<p></p>\n\nSecond.\n\n```js title="example.js" {1,3-5}\nconst x = 1;\n```\n\n![Diagram](research.assets/a.svg "papercanvas-size:300x0 | Caption")\n\n\\(x\\)\\(y\\) and note[^n].\n\n[^n]: Footnote body.\n';
+  const imageBytes = new TextEncoder().encode('<svg xmlns="http://www.w3.org/2000/svg"/>');
+  boundary.entries.set('/notes/research.md', new TextEncoder().encode(original));
+  boundary.entries.set('/notes/research.assets', null);
+  boundary.entries.set('/notes/research.assets/a.svg', imageBytes);
+  let file = await openMarkdownFile('/notes/research.md');
+  file = await saveEditorFile(file);
+  expect(file.sourceMarkdown).toBe(original);
+  file = await renameEditorFile(file, 'renamed.md');
+  expect(file.sourceMarkdown).toBe(original.replace('research.assets/', 'renamed.assets/'));
+  boundary.choices.push('/exports/copied.md');
+  file = await saveEditorFile(file, true);
+  expect(file.sourceMarkdown).toContain('../notes/renamed.assets/a.svg');
+  const document = structuredClone(file.document);
+  document.content!.push(...markdownToDocument('Later Canvas writing.\n').content!);
+  file = await saveEditorFile({ ...file, document, sourceMarkdown: undefined });
+  const reopened = await openMarkdownFile(file.path!);
+  const serialized = reopened.sourceMarkdown!;
+  expect(serialized).toContain('First.\n\n<p></p>\n\nSecond.');
+  expect(serialized).toContain('```js title="example.js" {1,3-5}\nconst x = 1;\n```');
+  expect(serialized).toContain('![Diagram](../notes/renamed.assets/a.svg "papercanvas-size:300x0 | Caption")');
+  expect(reopened.document.content?.flatMap((node) => node.content ?? []).filter((node) => node.type === 'inlineFormula')
+    .map((node) => node.attrs?.latex)).toEqual(['x', 'y']);
+  expect(serialized).toContain(' and note[^n].');
+  expect(serialized).toContain('[^n]: Footnote body.');
+  expect(serialized).toContain('Later Canvas writing.');
+  expect(imageSource(reopened.document)).toBe('asset:/notes/renamed.assets/a.svg');
+  expect(boundary.entries.get('/notes/renamed.assets/a.svg')).toEqual(imageBytes);
+  expect(boundary.entries.has('/notes/research.assets/a.svg')).toBe(false);
+  boundary.choices.push('/exports/review/copy.md');
+  await exportMarkdownFile(serialized, reopened.name, reopened.path);
+  const exported = await openMarkdownFile('/exports/review/copy.md');
+  expect(imageSource(exported.document)).toBe('asset:/notes/renamed.assets/a.svg');
+  expect(exported.sourceMarkdown).toContain('```js title="example.js" {1,3-5}');
+  expect(exported.document.content?.flatMap((node) => node.content ?? []).filter((node) => node.type === 'inlineFormula')
+    .map((node) => node.attrs?.latex)).toEqual(['x', 'y']);
+  expect(exported.sourceMarkdown).toContain(' and note[^n].');
+});
