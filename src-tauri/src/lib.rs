@@ -367,7 +367,7 @@ fn recovery_draft_path(app: &AppHandle) -> Result<PathBuf, String> {
         .map_err(|error| error.to_string())
 }
 
-fn read_regular_file(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
+fn open_regular_file_read(path: &Path) -> std::io::Result<Option<File>> {
     match std::fs::metadata(path) {
         Ok(metadata) if !metadata.is_file() => {
             return Err(std::io::Error::new(
@@ -392,7 +392,19 @@ fn read_regular_file(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error),
     };
-    read_regular_file_contents(file).map(Some)
+    if !file.metadata()?.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "The data path must be a regular file.",
+        ));
+    }
+    Ok(Some(file))
+}
+
+fn read_regular_file(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
+    open_regular_file_read(path)?
+        .map(read_regular_file_contents)
+        .transpose()
 }
 
 fn read_regular_file_contents(mut file: File) -> std::io::Result<Vec<u8>> {
@@ -847,10 +859,9 @@ fn temporary_pdf_path(path: &Path) -> Result<PathBuf, String> {
 
 #[cfg(target_os = "macos")]
 fn pdf_has_complete_trailer(path: &Path) -> std::io::Result<Option<u64>> {
-    let mut file = match File::open(path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error),
+    let mut file = match open_regular_file_read(path)? {
+        Some(file) => file,
+        None => return Ok(None),
     };
     let length = file.metadata()?.len();
     if length < 10 {
@@ -885,6 +896,21 @@ fn pdf_has_complete_trailer(path: &Path) -> std::io::Result<Option<u64>> {
     } else {
         Ok(None)
     }
+}
+
+#[cfg(target_os = "macos")]
+fn commit_completed_pdf(temporary: &Path, target: &Path) -> Result<(), String> {
+    let result = replace_file_atomically(target, |output| {
+        let mut pdf = open_regular_file_read(temporary)?.ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "The completed PDF no longer exists.",
+            )
+        })?;
+        std::io::copy(&mut pdf, output).map(|_| ())
+    });
+    let _ = std::fs::remove_file(temporary);
+    result.map_err(|error| format!("Could not finish saving the PDF: {error}"))
 }
 
 #[cfg(target_os = "macos")]
@@ -991,10 +1017,7 @@ async fn export_pdf(app: AppHandle, webview: tauri::Webview, path: String) -> Re
         return Err(error);
     }
 
-    std::fs::rename(&temporary_target, &target).map_err(|error| {
-        let _ = std::fs::remove_file(&temporary_target);
-        format!("Could not finish saving the PDF: {error}")
-    })?;
+    commit_completed_pdf(&temporary_target, &target)?;
     Ok(())
 }
 
@@ -2140,10 +2163,92 @@ mod tests {
             let contents = b"%PDF-1.4\nNew export\n%%EOF\n";
             std::fs::write(&temporary, contents).unwrap();
             assert_eq!(std::fs::read(&target).unwrap(), b"Original chosen PDF");
-            std::fs::rename(&temporary, &target).unwrap();
+            commit_completed_pdf(&temporary, &target).unwrap();
             assert_eq!(std::fs::read(&target).unwrap(), contents);
             std::fs::remove_file(&target).unwrap();
         }
         assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn completed_pdf_commits_retain_read_only_originals_and_remove_print_temporaries() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("existing.pdf");
+        let temporary = directory.path().join(".print.pdf");
+        std::fs::write(&target, b"Original selected PDF").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o444)).unwrap();
+        std::fs::write(&temporary, b"%PDF-1.7\nNew export\n%%EOF\n").unwrap();
+        assert!(commit_completed_pdf(&temporary, &target).is_err());
+        assert_eq!(std::fs::read(&target).unwrap(), b"Original selected PDF");
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o444
+        );
+        assert!(!temporary.exists());
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn completed_pdf_commits_follow_document_links_and_preserve_physical_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("physical.pdf");
+        let link = directory.path().join("chosen.pdf");
+        let temporary = directory.path().join(".print.pdf");
+        std::fs::write(&target, b"Original selected PDF").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let pdf = b"%PDF-1.7\nNew export\n%%EOF\n";
+        std::fs::write(&temporary, pdf).unwrap();
+        commit_completed_pdf(&temporary, &link).unwrap();
+        assert!(std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(std::fs::read(&target).unwrap(), pdf);
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(!temporary.exists());
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 2);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn pdf_completion_rejects_named_pipes_without_defeating_its_deadline() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join(".print.pdf");
+        assert!(std::process::Command::new("mkfifo")
+            .arg(&path)
+            .status()
+            .unwrap()
+            .success());
+        let read_path = path.clone();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            sender
+                .send(wait_for_complete_pdf(
+                    &read_path,
+                    Duration::from_millis(100),
+                ))
+                .unwrap();
+        });
+        let result = receiver.recv_timeout(Duration::from_millis(250));
+        if result.is_err() {
+            // Rescue the old blocking trailer read so failures stay bounded.
+            let _ = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .write_all(b"%PDF-1.7\n%%EOF\n");
+        }
+        reader.join().unwrap();
+        assert!(result
+            .expect("a pipe must not bypass the PDF deadline")
+            .is_err());
     }
 }
