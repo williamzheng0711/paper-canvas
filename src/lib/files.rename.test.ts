@@ -7,6 +7,7 @@ import {
 } from "../editor/comments";
 import { markdownToDocument } from "../editor/markdown";
 import { documentToPortableMarkdown, FileRenameRecoveryError, renameEditorFile, saveEditorFile } from "./files";
+import { getMessages } from "../i18n";
 
 const mocks = vi.hoisted(() => ({
   entries: new Map<string, string | null>(),
@@ -187,6 +188,57 @@ describe("native document rename", () => {
     mocks.entries.set(file.path, "Original source\n");
     expect(await renameEditorFile(file, file.name)).toBe(file);
     expect(mocks.renameEntry).not.toHaveBeenCalled();
+    expect(mocks.writeMarkdown).not.toHaveBeenCalled();
+  });
+
+  it("rejects oversized authoritative image source before any filesystem operation", async () => {
+    const sourceMarkdown = "x".repeat(250_001) + "\n![Diagram](research.assets/diagram.svg)\n";
+    mocks.entries.set(path, "Saved short source.\n");
+    mocks.entries.set("/notes/research.assets", null);
+    mocks.entries.set("/notes/research.assets/diagram.svg", "original image");
+    const originalEntries = [...mocks.entries];
+    await expect(renameEditorFile({
+      path,
+      name: "research.md",
+      sourceMarkdown,
+      document: markdownToDocument("Small Canvas cache.\n"),
+    }, "renamed.md")).rejects.toThrow(getMessages().assetRewriteLimited);
+    expect(mocks.invoke).not.toHaveBeenCalled();
+    expect(mocks.exists).not.toHaveBeenCalled();
+    expect([...mocks.entries]).toEqual(originalEntries);
+  });
+
+  it("rejects oversized image source on disk before moving the document or assets", async () => {
+    const sourceMarkdown = "x".repeat(250_001) + "\n![Diagram](research.assets/diagram.svg)\n";
+    mocks.entries.set(path, sourceMarkdown);
+    mocks.entries.set("/notes/research.assets", null);
+    mocks.entries.set("/notes/research.assets/diagram.svg", "original image");
+    const originalEntries = [...mocks.entries];
+    await expect(renameEditorFile({
+      path,
+      name: "research.md",
+      document: markdownToDocument("Small Canvas cache.\n"),
+    }, "renamed.md")).rejects.toThrow(getMessages().assetRewriteLimited);
+    expect(mocks.renameEntry).not.toHaveBeenCalled();
+    expect(mocks.writeMarkdown).not.toHaveBeenCalled();
+    expect([...mocks.entries]).toEqual(originalEntries);
+  });
+
+  it("still renames oversized writing without image syntax with its exact bytes", async () => {
+    const sourceMarkdown = "\uFEFF" + "研究 🧪\r\n".repeat(40_000);
+    mocks.entries.set(path, sourceMarkdown);
+    const renamed = await renameEditorFile({
+      path,
+      name: "research.md",
+      sourceMarkdown,
+      diskSourceMarkdown: sourceMarkdown,
+      document: markdownToDocument("Small Canvas cache.\n"),
+    }, "renamed.md");
+    expect(renamed.path).toBe(target);
+    expect(renamed.sourceMarkdown).toBe(sourceMarkdown);
+    expect(mocks.entries.get(target)).toBe(sourceMarkdown);
+    expect(mocks.entries.has(path)).toBe(false);
+    expect(mocks.renameEntry).toHaveBeenCalledExactlyOnceWith(path, target);
     expect(mocks.writeMarkdown).not.toHaveBeenCalled();
   });
 

@@ -604,6 +604,9 @@ export async function renameEditorFile(file: EditorFile, newName: string): Promi
     };
   const target = joinPath(parentPath(file.path), isMarkdownFilePath(cleanName) ? cleanName : `${cleanName}.md`);
   if (target === file.path) return file;
+  if (file.sourceMarkdown !== undefined) {
+    renameMarkdownImageAssets(file.sourceMarkdown, file.path, target);
+  }
   if (isTauri()) await invoke('allow_document_rename', { source: file.path, target });
   if (await exists(target) && !isCaseOnlyPathChange(file.path, target)) throw new Error(text.filenameExists);
 
@@ -614,6 +617,12 @@ export async function renameEditorFile(file: EditorFile, newName: string): Promi
     throw new Error(text.assetsDirectoryExists);
   }
 
+  const initialSource = await readMarkdownFile(file.path);
+  if (file.diskSourceMarkdown !== undefined && file.diskSourceMarkdown !== initialSource) {
+    throw new Error(text.documentChangedOnDisk);
+  }
+  renameMarkdownImageAssets(initialSource, file.path, target);
+
   let assetsMoved = false;
   let renamedDiskSource: string | undefined;
   await renameDocumentEntry(file.path, target);
@@ -623,7 +632,7 @@ export async function renameEditorFile(file: EditorFile, newName: string): Promi
       assetsMoved = true;
     }
     const originalSource = await readMarkdownFile(target);
-    if (file.diskSourceMarkdown !== undefined && file.diskSourceMarkdown !== originalSource) {
+    if (initialSource !== originalSource) {
       throw new Error(text.documentChangedOnDisk);
     }
     const renamedSource = renameMarkdownImageAssets(originalSource, file.path, target);
