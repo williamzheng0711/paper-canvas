@@ -19,6 +19,33 @@ function nodesOfType(document: JSONContent, type: string): JSONContent[] {
 }
 
 describe("PaperCanvas Markdown subset", () => {
+  it.each(["https://example.com/🧪", "https://example.com/\\", "https://example.com/👨‍👩‍👧‍👦", "mailto:person🧪@example.com"])(
+    "preserves autolink text and destinations where phrasing escapes are literal: %s",
+    (source) => {
+      const document = markdownToDocument(source);
+      const saved = documentToMarkdown(document);
+      expect(markdownToDocument(saved)).toEqual(document);
+      expect(documentToMarkdown(markdownToDocument(saved))).toBe(saved);
+    },
+  );
+
+  it("keeps serializer-escaped literal link punctuation from opening a Typora formula beside code", () => {
+    const document: JSONContent = {
+      type: "doc",
+      content: [{
+        type: "paragraph",
+        content: [
+          { type: "text", text: "[a](x)" },
+          { type: "text", text: "\\)", marks: [{ type: "code" }] },
+        ],
+      }],
+    };
+    expect(markdownToDocument(documentToMarkdown(document))).toEqual(document);
+    const source = "\\[<u>a</u>](x)`\\)`";
+    const parsed = markdownToDocument(source);
+    expect(markdownToDocument(documentToMarkdown(parsed))).toEqual(parsed);
+  });
+
   it("normalizes a long line of unfinished TeX openings without repeatedly searching its remaining suffix", () => {
     const source = "\\(".repeat(80_000);
     const started = performance.now();

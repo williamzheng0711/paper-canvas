@@ -231,34 +231,31 @@ export function serializeMarkdownWithComments(markdown: string, comments: readon
   return `${body}${separator}<!-- ${commentsMetadataMarker}:v${commentsMetadataVersion}\n${encodeCommentJson(payload)}\n-->`;
 }
 
-function findOccurrences(text: string, needle: string): number[] {
-  if (!needle) return [];
-  const occurrences: number[] = [];
-  let offset = text.indexOf(needle);
-  while (offset >= 0) {
-    occurrences.push(offset);
-    // Overlapping matches are distinct anchors too (for example, both `ana`
-    // substrings in `banana`); skipping them can make a relocation look unique.
-    offset = text.indexOf(needle, offset + 1);
-  }
-  return occurrences;
+function uniqueOccurrence(text: string, needle: string): number | undefined {
+  if (!needle) return undefined;
+  const offset = text.indexOf(needle);
+  // Only uniqueness matters. Include overlapping matches, but stop after the
+  // second one instead of allocating every occurrence in repetitive source.
+  return offset >= 0 && text.indexOf(needle, offset + 1) < 0 ? offset : undefined;
 }
 
 function relocateByContext(comment: MarkdownComment, markdown: string): { from: number; to: number } | undefined {
   const before = comment.contextBefore.slice(-72);
   const after = comment.contextAfter.slice(0, 72);
   if (!before && !after) return undefined;
-  const beforeEnds = before ? findOccurrences(markdown, before).map((offset) => offset + before.length) : [0];
-  const afterStarts = after ? findOccurrences(markdown, after) : [markdown.length];
+  let beforeIndex = before ? markdown.indexOf(before) : 0;
+  let afterIndex = after ? markdown.indexOf(after) : markdown.length;
   let candidate: { from: number; to: number } | undefined;
-  let afterIndex = 0;
-  for (const beforeEnd of beforeEnds) {
-    while (afterIndex < afterStarts.length && afterStarts[afterIndex] < beforeEnd) afterIndex += 1;
-    if (afterIndex === afterStarts.length) continue;
+  while (beforeIndex >= 0) {
+    const beforeEnd = beforeIndex + before.length;
+    while (afterIndex >= 0 && afterIndex < beforeEnd)
+      afterIndex = after ? markdown.indexOf(after, afterIndex + 1) : -1;
+    if (afterIndex < 0) break;
     // Only uniqueness matters. Stop as soon as two possible ranges exist
-    // instead of allocating the Cartesian product of repeated contexts.
-    if (candidate || afterIndex + 1 < afterStarts.length) return undefined;
-    candidate = { from: beforeEnd, to: afterStarts[afterIndex] };
+    // instead of enumerating every repeated context boundary.
+    if (candidate || (after && markdown.indexOf(after, afterIndex + 1) >= 0)) return undefined;
+    candidate = { from: beforeEnd, to: afterIndex };
+    beforeIndex = before ? markdown.indexOf(before, beforeIndex + 1) : -1;
   }
   return candidate;
 }
@@ -269,6 +266,7 @@ function refreshCommentAnchor(
   target: CommentTarget,
   status: CommentStatus = comment.status,
   excerpt = comment.excerpt,
+  bodyFingerprint = markdownFingerprint(markdown),
 ): MarkdownComment {
   const context = commentContext(markdown, target);
   return {
@@ -278,7 +276,7 @@ function refreshCommentAnchor(
     contextBefore: context.before,
     contextAfter: context.after,
     anchorText: context.anchorText,
-    bodyFingerprint: markdownFingerprint(markdown),
+    bodyFingerprint,
     status,
   };
 }
@@ -325,35 +323,37 @@ export function relocateMarkdownComments(
   sourceMarkdown: string,
   targetMarkdown: string,
 ): MarkdownComment[] {
+  const bodyFingerprint = markdownFingerprint(targetMarkdown);
   if (sourceMarkdown === targetMarkdown) {
     return comments.map((comment) => ({
       ...comment,
-      bodyFingerprint: markdownFingerprint(targetMarkdown),
+      bodyFingerprint,
     }));
   }
 
   return comments.map((comment) => {
     const oldBounds = targetBounds(comment.target, sourceMarkdown.length);
-    const exact = findOccurrences(targetMarkdown, comment.anchorText);
-    if (exact.length === 1) {
-      const from = exact[0];
+    const exact = uniqueOccurrence(targetMarkdown, comment.anchorText);
+    if (exact !== undefined) {
+      const from = exact;
       const target: CommentTarget =
         comment.target.kind === 'range'
           ? { kind: 'range', from, to: from + comment.anchorText.length }
           : { kind: 'position', offset: from };
-      return refreshCommentAnchor(comment, targetMarkdown, target, comment.status);
+      return refreshCommentAnchor(comment, targetMarkdown, target, comment.status, comment.excerpt, bodyFingerprint);
     }
 
     if (comment.target.kind === 'range' && comment.excerpt) {
-      const excerptMatches = findOccurrences(targetMarkdown, comment.excerpt);
-      if (excerptMatches.length === 1) {
-        const from = excerptMatches[0];
+      const excerpt = uniqueOccurrence(targetMarkdown, comment.excerpt);
+      if (excerpt !== undefined) {
+        const from = excerpt;
         return refreshCommentAnchor(
           comment,
           targetMarkdown,
           { kind: 'range', from, to: from + comment.excerpt.length },
           comment.status,
           comment.excerpt,
+          bodyFingerprint,
         );
       }
     }
@@ -371,6 +371,8 @@ export function relocateMarkdownComments(
             }
           : { kind: 'position', offset: contextBounds.from },
         comment.status,
+        comment.excerpt,
+        bodyFingerprint,
       );
     }
 
@@ -386,7 +388,7 @@ export function relocateMarkdownComments(
             to: clampOffset(fallbackOffset + Math.max(0, oldBounds.to - oldBounds.from), targetMarkdown.length),
           }
         : { kind: 'position', offset: fallbackOffset };
-    return refreshCommentAnchor(comment, targetMarkdown, fallbackTarget, 'needs-review', comment.excerpt);
+    return refreshCommentAnchor(comment, targetMarkdown, fallbackTarget, 'needs-review', comment.excerpt, bodyFingerprint);
   });
 }
 

@@ -131,10 +131,19 @@ const processor = unified()
     ],
     handlers: {
       text(node, parent, state, info) {
+        // Autolinks retain references and backslashes literally; phrasing
+        // escapes would change both their visible text and destination.
+        if (state.stack.includes("autolink"))
+          return node.value;
         // Attention handlers may entity-encode the neighboring character.
         // Encode literal backslashes so they cannot escape that new entity.
         const value = state
           .safe(node.value, { ...info, encode: ["\\"] })
+          // Markdown escapes introduced for literal punctuation must not
+          // become Typora's formula openings on the next import.
+          .replace(/\\([[(])/g, (_escape, punctuation: string) =>
+            `&#${punctuation.charCodeAt(0)};`,
+          )
           .replace(/^[\r\n]+|[\r\n]+$/g, (lineEndings) =>
             Array.from(
               lineEndings,

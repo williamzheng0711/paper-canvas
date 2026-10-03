@@ -273,4 +273,21 @@ describe('PaperCanvas Markdown comments metadata', () => {
     expect(relocated.status).toBe('needs-review');
     expect(performance.now() - started).toBeLessThan(1000);
   });
+
+  it('relocates many comments on repetitive source without enumerating every repeated anchor or rehashing each record', () => {
+    const source = 'a'.repeat(160_000);
+    const target = source + 'b';
+    const base = createMarkdownComment(source, { kind: 'range', from: 72, to: 73 }, 'Review', 'a', 'base');
+    const comments = Array.from({ length: 1000 }, (_, index) => ({ ...base, id: String(index) }));
+    const started = performance.now();
+    const relocated = relocateMarkdownComments(comments, source, target);
+    const elapsed = performance.now() - started;
+    const expectedFingerprint = markdownFingerprint(target);
+
+    expect(relocated).toHaveLength(comments.length);
+    expect(relocated.every((comment) => comment.status === 'needs-review')).toBe(true);
+    expect(relocated.every((comment) => comment.target.kind === 'range' && comment.target.from === 72 && comment.target.to === 73)).toBe(true);
+    expect(relocated.every((comment) => comment.bodyFingerprint === expectedFingerprint)).toBe(true);
+    expect(elapsed).toBeLessThan(1500);
+  });
 });
