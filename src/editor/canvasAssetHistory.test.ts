@@ -1,11 +1,13 @@
 import { Editor, type JSONContent } from '@tiptap/core';
-import { closeHistory } from '@tiptap/pm/history';
+import { closeHistory, redoDepth, undoDepth } from '@tiptap/pm/history';
 import type * as TauriCore from '@tauri-apps/api/core';
 import { describe, expect, it, vi } from 'vitest';
 import { canvasNodesAndMarks } from './canvasSchema';
 import { CanvasAssetHistory, canvasAssetTransitionKey, type CanvasAssetTransition } from './canvasAssetHistory';
 import { replaceDocumentPreservingSelection } from './documentSync';
 import { documentToPortableMarkdown } from '../lib/files';
+import { CanvasCapacity, maximumCanvasCharacters } from './canvasCapacity';
+import { getMessages } from '../i18n';
 
 vi.mock('@tauri-apps/api/core', async (importOriginal) => ({
   ...(await importOriginal<typeof TauriCore>()),
@@ -107,6 +109,72 @@ describe('Canvas asset Undo history', () => {
       expect(editor.state.doc.firstChild!.attrs.source).toContain('../notes/research.assets/a.svg');
       expect(editor.commands.redo()).toBe(true);
       expect(editor.state.doc.firstChild!.type.name).toBe('paragraph');
+    } finally { editor.destroy(); }
+  });
+
+  it('rejects an oversized restored asset source before changing history, then permits retry after writing is reduced', () => {
+    const image = '### ![Diagram](research.assets/a.svg) ###\n\n';
+    const source = image + 'a'.repeat(230_000 - image.length);
+    const writing = 'b'.repeat(maximumCanvasCharacters - source.length - 80);
+    const onError = vi.fn();
+    const editor = new Editor({
+      extensions: [...canvasNodesAndMarks(), CanvasAssetHistory.configure({ onError }), CanvasCapacity],
+      content: { type: 'doc', content: [
+        { type: 'unsupportedMarkdown', attrs: { source } },
+        { type: 'paragraph', content: [{ type: 'text', text: writing }] },
+      ] },
+    });
+    try {
+      editor.commands.setNodeSelection(0);
+      editor.commands.deleteSelection();
+      const longName = 'a'.repeat(200);
+      move(editor, '/notes/research.md', `/notes/${longName}.md`, 'rename');
+      const before = editor.state;
+      const history = [undoDepth(before), redoDepth(before)];
+      expect(() => editor.commands.undo()).not.toThrow();
+      expect(editor.state).toBe(before);
+      expect([undoDepth(editor.state), redoDepth(editor.state)]).toEqual(history);
+      expect(onError).toHaveBeenCalledWith(getMessages().canvasEditLimited);
+
+      // An external reduction of the current writing keeps the blocked Undo
+      // event available and makes its complete restoration fit the same limit.
+      editor.view.dispatch(editor.state.tr.delete(1, 501).setMeta('addToHistory', false));
+      expect(editor.commands.undo()).toBe(true);
+      expect(editor.state.doc.firstChild!.attrs.source).toContain(`${longName}.assets/a.svg`);
+      expect(editor.state.doc.lastChild!.textContent).toBe(writing.slice(500));
+      expect(editor.commands.redo()).toBe(true);
+      expect(editor.state.doc.firstChild!.type.name).toBe('paragraph');
+      expect(editor.getText()).toBe(writing.slice(500));
+    } finally { editor.destroy(); }
+  });
+
+  it('reports an intermediate rewrite budget failure without changing the document or either history branch', () => {
+    const image = '### ![Diagram](research.assets/a.svg) ###\n\n';
+    const source = image + 'a'.repeat(maximumCanvasCharacters - image.length - 80);
+    const onError = vi.fn();
+    const editor = new Editor({
+      extensions: [...canvasNodesAndMarks(), CanvasAssetHistory.configure({ onError }), CanvasCapacity],
+      content: { type: 'doc', content: [
+        { type: 'unsupportedMarkdown', attrs: { source } },
+        { type: 'paragraph', content: [{ type: 'text', text: 'Body' }] },
+      ] },
+    });
+    try {
+      editor.commands.setNodeSelection(0);
+      editor.commands.deleteSelection();
+      separateEdit(editor, () => { editor.commands.setTextSelection(5); editor.commands.insertContent(' edited'); });
+      expect(editor.commands.undo()).toBe(true);
+      const longPath = `/notes/${'a'.repeat(200)}.md`;
+      move(editor, '/notes/research.md', longPath, 'rename');
+      move(editor, longPath, '/notes/final.md', 'rename');
+      const before = editor.state;
+      expect([undoDepth(before), redoDepth(before)]).toEqual([1, 1]);
+      expect(() => editor.commands.undo()).not.toThrow();
+      expect(editor.state).toBe(before);
+      expect([undoDepth(editor.state), redoDepth(editor.state)]).toEqual([1, 1]);
+      expect(onError).toHaveBeenCalledWith(getMessages().assetRewriteLimited);
+      expect(editor.commands.redo()).toBe(true);
+      expect(editor.getText()).toBe('Body edited');
     } finally { editor.destroy(); }
   });
 });

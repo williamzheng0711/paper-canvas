@@ -468,7 +468,7 @@ export const CanvasEditor = memo(
     {
       extensions: [
         CanvasCapacity.configure({ onLimit: () => onCapacityErrorRef.current?.(getMessages().canvasEditLimited) }),
-        CanvasAssetHistory,
+        CanvasAssetHistory.configure({ onError: (message) => onCapacityErrorRef.current?.(message) }),
         ...canvasNodesAndMarks(() => textRef.current, getDocumentPath),
         TaskListInput,
         Placeholder.configure({ placeholder: () => textRef.current.canvasPlaceholder }),

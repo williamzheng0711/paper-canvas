@@ -2,6 +2,9 @@ import { Extension, type JSONContent } from '@tiptap/core';
 import { isHistoryTransaction } from '@tiptap/pm/history';
 import type { Node } from '@tiptap/pm/model';
 import { Plugin, PluginKey } from '@tiptap/pm/state';
+import { Transform } from '@tiptap/pm/transform';
+import { canvasDocumentSupported } from './canvasCapacity';
+import { getMessages } from '../i18n';
 import { hydrateDocumentAssets, rebaseDocumentAssetReferences, renameDocumentAssetReferences } from '../lib/files';
 
 export type CanvasAssetTransition = { oldPath: string; newPath: string; operation: 'rebase' | 'rename' };
@@ -25,8 +28,9 @@ type Refresh = { replacements: Map<string, JSONContent['attrs']> };
 type AssetEvent = CanvasAssetTransition | Refresh;
 
 /** Asset moves belong to the file, including images currently held by Undo. */
-export const CanvasAssetHistory = Extension.create({
+export const CanvasAssetHistory = Extension.create<{ onError: (message: string) => void }>({
   name: 'canvasAssetHistory',
+  addOptions: () => ({ onError: () => undefined }),
   addProseMirrorPlugins() {
     const events: AssetEvent[] = [];
     const origins = new WeakMap<Node, number>();
@@ -37,8 +41,52 @@ export const CanvasAssetHistory = Extension.create({
       if (!knownSources.has(assetKey(node))) knownSources.set(assetKey(node), events.length);
     });
 
+    const prepared = new WeakMap<Node, Transform>();
+    const normalize = (document: Node): Transform => {
+      const normalized = new Transform(document);
+      document.descendants((node, position) => {
+        const names = canvasAssetAttributes[node.type.name];
+        if (!names) return;
+        let restored = node.toJSON() as JSONContent;
+        const revision = origins.get(node) ?? knownSources.get(assetKey(node)) ?? events.length;
+        for (const event of events.slice(revision)) {
+          if ('replacements' in event) {
+            const replacement = event.replacements.get(assetKey(restored));
+            if (replacement) restored = { ...restored, attrs: { ...restored.attrs, ...replacement } };
+          } else {
+            const transform = event.operation === 'rename' ? renameDocumentAssetReferences : rebaseDocumentAssetReferences;
+            const portable = transform({ type: 'doc', content: [restored] }, event.oldPath, event.newPath);
+            restored = hydrateDocumentAssets(portable, event.newPath).content![0];
+          }
+        }
+        for (const name of names) {
+          const value = restored.attrs?.[name] ?? node.type.spec.attrs?.[name]?.default;
+          if (JSON.stringify(value) !== JSON.stringify(node.attrs[name])) {
+            normalized.setNodeAttribute(position, name, value);
+          }
+        }
+      });
+      return normalized;
+    };
+
     return [new Plugin({
       key: canvasAssetTransitionKey,
+      filterTransaction: (transaction) => {
+        if (!transaction.docChanged || !isHistoryTransaction(transaction)) return true;
+        try {
+          const normalized = normalize(transaction.doc);
+          if (!canvasDocumentSupported(normalized.doc)) {
+            this.options.onError(getMessages().canvasEditLimited);
+            return false;
+          }
+          prepared.set(transaction.doc, normalized);
+          return true;
+        } catch (error) {
+          // Reject before history or the editor adopts any part of the Undo.
+          this.options.onError(error instanceof Error ? error.message : String(error));
+          return false;
+        }
+      },
       state: {
         init: (_config, state) => { remember(state.doc); },
         apply: (transaction, _value, oldState) => {
@@ -61,33 +109,8 @@ export const CanvasAssetHistory = Extension.create({
         if (transactions.some((transaction) => transaction.getMeta(normalizedAssetHistory)) ||
           !transactions.some(isHistoryTransaction)) return;
         const transaction = state.tr;
-        state.doc.descendants((node, position) => {
-          const names = canvasAssetAttributes[node.type.name];
-          if (!names) return;
-          let restored = node.toJSON() as JSONContent;
-          const revision = origins.get(node) ?? knownSources.get(assetKey(node)) ?? events.length;
-          for (const event of events.slice(revision)) {
-            if ('replacements' in event) {
-              const replacement = event.replacements.get(assetKey(restored));
-              if (replacement) restored = { ...restored, attrs: { ...restored.attrs, ...replacement } };
-            } else {
-              const transform = event.operation === 'rename' ? renameDocumentAssetReferences : rebaseDocumentAssetReferences;
-              const portable = transform({ type: 'doc', content: [restored] }, event.oldPath, event.newPath);
-              restored = hydrateDocumentAssets(portable, event.newPath).content![0];
-            }
-          }
-          let changed = false;
-          for (const name of names) {
-            const value = restored.attrs?.[name] ?? node.type.spec.attrs?.[name]?.default;
-            if (JSON.stringify(value) !== JSON.stringify(node.attrs[name])) {
-              transaction.setNodeAttribute(position, name, value);
-              changed = true;
-            }
-          }
-          // The original immutable node can still be held by another history
-          // event. Only the newly repaired node has the current asset origin.
-          if (!changed) origins.set(node, events.length);
-        });
+        const normalized = prepared.get(state.doc) ?? normalize(state.doc);
+        for (const step of normalized.steps) transaction.step(step);
         if (!transaction.docChanged) return;
         transaction.setMeta('addToHistory', false).setMeta(normalizedAssetHistory, true).setMeta('skipTypingNormalization', true);
         return transaction;
