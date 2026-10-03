@@ -244,6 +244,10 @@ contention; focused adversarial probes retained their original time limits.
 - Paste images with only width or only height, then save/reopen. Keep the specified
   dimension, title, and alt text. Saving a pasted image must not create a separate
   Undo step; Undo removes the paste and Redo restores its persisted resource.
+- Paste HTML images using valid local-file URLs, including encoded filenames and
+  network-share paths. Keep their source through the editor's clipboard parser.
+  If a clipboard source is unavailable, preserve a nonempty image description as
+  ordinary writing, with exact Undo/Redo and save/reopen behavior.
 - Delete the sole image, Rename its companion folder, then Undo/Redo and save.
   Repeat with cross-directory Save As, resizing, multiple file moves, preserved
   HTML image sources, and partial rename recovery. Restored images must use the
@@ -279,10 +283,16 @@ paste, authored spacing, adjacent formulas, continued table alignment, image
 dimensions, image history through Save/Rename/Save As, and comment relocation.
 A one-page rich PDF was rendered and visually checked for formulas, table alignment,
 spacing, code, image size, footnotes, and absence of application controls.
-The final run passed 1,583 tests across 80 frontend test files and 63 native tests,
+The final run passed 1,593 tests across 80 frontend test files and 63 native tests,
 plus type checking, lint, formatting, web builds, and native QA/production builds.
 The final native build also verified parenthesized image paths through edit/save/
 reopen, saved Source formula Undo/Redo, and first-save pasted-image Undo/Redo.
+Raw local-file image paste through the native clipboard retained its description
+when the image source did not reach the parser; exact Undo/Redo, save, and reopen
+were verified. The same image with existing origin metadata rendered and retained
+its physical resource through first Save and Undo/Redo. Cross-application HTML
+can be sanitized by the platform before editor parsing; see
+[WebKit's clipboard documentation](https://webkit.org/blog/8170/clipboard-api-improvements/).
 The production application was reinstalled at `/Applications/PaperCanvas.app` and
 launched from that exact path. Its executable matched the release build; existing
 settings and file permissions remained semantically equivalent and the recovery
