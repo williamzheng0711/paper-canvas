@@ -91,6 +91,7 @@ const files = vi.hoisted(() => ({
     name: 'recent.md',
     document: { type: 'doc', content: [{ type: 'paragraph' }] },
   })),
+  openMarkdownFile: vi.fn<(path: string) => Promise<EditorFile>>(),
   removeRecentFile: vi.fn(async () => []),
   revealFileInFolder: vi.fn(async () => undefined),
   renameEditorFile: vi.fn(async (file: EditorFile): Promise<EditorFile> => ({ ...file, name: 'renamed.md', path: '/tmp/renamed.md' })),
@@ -104,13 +105,20 @@ const native = vi.hoisted(() => ({
   onCloseRequested: vi.fn(),
   destroy: vi.fn(async () => undefined),
   setTitle: vi.fn(async () => undefined),
+  openedPaths: [] as string[],
+  openedHandler: undefined as ((event: { payload: string[] }) => void) | undefined,
 }));
 
 vi.mock('@tauri-apps/api/core', () => ({
   isTauri: () => native.enabled,
-  invoke: vi.fn(async () => []),
+  invoke: vi.fn(async (command: string) => command === 'take_opened_files' ? native.openedPaths : []),
 }));
-vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn() }));
+vi.mock('@tauri-apps/api/event', () => ({
+  listen: vi.fn(async (_event: string, handler: (event: { payload: string[] }) => void) => {
+    native.openedHandler = handler;
+    return () => { if (native.openedHandler === handler) native.openedHandler = undefined; };
+  }),
+}));
 vi.mock('@tauri-apps/api/webviewWindow', () => ({ getCurrentWebviewWindow: () => native }));
 vi.mock('./components/CanvasEditor', () => ({
   CanvasEditor: (
@@ -175,7 +183,7 @@ vi.mock('./lib/files', async (importOriginal) => {
     name: 'Untitled.md',
     document: { type: 'doc', content: [{ type: 'paragraph' }] },
   }),
-  openMarkdownFile: vi.fn(),
+  openMarkdownFile: files.openMarkdownFile,
   openRecent: files.openRecent,
   rebaseEditorFileAssets: actual.rebaseEditorFileAssets,
   removeRecentFile: files.removeRecentFile,
@@ -294,6 +302,9 @@ describe('App autosave cursor stability', () => {
     vi.useFakeTimers();
     vi.clearAllMocks();
     native.enabled = false;
+    native.openedPaths = [];
+    native.openedHandler = undefined;
+    files.openMarkdownFile.mockReset();
     native.onCloseRequested.mockResolvedValue(() => undefined);
     files.flushSettings.mockReset().mockResolvedValue(undefined);
     harness.canvasProps = null;
@@ -394,6 +405,76 @@ describe('App autosave cursor stability', () => {
     await act(async () => { root.render(<App />); await flushEffects(); });
     expect(harness.canvasProps?.initialDocument).toEqual(savedDocument);
     expect(host.querySelector('.status-message')?.textContent).toBe('Damaged comments preserved for recovery');
+  });
+
+  it('recovers available startup writing after an operating-system file open fails', async () => {
+    let finishRecovery!: (draft: EditorFile) => void;
+    files.loadDraft.mockImplementationOnce(() => new Promise((resolve) => { finishRecovery = resolve; }));
+    native.openedPaths = ['/notes/unreadable.md'];
+    files.openMarkdownFile.mockRejectedValueOnce(new Error('Unsupported encoding'));
+    await startNative();
+    const recovered = { name: 'Recovered.md', document: markdownToDocument('Recoverable earlier writing.\n'), sourceMarkdown: 'Recoverable earlier writing.\n' };
+    await act(async () => { finishRecovery(recovered); await flushEffects(); });
+    expect(host.querySelector('.document-name')?.textContent).toContain('Recovered.md');
+    expect(harness.canvasProps?.initialDocument).toEqual(recovered.document);
+    expect(host.querySelector('.status-message')?.textContent).toContain('Unsupported encoding');
+    await act(async () => { await showNavigationTab(getMessages().recentFiles); });
+    expect(host.querySelector('.recent-list')?.textContent).toContain('recent.md');
+    expect(files.clearDraft).not.toHaveBeenCalled();
+  });
+
+  it.each(['opened', 'failed'] as const)('reserves startup recovery until the pending operating-system open is %s', async (outcome) => {
+    let finishRecovery!: (draft: EditorFile) => void;
+    let finishOpen!: () => void;
+    files.loadDraft.mockImplementationOnce(() => new Promise((resolve) => { finishRecovery = resolve; }));
+    const external: EditorFile = { path: '/notes/external.md', name: 'external.md', document: markdownToDocument('Chosen external writing.\n') };
+    files.openMarkdownFile.mockImplementationOnce(() => new Promise((resolve, reject) => { finishOpen = () => outcome === 'opened' ? resolve(external) : reject(new Error('External read failed')); }));
+    native.openedPaths = [external.path!];
+    await startNative();
+    const recovered = { name: 'Recovered.md', document: markdownToDocument('Available recovered writing.\n') };
+    await act(async () => { finishRecovery(recovered); await flushEffects(); });
+    expect(host.querySelector('.document-name')?.textContent).toBe('Untitled.md');
+    await act(async () => { finishOpen(); await flushEffects(); });
+    expect(host.querySelector('.document-name')?.textContent).toContain(outcome === 'opened' ? 'external.md' : 'Recovered.md');
+    expect(harness.canvasProps?.initialDocument).toEqual(outcome === 'opened' ? external.document : recovered.document);
+    expect(files.clearDraft).toHaveBeenCalledTimes(outcome === 'opened' ? 1 : 0);
+    if (outcome === 'failed') expect(host.querySelector('.status-message')?.textContent).toContain('External read failed');
+  });
+
+  it('retains newer typing when an operating-system startup open fails before recovery finishes', async () => {
+    let finishRecovery!: (draft: EditorFile) => void;
+    let failOpen!: () => void;
+    files.loadDraft.mockImplementationOnce(() => new Promise((resolve) => { finishRecovery = resolve; }));
+    files.openMarkdownFile.mockImplementationOnce(() => new Promise((_resolve, reject) => { failOpen = () => reject(new Error('External read failed')); }));
+    native.openedPaths = ['/notes/external.md'];
+    await startNative();
+    const latest = markdownToDocument('Latest writing typed during startup.\n');
+    await act(async () => { harness.canvasProps?.onChange(latest); failOpen(); await flushEffects(); });
+    await act(async () => { finishRecovery({ name: 'Old draft.md', document: markdownToDocument('Old recovered writing.\n') }); await flushEffects(); });
+    expect(host.querySelector('.document-name')?.textContent).toContain('Untitled.md');
+    expect(harness.canvasProps?.initialDocument).toEqual(latest);
+    expect(host.querySelector('.dirty-dot')).not.toBeNull();
+    expect(files.clearDraft).not.toHaveBeenCalled();
+  });
+
+  it('does not reopen a stale OS-selected file or draft after New replaces its startup session', async () => {
+    let finishRecovery!: (draft: EditorFile) => void;
+    let finishOpen!: (file: EditorFile) => void;
+    files.loadDraft.mockImplementationOnce(() => new Promise((resolve) => { finishRecovery = resolve; }));
+    files.openMarkdownFile.mockImplementationOnce(() => new Promise((resolve) => { finishOpen = resolve; }));
+    native.openedPaths = ['/notes/external.md'];
+    await startNative();
+    await act(async () => { documentAction(getMessages().new).click(); await flushEffects(); });
+    await act(async () => {
+      finishOpen({ path: '/notes/external.md', name: 'external.md', document: markdownToDocument('Stale external writing.\n') });
+      finishRecovery({ name: 'Old draft.md', document: markdownToDocument('Stale recovered writing.\n') });
+      await flushEffects();
+    });
+    expect(host.querySelector('.document-name')?.textContent).toBe('Untitled.md');
+    expect(harness.canvasProps?.initialDocument).toEqual(markdownToDocument(''));
+    expect(files.clearDraft).toHaveBeenCalledOnce();
+    await showNavigationTab(getMessages().recentFiles);
+    expect(host.querySelector('.recent-list')?.textContent).toContain('recent.md');
   });
 
   it('opens an oversized recovery draft in source without mounting its large canvas or losing exact bytes', async () => {

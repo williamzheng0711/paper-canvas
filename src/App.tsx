@@ -192,6 +192,7 @@ export default function App() {
   const [newCommentTarget, setNewCommentTarget] = useState<CommentPlacement | null>(null);
   const [activeCommentId, setActiveCommentId] = useState<string | undefined>();
   const [pdfExporting, setPdfExporting] = useState(false);
+  const [startupOpenRevision, setStartupOpenRevision] = useState(0);
   const [preferences, setPreferences] = useState<AppPreferences>({
     theme: 'light',
     font: 'system',
@@ -218,6 +219,8 @@ export default function App() {
   const sourceModeRef = useRef(sourceMode);
   const rawMarkdownRef = useRef('');
   const openedByOperatingSystem = useRef(false);
+  const pendingExternalOpen = useRef<number | undefined>(undefined);
+  const startupExternalOpenError = useRef<string | undefined>(undefined);
   const startupRef = useRef<{
     request: Promise<[PromiseSettledResult<RecentFile[]>, PromiseSettledResult<AppPreferences>, PromiseSettledResult<EditorFile | null>]>;
     session: number;
@@ -503,6 +506,9 @@ export default function App() {
     void startup.request
       .then(([recentResult, preferencesResult, draftResult]) => {
         if (!active || startup.applied) return;
+        // An OS-selected file gets first choice, but a failed read must still
+        // release the available recovery draft and recent-document history.
+        if (pendingExternalOpen.current !== undefined) return;
         startup.applied = true;
         const documentUntouched =
           documentSessionRef.current === startup.session && editRevisionRef.current === startup.revision;
@@ -513,6 +519,7 @@ export default function App() {
         const startupError = failed?.status === 'rejected'
           ? failed.reason instanceof Error ? failed.reason.message : getMessages(loadedPreferences.language).loadSettingsFailed
           : undefined;
+        const startupWarning = [startupError, startupExternalOpenError.current].filter(Boolean).join(' ') || undefined;
         setCurrentLanguage(loadedPreferences.language);
         document.documentElement.lang = loadedPreferences.language;
         const loadedText = getMessages(loadedPreferences.language);
@@ -545,9 +552,9 @@ export default function App() {
           setDirty(true);
           setSaveStatus('draft');
           const recoveredMessage = largeDocument ? loadedText.canvasViewLimited : loadedText.restoredDraft;
-          setMessage(normalizedDraft.commentWarning ?? (startupError ? `${recoveredMessage} ${startupError}` : recoveredMessage));
+          setMessage(normalizedDraft.commentWarning ?? (startupWarning ? `${recoveredMessage} ${startupWarning}` : recoveredMessage));
         } else if (documentUntouched && !openedByOperatingSystem.current) {
-          setMessage(startupError ?? loadedText.localOnly);
+          setMessage(startupWarning ?? loadedText.localOnly);
         }
       })
       .catch((error: unknown) => {
@@ -556,7 +563,7 @@ export default function App() {
         setMessage(error instanceof Error ? error.message : getMessages().loadSettingsFailed);
       });
     return () => { active = false; };
-  }, [advanceRevision, setExternalRawMarkdown]);
+  }, [advanceRevision, setExternalRawMarkdown, startupOpenRevision]);
 
   useEffect(() => {
     if (!preferencesLoaded.current) return;
@@ -697,15 +704,27 @@ export default function App() {
       // A file open from Finder/Explorer takes precedence over a recovered
       // unnamed draft if both asynchronous startup paths complete together.
       openedByOperatingSystem.current = true;
+      pendingExternalOpen.current = request;
+      startupExternalOpenError.current = undefined;
 
       try {
         const nextFile = await openMarkdownFile(path);
         if (request !== openRequest.current) return;
         const replaced = await replaceWithOpenedFile(nextFile);
+        if (!replaced && request === openRequest.current) openedByOperatingSystem.current = false;
         if (replaced) setRecent(await loadRecent());
       } catch (error) {
         if (request === openRequest.current) {
-          setMessage(error instanceof Error ? error.message : getMessages().externalOpenFailed);
+          const failure = error instanceof Error ? error.message : getMessages().externalOpenFailed;
+          openedByOperatingSystem.current = false;
+          startupExternalOpenError.current = failure;
+          setMessage(failure);
+        }
+      } finally {
+        if (pendingExternalOpen.current === request) {
+          pendingExternalOpen.current = undefined;
+          if (request !== openRequest.current) openedByOperatingSystem.current = false;
+          setStartupOpenRevision((revision) => revision + 1);
         }
       }
     },
