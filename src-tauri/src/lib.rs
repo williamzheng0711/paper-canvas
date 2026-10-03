@@ -149,20 +149,22 @@ fn replace_file_atomically_checked(
     } else {
         None
     };
-    let metadata = match std::fs::metadata(&target) {
+    match std::fs::metadata(&target) {
         Ok(metadata) if metadata.is_file() => {
             // Check write access without truncating the destination. Atomic
             // replacement must not bypass an existing read-only document.
+            if metadata.permissions().readonly() {
+                return Err("The destination is read-only.".into());
+            }
             std::fs::OpenOptions::new()
                 .write(true)
                 .open(&target)
                 .map_err(|error| error.to_string())?;
-            Some(metadata)
         }
         Ok(_) => return Err("The document destination must be a regular file.".into()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.to_string()),
-    };
+    }
     let parent = target
         .parent()
         .ok_or_else(|| "The document directory is invalid.".to_string())?;
@@ -174,11 +176,25 @@ fn replace_file_atomically_checked(
         .tempfile_in(parent)
         .map_err(|error| error.to_string())?;
     write(temporary.as_file_mut()).map_err(|error| error.to_string())?;
-    if let Some(metadata) = metadata {
-        temporary
-            .as_file()
-            .set_permissions(metadata.permissions())
-            .map_err(|error| error.to_string())?;
+    // Permissions can change while a large temporary save is being written.
+    // Recheck access and preserve the current permissions before replacement.
+    match std::fs::metadata(&target) {
+        Ok(metadata) if metadata.is_file() => {
+            if metadata.permissions().readonly() {
+                return Err("The destination is read-only.".into());
+            }
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&target)
+                .map_err(|error| error.to_string())?;
+            temporary
+                .as_file()
+                .set_permissions(metadata.permissions())
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(_) => return Err("The document destination must be a regular file.".into()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.to_string()),
     }
     temporary
         .as_file()
@@ -631,16 +647,16 @@ fn open_external_url(url: String) -> Result<(), String> {
 
 #[cfg(target_os = "macos")]
 fn temporary_pdf_path(path: &Path) -> Result<PathBuf, String> {
-    let name = path
-        .file_name()
+    path.file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| "PDF filename is not valid UTF-8.".to_string())?;
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|error| error.to_string())?
         .as_nanos();
+    // Keep the temporary sibling short even for a valid near-limit filename.
     Ok(path.with_file_name(format!(
-        ".{name}.papercanvas-{}-{nonce}.tmp.pdf",
+        ".papercanvas-{}-{nonce}.tmp.pdf",
         std::process::id()
     )))
 }
@@ -667,7 +683,20 @@ fn pdf_has_complete_trailer(path: &Path) -> std::io::Result<Option<u64>> {
     file.seek(SeekFrom::End(-(tail_length as i64)))?;
     let mut tail = vec![0_u8; tail_length];
     file.read_exact(&mut tail)?;
-    if tail.windows(5).any(|window| window == b"%%EOF") {
+    let whitespace = |byte: &u8| matches!(byte, b'\0' | b'\t' | b'\n' | b'\x0c' | b'\r' | b' ');
+    let end = tail
+        .iter()
+        .rposition(|byte| !whitespace(byte))
+        .map_or(0, |index| index + 1);
+    let Some(eof_start) = end.checked_sub(5) else {
+        return Ok(None);
+    };
+    let line_start = tail[..eof_start]
+        .iter()
+        .rposition(|byte| matches!(byte, b'\r' | b'\n'))
+        .map_or(0, |index| index + 1);
+    // An EOF token inside a still-growing object or stream is not a trailer.
+    if &tail[eof_start..end] == b"%%EOF" && tail[line_start..eof_start].iter().all(whitespace) {
         Ok(Some(length))
     } else {
         Ok(None)
@@ -1313,6 +1342,36 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn atomic_markdown_saves_respect_permissions_changed_during_preparation() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("research.md");
+        for mode in [0o444, 0o600] {
+            std::fs::write(&target, "Original writing").unwrap();
+            std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+            let result =
+                replace_file_atomically_checked(&target, Some(b"Original writing"), |file| {
+                    file.write_all(b"Our later edit")?;
+                    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(mode))
+                });
+            if mode == 0o444 {
+                assert!(result.is_err());
+                assert_eq!(std::fs::read(&target).unwrap(), b"Original writing");
+            } else {
+                result.unwrap();
+                assert_eq!(std::fs::read(&target).unwrap(), b"Our later edit");
+            }
+            assert_eq!(
+                std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+                mode
+            );
+            assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+            std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+    }
+
     #[test]
     fn overlapping_markdown_writes_leave_one_complete_document() {
         let directory = tempfile::tempdir().unwrap();
@@ -1538,6 +1597,32 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
+    fn direct_pdf_export_rejects_embedded_eof_tokens_and_accepts_final_trailer_whitespace() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("partial.pdf");
+        for contents in [
+            b"%PDF-1.7\n1 0 obj\nstream\nUnfinished object with %%EOF literal\n".as_slice(),
+            b"%PDF-1.7\n1 0 obj\nstream\nAn embedded %%EOF\n",
+            b"%PDF-1.7\nstartxref\n30\n%%EOF\nMore bytes are being written",
+        ] {
+            std::fs::write(&path, contents).unwrap();
+            assert_eq!(pdf_has_complete_trailer(&path).unwrap(), None);
+        }
+        for contents in [
+            b"%PDF-1.7\nstartxref\n30\n%%EOF".as_slice(),
+            b"%PDF-1.7\r\nstartxref\r\n30\r\n \t%%EOF\r\n \t\x0c\0",
+            b"%PDF-1.7\rstartxref\r30\r%%EOF\r",
+        ] {
+            std::fs::write(&path, contents).unwrap();
+            assert_eq!(
+                pdf_has_complete_trailer(&path).unwrap(),
+                Some(contents.len() as u64)
+            );
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
     fn direct_pdf_export_uses_a_hidden_sibling_temporary_file() {
         let target = PathBuf::from("/tmp/papercanvas-export.pdf");
         let temporary = temporary_pdf_path(&target).expect("temporary path");
@@ -1547,9 +1632,27 @@ mod tests {
         assert!(temporary
             .file_name()
             .and_then(|name| name.to_str())
-            .is_some_and(
-                |name| name.starts_with(".papercanvas-export.pdf.papercanvas-")
-                    && name.ends_with(".tmp.pdf")
-            ));
+            .is_some_and(|name| name.starts_with(".papercanvas-") && name.ends_with(".tmp.pdf")));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn direct_pdf_export_temporary_files_support_long_unicode_destination_names() {
+        let directory = tempfile::tempdir().unwrap();
+        for name in [
+            format!("{}.pdf", "n".repeat(240)),
+            format!("{}.pdf", "研究".repeat(40)),
+        ] {
+            let target = directory.path().join(name);
+            std::fs::write(&target, b"Original chosen PDF").unwrap();
+            let temporary = temporary_pdf_path(&target).unwrap();
+            let contents = b"%PDF-1.4\nNew export\n%%EOF\n";
+            std::fs::write(&temporary, contents).unwrap();
+            assert_eq!(std::fs::read(&target).unwrap(), b"Original chosen PDF");
+            std::fs::rename(&temporary, &target).unwrap();
+            assert_eq!(std::fs::read(&target).unwrap(), contents);
+            std::fs::remove_file(&target).unwrap();
+        }
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
     }
 }

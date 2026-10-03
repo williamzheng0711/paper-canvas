@@ -317,14 +317,15 @@ function editorFileFromMarkdown(markdown: string, path?: string, name = path ? f
   };
 }
 
-async function allowDocumentImageFiles(file: EditorFile): Promise<void> {
-  if (!file.path || !isTauri()) return;
-  const basePath = parentPath(file.path);
+export async function allowDocumentImageFiles(file: EditorFile): Promise<void> {
+  const path = fileAssetSourcePath(file);
+  if (!path || !isTauri()) return;
+  const basePath = parentPath(path);
   const images = new Set<string>();
   const collect = (source: string) => {
     if (!source || isExternalImage(source)) return;
     if (/^[A-Za-z][A-Za-z\d+.-]*:/.test(source) && !/^file:\/\//i.test(source) && !/^[A-Za-z]:[\\/]/.test(source)) return;
-    if (source.startsWith('//') && !isWindowsFilePath(file.path!)) return;
+    if (source.startsWith('//') && !isWindowsFilePath(path)) return;
     const imagePath = localAssetPath(basePath, source).path;
     try {
       validateUnicodeSource(imagePath);
@@ -348,7 +349,7 @@ async function allowDocumentImageFiles(file: EditorFile): Promise<void> {
   });
   if (images.size) {
     try {
-      await invoke('allow_document_image_files', { path: file.path, images: [...images] });
+      await invoke('allow_document_image_files', { path, images: [...images] });
     } catch {
       // Resource availability is supplementary to a successfully read document.
     }
@@ -434,6 +435,19 @@ function validateUnicodeSource(contents: string): void {
   }
 }
 
+/** Check original Canvas strings before Markdown entities can hide broken pairs. */
+export function validateDocumentUnicode(document: JSONContent): void {
+  visit(document, (node) => {
+    if (typeof node.text === 'string') validateUnicodeSource(node.text);
+    for (const attrs of [node.attrs, ...(node.marks?.map((mark) => mark.attrs) ?? [])]) {
+      if (!attrs) continue;
+      for (const value of Object.values(attrs)) {
+        if (typeof value === 'string') validateUnicodeSource(value);
+      }
+    }
+  });
+}
+
 /** Rename without replacing an entry created after the collision check. */
 function renameDocumentEntry(source: string, target: string): Promise<void> {
   return isTauri() ? invoke('rename_document_entry', { source, target }) : rename(source, target);
@@ -499,6 +513,7 @@ export async function saveEditorFile(
     path = selected;
   }
   const candidate = { ...file, sourceMarkdown: rawMarkdown ?? file.sourceMarkdown };
+  if (candidate.sourceMarkdown === undefined) validateDocumentUnicode(candidate.document);
   const assetSourcePath = fileAssetSourcePath(file);
   const prepared = assetSourcePath && assetSourcePath !== path ? rebaseEditorFileAssets(candidate, assetSourcePath, path) : candidate;
   const portable = restoreRelativeImagePaths(prepared.document);
@@ -509,7 +524,7 @@ export async function saveEditorFile(
     // The file is already committed. History failure must not prevent adopting
     // a Save As destination and leave subsequent saves targeting the old path.
     await rememberRecent({ path, name: fileName(path) }).catch(() => undefined);
-    return {
+    const saved = {
       path,
       name: fileName(path),
       document: hydrateDocumentAssets(portable, path),
@@ -517,6 +532,8 @@ export async function saveEditorFile(
       sourceMarkdown,
       diskSourceMarkdown: sourceMarkdown,
     };
+    await allowDocumentImageFiles(saved);
+    return saved;
   }
   const markdownBeforeAssets = documentToMarkdown(portable);
   const withAssets = await persistEmbeddedImages(portable, path);
@@ -525,7 +542,7 @@ export async function saveEditorFile(
   const savedMarkdown = serializeMarkdownWithComments(markdown, comments);
   await writeMarkdownFile(path, savedMarkdown, expectedContents);
   await rememberRecent({ path, name: fileName(path) }).catch(() => undefined);
-  return {
+  const saved = {
     path,
     name: fileName(path),
     document: hydrateDocumentAssets(withAssets, path),
@@ -533,6 +550,8 @@ export async function saveEditorFile(
     sourceMarkdown: savedMarkdown,
     diskSourceMarkdown: savedMarkdown,
   };
+  await allowDocumentImageFiles(saved);
+  return saved;
 }
 
 function editorFileAfterRename(file: EditorFile, path: string, oldAssetPath?: string, newAssetPath?: string): EditorFile {
@@ -860,13 +879,19 @@ function restoreDraftOrThrow(value: unknown): EditorFile | null {
   return draft;
 }
 
+async function restoreDraftWithAssets(value: unknown): Promise<EditorFile | null> {
+  const draft = restoreDraftOrThrow(value);
+  if (draft) await allowDocumentImageFiles(draft);
+  return draft;
+}
+
 export function loadDraft(): Promise<EditorFile | null> {
   return queueSettingsMutation(async () => {
     if (isTauri()) {
       const serialized = await invoke<string | null>('read_recovery_draft');
       if (typeof serialized === 'string') {
         try {
-          return restoreDraftOrThrow(JSON.parse(serialized));
+          return await restoreDraftWithAssets(JSON.parse(serialized));
         } catch {
           throw new Error(getMessages().draftRecoveryFailed);
         }
@@ -878,10 +903,10 @@ export function loadDraft(): Promise<EditorFile | null> {
       if (legacy !== undefined && legacy !== null) {
         await invoke('write_recovery_draft', { contents: JSON.stringify(legacy) }).catch(() => undefined);
       }
-      return restoreDraftOrThrow(legacy);
+      return restoreDraftWithAssets(legacy);
     }
     try {
-      return restoreDraftOrThrow(JSON.parse(localStorage.getItem(draftKey) ?? 'null'));
+      return await restoreDraftWithAssets(JSON.parse(localStorage.getItem(draftKey) ?? 'null'));
     } catch {
       throw new Error(getMessages().draftRecoveryFailed);
     }
