@@ -107,11 +107,17 @@ const native = vi.hoisted(() => ({
   setTitle: vi.fn(async () => undefined),
   openedPaths: [] as string[],
   openedHandler: undefined as ((event: { payload: string[] }) => void) | undefined,
+  dialogChoice: 'Cancel',
 }));
 
 vi.mock('@tauri-apps/api/core', () => ({
   isTauri: () => native.enabled,
   invoke: vi.fn(async (command: string) => command === 'take_opened_files' ? native.openedPaths : []),
+}));
+vi.mock('@tauri-apps/plugin-dialog', () => ({
+  confirm: vi.fn(async () => native.dialogChoice === 'Ok'),
+  open: vi.fn(async () => null),
+  save: vi.fn(async () => null),
 }));
 vi.mock('@tauri-apps/api/event', () => ({
   listen: vi.fn(async (_event: string, handler: (event: { payload: string[] }) => void) => {
@@ -304,6 +310,7 @@ describe('App autosave cursor stability', () => {
     native.enabled = false;
     native.openedPaths = [];
     native.openedHandler = undefined;
+    native.dialogChoice = 'Cancel';
     files.openMarkdownFile.mockReset();
     native.onCloseRequested.mockResolvedValue(() => undefined);
     files.flushSettings.mockReset().mockResolvedValue(undefined);
@@ -475,6 +482,41 @@ describe('App autosave cursor stability', () => {
     expect(files.clearDraft).toHaveBeenCalledOnce();
     await showNavigationTab(getMessages().recentFiles);
     expect(host.querySelector('.recent-list')?.textContent).toContain('recent.md');
+  });
+
+  it('allows an immediate OS-open retry after its file read fails', async () => {
+    const external: EditorFile = { path: '/notes/external.md', name: 'external.md', document: markdownToDocument('Available on retry.\n') };
+    files.loadDraft.mockResolvedValueOnce(null);
+    native.openedPaths = [external.path!];
+    files.openMarkdownFile.mockRejectedValueOnce(new Error('Temporarily unavailable')).mockResolvedValueOnce(external);
+    await startNative();
+    expect(files.openMarkdownFile).toHaveBeenCalledOnce();
+    await act(async () => { native.openedHandler?.({ payload: [external.path!] }); await flushEffects(); });
+    expect(files.openMarkdownFile).toHaveBeenCalledTimes(2);
+    expect(host.querySelector('.document-name')?.textContent).toContain('external.md');
+  });
+
+  it('allows an immediate OS-open retry after discard was cancelled', async () => {
+    const external: EditorFile = { path: '/notes/external.md', name: 'external.md', document: markdownToDocument('Chosen writing.\n') };
+    files.openMarkdownFile.mockResolvedValue(external);
+    await startNative();
+    await act(async () => { native.openedHandler?.({ payload: [external.path!] }); await flushEffects(); });
+    expect(host.querySelector('.document-name')?.textContent).toContain('research.md');
+    native.dialogChoice = 'Ok';
+    await act(async () => { native.openedHandler?.({ payload: [external.path!] }); await flushEffects(); });
+    expect(files.openMarkdownFile).toHaveBeenCalledTimes(2);
+    expect(host.querySelector('.document-name')?.textContent).toContain('external.md');
+  });
+
+  it('still suppresses duplicate OS-open events after the selected file opens successfully', async () => {
+    const external: EditorFile = { path: '/notes/external.md', name: 'external.md', document: markdownToDocument('Chosen writing.\n') };
+    files.loadDraft.mockResolvedValueOnce(null);
+    native.openedPaths = [external.path!];
+    files.openMarkdownFile.mockResolvedValueOnce(external);
+    await startNative();
+    await act(async () => { native.openedHandler?.({ payload: [external.path!] }); await flushEffects(); });
+    expect(files.openMarkdownFile).toHaveBeenCalledOnce();
+    expect(files.clearDraft).toHaveBeenCalledOnce();
   });
 
   it('opens an oversized recovery draft in source without mounting its large canvas or losing exact bytes', async () => {

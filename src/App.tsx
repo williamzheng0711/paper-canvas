@@ -711,12 +711,16 @@ export default function App() {
         const nextFile = await openMarkdownFile(path);
         if (request !== openRequest.current) return;
         const replaced = await replaceWithOpenedFile(nextFile);
-        if (!replaced && request === openRequest.current) openedByOperatingSystem.current = false;
+        if (!replaced && request === openRequest.current) {
+          openedByOperatingSystem.current = false;
+          recentExternalOpen.current.delete(path);
+        }
         if (replaced) setRecent(await loadRecent());
       } catch (error) {
         if (request === openRequest.current) {
           const failure = error instanceof Error ? error.message : getMessages().externalOpenFailed;
           openedByOperatingSystem.current = false;
+          recentExternalOpen.current.delete(path);
           startupExternalOpenError.current = failure;
           setMessage(failure);
         }
