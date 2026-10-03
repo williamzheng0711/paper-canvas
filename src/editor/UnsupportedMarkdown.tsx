@@ -65,8 +65,13 @@ export const UnsupportedMarkdown = Node.create({
     return [{ tag: 'aside[data-unsupported-markdown]' }];
   },
 
-  renderHTML({ HTMLAttributes }) {
-    return ['aside', mergeAttributes(HTMLAttributes, { 'data-unsupported-markdown': '' }), 0];
+  renderHTML({ node, HTMLAttributes }) {
+    return ['aside', mergeAttributes(HTMLAttributes, { 'data-unsupported-markdown': '' }),
+      ['pre', {}, String(node.attrs.source ?? '')]];
+  },
+
+  renderText({ node }) {
+    return String(node.attrs.source ?? '');
   },
 
   addNodeView() {
