@@ -223,6 +223,15 @@ export function sanitizePastedHtml(html: string): string {
   });
   const template = document.createElement("template");
   template.content.append(sanitized);
+  // Native WebKit paste can remove local image URLs before this handler runs.
+  // Keep the available description when no image destination remains.
+  template.content.querySelectorAll<HTMLImageElement>('img').forEach((image) => {
+    if (image.getAttribute('src')) return;
+    const original = image.getAttribute('data-image-original-src');
+    if (original && /^(?:\/(?!\/)|[A-Za-z]:[\\/]|file:\/\/)/i.test(original)) return;
+    const alt = image.getAttribute('alt');
+    if (alt?.trim()) image.replaceWith(document.createTextNode(alt));
+  });
   applyTableColumnWidths(template.content);
   // Preserve formula source before another HTML serialization/parsing pass
   // normalizes the line endings of raw source attributes.

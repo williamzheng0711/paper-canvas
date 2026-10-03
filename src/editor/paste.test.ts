@@ -173,6 +173,36 @@ describe("HTML paste sanitization", () => {
     expect(JSON.parse(formula!.getAttribute('data-latex-json')!)).toBe('x\r\ny\rz');
   });
 
+  it.each([
+    '<img alt="Final pasted image" width="240">',
+    '<img src="javascript:execute()" alt="Final pasted image" onerror="execute()">',
+    '<img data-image-original-src="javascript:execute()" alt="Final pasted image">',
+  ])('preserves orphan image alt text through actual HTML paste and Undo/Redo: %s', (html) => {
+    const destination = clipboardEditor(markdownToDocument('replace me'));
+    const before = destination.getJSON();
+    try {
+      destination.commands.selectAll();
+      expect(pasteHtml(destination, html)).toBe(true);
+      expect(destination.getText()).toBe('Final pasted image');
+      expect(destination.getJSON().content?.[0]).toMatchObject({ type: 'paragraph', content: [{ type: 'text', text: 'Final pasted image' }] });
+      expect(destination.view.dom.querySelector('img')).toBeNull();
+      expect(destination.commands.undo()).toBe(true);
+      expect(destination.getJSON()).toEqual(before);
+      expect(destination.commands.redo()).toBe(true);
+      expect(destination.getText()).toBe('Final pasted image');
+    } finally { destination.destroy(); }
+  });
+
+  it('keeps orphan image alt inert and leaves valid image origin metadata available', () => {
+    const sanitized = sanitizePastedHtml('<p>Before<img alt="&lt;img src=x onerror=execute()&gt;">After</p><img data-image-original-src="/tmp/a.svg" alt="Actual image">');
+    const template = document.createElement('template');
+    template.innerHTML = sanitized;
+    expect(template.content.querySelector('p')?.textContent).toBe('Before<img src=x onerror=execute()>After');
+    expect(template.content.querySelector('script')).toBeNull();
+    expect(template.content.querySelector('img')?.getAttribute('data-image-original-src')).toBe('/tmp/a.svg');
+    expect(template.content.querySelectorAll('img')).toHaveLength(1);
+  });
+
   it("preserves safe PaperCanvas formula nodes during editor-to-editor copy", () => {
     const sanitized = sanitizePastedHtml(
       '<p>Before <span latex="x^2" data-formula-kind="inline" data-latex="x^2"></span> after.</p>' +
