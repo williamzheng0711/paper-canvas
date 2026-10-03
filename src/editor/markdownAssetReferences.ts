@@ -71,8 +71,17 @@ function assetFolder(path: string): string {
   return basename(path).replace(/\.md$/i, "") + ".assets";
 }
 
-function decodeEntity(entity: string): string {
+function decodeEntity(entity: string, kind: DestinationKind, following: string): string {
   if (typeof document !== "undefined") {
+    if (kind === "html") {
+      const decoder = document.createElement("span");
+      // This token contains only entity-name/numeric syntax. Decode it in an
+      // attribute: HTML's legacy semicolon rules differ from text/textarea.
+      const suffix = following === "=" ? "=" : "";
+      decoder.innerHTML = `<i title="${entity}${suffix}"></i>`;
+      const decoded = decoder.firstElementChild?.getAttribute("title") ?? entity + suffix;
+      return suffix ? decoded.slice(0, -1) : decoded;
+    }
     const decoder = document.createElement("textarea");
     decoder.innerHTML = entity;
     return decoder.value;
@@ -131,11 +140,12 @@ function decodedDestination(
       value = raw[index + 1];
       index += 2;
     } else if (kind !== "plain" && raw[index] === "&") {
-      const entity = /^&(?:#[xX][0-9a-f]+|#\d+|[A-Za-z][A-Za-z0-9]+);/i.exec(
-        raw.slice(index),
-      );
+      const entity = (kind === "html"
+        ? /^&(?:#[xX][0-9a-f]+;?|#\d+;?|[A-Za-z][A-Za-z0-9]*;?)/i
+        : /^&(?:#[xX][0-9a-f]+|#\d+|[A-Za-z][A-Za-z0-9]+);/i
+      ).exec(raw.slice(index));
       if (entity) {
-        value = decodeEntity(entity[0]);
+        value = decodeEntity(entity[0], kind, raw[index + entity[0].length] ?? "");
         index += entity[0].length;
       } else index += 1;
     } else index += 1;

@@ -80,6 +80,30 @@ describe("POSIX filenames containing literal backslashes", () => {
 });
 
 describe("renaming local image destinations without rewriting document content", () => {
+  it.each([
+    ["/notes/research.md", "research&#46assets/image.png"],
+    ["/notes/research&.md", "research&amp.assets/image.png"],
+    ["/notes/research&.md", "research&amp;.assets/image.png"],
+    ["/notes/&notit;.md", "&notit;.assets/image.png"],
+    ["/notes/research&amp=.md", "research&amp=.assets/image.png"],
+  ])("decodes HTML image entities using attribute rules when renaming %s", (sourcePath, destination) => {
+    const source = `<div title="${destination}"><img src="${destination}"></div>`;
+    const expected = `<div title="${destination}"><img src="new.assets/image.png"></div>`;
+    expect(renameHtmlImageAssets(source, sourcePath, "/notes/new.md")).toBe(expected);
+    expect(renameMarkdownImageAssets(source, sourcePath, "/notes/new.md")).toBe(expected);
+  });
+
+  it("retains literal Markdown entity-looking filenames without accepting HTML-only semicolon omission", () => {
+    const source = "![literal](research&amp.assets/image.png)\n";
+    expect(renameMarkdownImageAssets(source, "/notes/research&.md", "/notes/new.md")).toBe(source);
+    expect(renameMarkdownImageAssets(source, "/notes/research&amp.md", "/notes/new.md")).toBe("![literal](new.assets/image.png)\n");
+  });
+
+  it("does not rename an HTML path belonging to another folder when an unclosed named entity precedes '='", () => {
+    const source = '<img src="research&amp=.assets/image.png">';
+    expect(renameHtmlImageAssets(source, "/notes/research&=.md", "/notes/new.md")).toBe(source);
+  });
+
   it("keeps dense Typora masks, image edits and comment anchors aligned with original BOM/CRLF/Unicode source", () => {
     const row = "\\(\\text{![literal](formula.png)}\\) 中文🧪 `![code](code.png)` [link](link.png) ![actual](image.png)\r\n";
     const source = "\uFEFF" + row.repeat(1000) + "\\[\r\n\\(\\text{![nested](nested.png)}\\)\r\n\\]\r\n";
