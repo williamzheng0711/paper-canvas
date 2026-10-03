@@ -38,7 +38,7 @@ it('keeps an embedded-image Save rewrite out of the user Undo history', async ()
     const selection = editor.state.selection.toJSON();
     onEdit.mockClear();
     onChange.mockClear();
-    await act(async () => root.render(<CanvasEditor language="en" documentId={2} documentPath="/notes/first.md" initialDocument={savedDocument} onChange={onChange} onEdit={onEdit} />));
+    await act(async () => root.render(<CanvasEditor language="en" documentId={2} documentPath="/notes/first.md" assetRefresh initialDocument={savedDocument} onChange={onChange} onEdit={onEdit} />));
     expect(editor.state.selection.toJSON()).toEqual(selection);
     expect(onEdit).not.toHaveBeenCalled();
     expect(onChange).not.toHaveBeenCalled();

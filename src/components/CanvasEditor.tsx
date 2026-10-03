@@ -57,6 +57,7 @@ type Props = {
   assetSourcePath?: string;
   assetSourceOperation?: 'rebase' | 'rename';
   assetSourceTransition?: CanvasAssetTransition;
+  assetRefresh?: boolean;
   initialDocument: JSONContent;
   comments?: readonly MarkdownComment[];
   outlineTarget?: { index: number; request: number };
@@ -293,6 +294,7 @@ function sameCanvasProps(previous: Props, next: Props): boolean {
     previous.assetSourcePath === next.assetSourcePath &&
     previous.assetSourceOperation === next.assetSourceOperation &&
     previous.assetSourceTransition === next.assetSourceTransition &&
+    previous.assetRefresh === next.assetRefresh &&
     previous.comments === next.comments &&
     previous.onEdit === next.onEdit &&
     previous.outlineTarget === next.outlineTarget &&
@@ -317,6 +319,7 @@ export const CanvasEditor = memo(
     assetSourcePath = documentPath,
     assetSourceOperation = 'rebase',
     assetSourceTransition,
+    assetRefresh = false,
     initialDocument,
     comments = [],
     outlineTarget,
@@ -659,7 +662,7 @@ export const CanvasEditor = memo(
     // useEditor already constructed its first document from the initial props.
     // Replacing it again rebuilds every node view and layout during file open.
     if (snapshot.live || appliedDocument.current || editor.options.content !== snapshot.initial) {
-      replaceDocumentPreservingSelection(editor, snapshot.live?.toJSON() ?? snapshot.initial);
+      replaceDocumentPreservingSelection(editor, snapshot.live?.toJSON() ?? snapshot.initial, { assetRefresh: replacingDocument && assetRefresh });
     }
     if (preservedSelection) {
       editor.view.dispatch(editor.state.tr.setSelection(preservedSelection.resolve(editor.state.doc)));
@@ -675,7 +678,7 @@ export const CanvasEditor = memo(
     }
     appliedDocument.current = { id: documentId, editor };
     if (pendingChangeRef.current) scheduleCommentMapping(editor);
-  }, [documentId, editor, scheduleCommentMapping]);
+  }, [assetRefresh, documentId, editor, scheduleCommentMapping]);
 
   useEffect(() => {
     componentMountedRef.current = true;

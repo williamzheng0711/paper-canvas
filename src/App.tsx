@@ -162,6 +162,7 @@ export default function App() {
   const [file, setFile] = useState<EditorFile>(newEditorFile);
   const canvasSupported = useMemo(() => canvasDocumentSupported(file.document, file.comments), [file.document, file.comments]);
   const [documentId, setDocumentId] = useState(0);
+  const canvasAssetRefreshRef = useRef(false);
   const [editRevision, setEditRevision] = useState(0);
   const [dirty, setDirty] = useState(false);
   const [saveStatus, setSaveStatus] = useState<SaveStatus>('saved');
@@ -253,6 +254,11 @@ export default function App() {
   dirtyRef.current = dirty;
   sourceModeRef.current = sourceMode;
   preferencesRef.current = preferences;
+
+  const advanceDocumentId = useCallback((assetRefresh = false) => {
+    canvasAssetRefreshRef.current = assetRefresh;
+    setDocumentId((id) => id + 1);
+  }, []);
 
   const closeToolbarMenus = useCallback(() => {
     setRenameRequest(null);
@@ -382,7 +388,7 @@ export default function App() {
         comments: next,
         sourceMarkdown: undefined,
       };
-      if (sourceState && !documentsEqual(fileRef.current.document, sourceState.document)) setDocumentId((id) => id + 1);
+      if (sourceState && !documentsEqual(fileRef.current.document, sourceState.document)) advanceDocumentId();
       fileRef.current = nextFile;
       setFile(nextFile);
       if (sourceModeRef.current) {
@@ -402,7 +408,7 @@ export default function App() {
       }
       if (options.markEdited !== false) markEdited();
     },
-    [clearSourceCommentSync, markEdited, setExternalRawMarkdown],
+    [advanceDocumentId, clearSourceCommentSync, markEdited, setExternalRawMarkdown],
   );
 
   useEffect(
@@ -535,7 +541,7 @@ export default function App() {
           const normalizedDraft = { ...draft, comments: draft.comments ?? [] };
           fileRef.current = normalizedDraft;
           setFile(normalizedDraft);
-          setDocumentId((id) => id + 1);
+          advanceDocumentId();
           documentSessionRef.current += 1;
           const largeDocument = !canvasDocumentSupported(normalizedDraft.document, normalizedDraft.comments);
           if (sourceModeRef.current || largeDocument) {
@@ -563,7 +569,7 @@ export default function App() {
         setMessage(error instanceof Error ? error.message : getMessages().loadSettingsFailed);
       });
     return () => { active = false; };
-  }, [advanceRevision, setExternalRawMarkdown, startupOpenRevision]);
+  }, [advanceDocumentId, advanceRevision, setExternalRawMarkdown, startupOpenRevision]);
 
   useEffect(() => {
     if (!preferencesLoaded.current) return;
@@ -647,7 +653,7 @@ export default function App() {
       }
       setSidebarTab('outline');
       closeToolbarMenus();
-      setDocumentId((id) => id + 1);
+      advanceDocumentId();
       documentSessionRef.current += 1;
       const session = documentSessionRef.current;
       void clearDraft().catch((error: unknown) => {
@@ -671,7 +677,7 @@ export default function App() {
       setCommentsPanelOpen(normalizedFile.comments.length > 0);
       setMessage(normalizedFile.commentWarning ?? (largeDocument ? getMessages().canvasViewLimited : getMessages().openedFile(normalizedFile.name)));
     },
-    [advanceRevision, clearSourceCommentSync, closeToolbarMenus, resetCommentHistory, setExternalRawMarkdown],
+    [advanceDocumentId, advanceRevision, clearSourceCommentSync, closeToolbarMenus, resetCommentHistory, setExternalRawMarkdown],
   );
 
   const replaceWithOpenedFile = useCallback(
@@ -795,7 +801,7 @@ export default function App() {
               if (sourceModeRef.current && latest.sourceMarkdown !== undefined && latest.sourceMarkdown !== rawMarkdownRef.current) {
                 setExternalRawMarkdown(latest.sourceMarkdown, { oldPath: assetSourcePath, newPath: saved.path });
               }
-              if (!documentsEqual(liveFile.document, latest.document)) setDocumentId((id) => id + 1);
+              if (!documentsEqual(liveFile.document, latest.document)) advanceDocumentId(documentsEqual(liveFile.document, current.document));
             }
             latest.diskSourceMarkdown = saved.diskSourceMarkdown;
             sourceAssetOperationRef.current = 'rebase';
@@ -811,12 +817,13 @@ export default function App() {
           // not only against the parsed save candidate, so it is refreshed before
           // the next mode switch.
           const canvasDocumentChanged = !documentsEqual(fileRef.current.document, saved.document);
+          const assetRefresh = !editingSource || documentsEqual(fileRef.current.document, candidate.document);
           sourceAssetOperationRef.current = 'rebase';
           sourceAssetTransitionRef.current = undefined;
           fileRef.current = saved;
           setFile(saved);
           if (canvasDocumentChanged) {
-            setDocumentId((id) => id + 1);
+            advanceDocumentId(assetRefresh);
           }
           // Save As rebases relative image paths. Publish that exact saved source
           // through the editor's external update without creating a user edit.
@@ -893,7 +900,7 @@ export default function App() {
       }
     });
     return outcome;
-  }, [clearSourceCommentSync, flushCanvasChanges, queueFileOperation, setExternalRawMarkdown]);
+  }, [advanceDocumentId, clearSourceCommentSync, flushCanvasChanges, queueFileOperation, setExternalRawMarkdown]);
 
   useEffect(() => {
     const preventUnsavedUnload = (event: BeforeUnloadEvent) => {
@@ -1136,9 +1143,10 @@ export default function App() {
         const sourceState = sourceModeRef.current
           ? documentStateFromMarkdown(sourceMarkdown!, renamed.path)
           : undefined;
-        const document = sourceState?.document ?? (currentFile.path && renamed.path
+        const renamedCanvasDocument = currentFile.path && renamed.path
           ? hydrateDocumentAssets(renameDocumentAssetReferences(liveFile.document, currentFile.path, renamed.path), renamed.path)
-          : liveFile.document);
+          : liveFile.document;
+        const document = sourceState?.document ?? renamedCanvasDocument;
         const documentChanged = !documentsEqual(liveFile.document, document);
         const comments = sourceState?.comments ?? (documentChanged && (liveFile.comments?.length ?? 0) > 0 && currentFile.path && renamed.path
           ? mapImagePathComments(liveFile.comments!, documentToPortableMarkdown(liveFile.document), documentToPortableMarkdown(document), currentFile.path, renamed.path, 'rename')
@@ -1162,7 +1170,7 @@ export default function App() {
         sourceAssetTransitionRef.current = undefined;
         fileRef.current = nextFile;
         setFile(nextFile);
-        if (documentChanged) setDocumentId((id) => id + 1);
+        if (documentChanged) advanceDocumentId(documentsEqual(document, renamedCanvasDocument));
         // An unnamed document's filename lives only in its recovery draft.
         // Reschedule that draft even when its content was already autosaved.
         if (!currentFile.path && nextFile.name !== currentFile.name) markEdited();
@@ -1189,7 +1197,7 @@ export default function App() {
           }
           fileRef.current = recovered;
           setFile(recovered);
-          if (!documentsEqual(liveFile.document, recovered.document)) setDocumentId((id) => id + 1);
+          if (!documentsEqual(liveFile.document, recovered.document)) advanceDocumentId(documentsEqual(liveFile.document, latest.document));
           // The source write failed while companion assets remained at their
           // new name. Save the repaired references at the surviving file path.
           if (error.assetsRenamed) markEdited();
@@ -1198,7 +1206,7 @@ export default function App() {
         if (documentSessionRef.current === session) setMessage(error instanceof Error ? error.message : getMessages().renameFailed);
       }
     });
-  }, [clearSourceCommentSync, flushCanvasChanges, markEdited, queueFileOperation, setExternalRawMarkdown]);
+  }, [advanceDocumentId, clearSourceCommentSync, flushCanvasChanges, markEdited, queueFileOperation, setExternalRawMarkdown]);
 
   const activeSearchEditor = useCallback(
     () => (sourceModeRef.current ? markdownSearch.current : canvasSearch.current),
@@ -1432,7 +1440,7 @@ export default function App() {
         };
         fileRef.current = nextFile;
         setFile(nextFile);
-        if (documentChanged) setDocumentId((id) => id + 1);
+        if (documentChanged) advanceDocumentId();
       }
       resetCommentHistory();
       sourceModeRef.current = false;
@@ -1609,7 +1617,7 @@ export default function App() {
           if (editRevisionRef.current !== renderedRevision || fileRef.current !== sourceFile || !sourceModeRef.current) continue;
           fileRef.current = nextFile;
           setFile(nextFile);
-          setDocumentId((id) => id + 1);
+          advanceDocumentId();
           await waitForCanvasRender();
         }
         if (documentSessionRef.current !== exportSession) return;
@@ -1640,7 +1648,7 @@ export default function App() {
       pdfExportingRef.current = false;
       setPdfExporting(false);
     }
-  }, [flushCanvasChanges]);
+  }, [advanceDocumentId, flushCanvasChanges]);
 
   const handleCanvasContextMenu = useCallback((placement: CommentPlacement, coordinates: { x: number; y: number }) => {
     const menuWidth = 190;
@@ -2038,6 +2046,7 @@ export default function App() {
               ref={canvasSearch}
               language={preferences.language}
               documentId={documentId}
+              assetRefresh={canvasAssetRefreshRef.current}
               documentPath={file.path}
               assetSourcePath={fileAssetSourcePath(file)}
               assetSourceOperation={sourceAssetOperationRef.current}

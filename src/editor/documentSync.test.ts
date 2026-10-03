@@ -1,7 +1,10 @@
-import { Editor } from '@tiptap/core';
+import { Editor, type JSONContent } from '@tiptap/core';
+import { closeHistory } from '@tiptap/pm/history';
 import StarterKit from '@tiptap/starter-kit';
 import { describe, expect, it, vi } from 'vitest';
 import { documentsEqual, replaceDocumentPreservingSelection } from './documentSync';
+import { canvasNodesAndMarks } from './canvasSchema';
+import { CanvasAssetHistory } from './canvasAssetHistory';
 
 describe('document synchronization', () => {
   it('compares a shared cached document without serializing it', () => {
@@ -62,5 +65,50 @@ describe('document synchronization', () => {
 
     expect(editor.state.selection.from).toBe(4);
     editor.destroy();
+  });
+
+  it.each([
+    ['heading level', { type: 'heading', attrs: { level: 2 }, content: [{ type: 'text', text: 'Title' }] }, { level: 3 }],
+    ['formula source', { type: 'paragraph', content: [{ type: 'inlineFormula', attrs: { latex: 'x' } }] }, { latex: 'y' }],
+    ['image caption', { type: 'image', attrs: { src: 'https://example.com/a.png', alt: 'Before' } }, { alt: 'After' }],
+    ['image source', { type: 'image', attrs: { src: 'asset:/notes/a.png', originalSrc: 'a.png', basePath: '/notes' } }, { src: 'asset:/notes/b.png', originalSrc: 'b.png' }],
+    ['HTML source', { type: 'htmlPreview', attrs: { source: '<aside>Before</aside>' } }, { source: '<aside>After</aside>' }],
+    ['opaque Markdown source', { type: 'unsupportedMarkdown', attrs: { source: '### Before ###' } }, { source: '### After ###' }],
+  ] as [string, JSONContent, Record<string, unknown>][])('retains Canvas Undo for a user %s edit made in Source', (_name, node, changedAttributes) => {
+    const editor = new Editor({
+      extensions: [...canvasNodesAndMarks(), CanvasAssetHistory],
+      content: { type: 'doc', content: [node, { type: 'paragraph', content: [{ type: 'text', text: 'Body' }] }] },
+    });
+    try {
+      const original = editor.getJSON();
+      editor.commands.setTextSelection(editor.state.doc.content.size - 1);
+      editor.commands.insertContent(' extended');
+      editor.view.dispatch(closeHistory(editor.state.tr));
+      const beforeSourceEdit = editor.getJSON();
+      const replacement = structuredClone(beforeSourceEdit);
+      const target = (node.type === 'paragraph' ? replacement.content![0].content![0] : replacement.content![0]) as JSONContent;
+      target.attrs = { ...target.attrs, ...changedAttributes };
+      replaceDocumentPreservingSelection(editor, replacement);
+      expect(editor.getJSON()).toEqual(replacement);
+      expect(editor.commands.undo()).toBe(true);
+      expect(editor.getJSON()).toEqual(beforeSourceEdit);
+      expect(editor.commands.undo()).toBe(true);
+      expect(editor.getJSON()).toEqual(original);
+      expect(editor.commands.redo()).toBe(true);
+      expect(editor.commands.redo()).toBe(true);
+      expect(editor.getJSON()).toEqual(replacement);
+    } finally { editor.destroy(); }
+  });
+
+  it('keeps user attributes in Undo even when a file update also requests an asset refresh', () => {
+    const editor = new Editor({ extensions: canvasNodesAndMarks(), content: '<h2>Title</h2>' });
+    try {
+      const before = editor.getJSON();
+      const replacement = structuredClone(before);
+      replacement.content![0].attrs!.level = 3;
+      replaceDocumentPreservingSelection(editor, replacement, { assetRefresh: true });
+      expect(editor.commands.undo()).toBe(true);
+      expect(editor.getJSON()).toEqual(before);
+    } finally { editor.destroy(); }
   });
 });

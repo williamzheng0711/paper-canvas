@@ -13,6 +13,7 @@ import { getMessages } from './i18n';
 
 type CanvasProps = {
   documentId: number;
+  assetRefresh?: boolean;
   assetSourcePath?: string;
   assetSourceOperation?: 'rebase' | 'rename';
   assetSourceTransition?: { oldPath: string; newPath: string; operation: 'rebase' | 'rename' };
@@ -1102,6 +1103,52 @@ describe('App autosave cursor stability', () => {
     expect(harness.canvasProps?.initialDocument).toEqual(editedDocument);
   });
 
+  it('marks only the persisted image attributes as a Canvas asset refresh on Save', async () => {
+    const document = markdownToDocument('Body\n');
+    document.content!.push({ type: 'image', attrs: { src: 'data:image/png;base64,AAECAw==', alt: 'Pasted diagram' } });
+    await act(async () => { harness.canvasProps?.onChange(document); });
+    const documentId = harness.canvasProps!.documentId;
+    files.saveEditorFile.mockImplementationOnce(async (candidate: EditorFile) => {
+      const saved = structuredClone(candidate);
+      const image = saved.document.content!.find((node) => node.type === 'image')!;
+      image.attrs = { ...image.attrs, src: 'asset:/tmp/research.assets/a.png', originalSrc: 'research.assets/a.png', basePath: '/tmp' };
+      return saved;
+    });
+
+    await act(async () => { documentAction(getMessages().save).click(); await flushEffects(); });
+
+    expect(harness.canvasProps?.documentId).toBe(documentId + 1);
+    expect(harness.canvasProps?.assetRefresh).toBe(true);
+    expect(harness.canvasProps?.initialDocument.content?.find((node) => node.type === 'image')?.attrs?.originalSrc).toBe('research.assets/a.png');
+  });
+
+  it.each(['switch', 'save', 'rename'] as const)('keeps a user Source image URL edit distinct from asset refreshes during %s', async (operation) => {
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const original = '![Diagram](first.svg)\n';
+    const edited = '![Diagram](second.svg)\n';
+    files.openRecent.mockResolvedValueOnce({
+      path: '/tmp/research.md', name: 'research.md', document: markdownToDocument(original),
+      sourceMarkdown: original, diskSourceMarkdown: original,
+    });
+    try {
+      await act(async () => { (await recentFileButton()).click(); await flushEffects(); });
+      await act(async () => { readingModeButton('source').click(); await vi.advanceTimersByTimeAsync(50); });
+      await act(async () => { harness.sourceProps?.onChange(edited); });
+      const documentId = harness.canvasProps!.documentId;
+      if (operation === 'rename') await submitRename();
+      else await act(async () => {
+        if (operation === 'switch') readingModeButton('canvas').click();
+        else documentAction(getMessages().save).click();
+        await flushEffects();
+      });
+      expect(harness.canvasProps?.documentId).toBe(documentId + 1);
+      expect(harness.canvasProps?.initialDocument).toEqual(markdownToDocument(edited));
+      expect(harness.canvasProps?.assetRefresh).toBe(false);
+    } finally {
+      confirm.mockRestore();
+    }
+  });
+
   it('does not mark an unchanged canvas dirty when switching to Markdown mode', async () => {
     const sourceMarkdown = '\uFEFF# Exact  source\r\n\r\n| A | B |\r\n| - | - |\r\n| First | Last |\r\n';
     await act(async () => root.unmount());
@@ -1538,6 +1585,7 @@ describe('App autosave cursor stability', () => {
     expect(files.saveEditorFile).toHaveBeenCalledOnce();
     expect(harness.canvasProps?.initialDocument).toEqual(markdownToDocument(markdown));
     expect(harness.canvasProps?.documentId).toBe((initialDocumentId ?? 0) + 1);
+    expect(harness.canvasProps?.assetRefresh).toBe(false);
   });
 
   it('preserves literal source and its revision during autosave', async () => {
@@ -1831,6 +1879,7 @@ describe('App autosave cursor stability', () => {
       expect(harness.sourceProps?.value).toBe(expected);
       expect(expected).toContain('Literal  `research.assets/`');
       expect(harness.sourceProps?.valueRevision).toBe(revision + 1);
+      expect(harness.canvasProps?.assetRefresh).toBe(true);
       expect(host.querySelector('.dirty-dot')).toBeNull();
       await act(async () => { readingModeButton('canvas').click(); await vi.advanceTimersByTimeAsync(50); });
       await act(async () => { readingModeButton('source').click(); await vi.advanceTimersByTimeAsync(50); });
@@ -2482,6 +2531,7 @@ describe('App autosave cursor stability', () => {
       await act(async () => { (await recentFileButton()).click(); await flushEffects(); });
       await submitRename();
       expect(harness.canvasProps?.initialDocument).toEqual(markdownToDocument(expected));
+      expect(harness.canvasProps?.assetRefresh).toBe(true);
       await act(async () => { readingModeButton('source').click(); await vi.advanceTimersByTimeAsync(50); });
       expect(harness.sourceProps?.value).toBe(expected);
       expect(host.querySelector('.dirty-dot')).toBeNull();
@@ -2631,6 +2681,7 @@ describe('App autosave cursor stability', () => {
     expect(harness.sourceProps?.value).toBe(rewritten);
     expect(harness.sourceProps?.valueRevision).toBe(revision + 1);
     expect(harness.canvasProps?.initialDocument).toEqual(markdownToDocument(rewritten));
+    expect(harness.canvasProps?.assetRefresh).toBe(false);
     await act(async () => { await vi.advanceTimersByTimeAsync(1000); await flushEffects(); });
     expect(files.saveEditorFile).toHaveBeenCalledWith(expect.objectContaining({ path: '/tmp/renamed.md', document: markdownToDocument(rewritten) }), false, rewritten);
   });

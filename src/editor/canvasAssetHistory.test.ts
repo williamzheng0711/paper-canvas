@@ -80,7 +80,7 @@ describe('Canvas asset Undo history', () => {
       const replacement = saved.getJSON();
       const image = replacement.content!.find((node) => node.type === 'image')!;
       image.attrs = { ...image.attrs, src: 'asset:/notes/first.assets/a.png', originalSrc: 'first.assets/a.png', basePath: '/notes' };
-      replaceDocumentPreservingSelection(saved, replacement);
+      replaceDocumentPreservingSelection(saved, replacement, { assetRefresh: true });
       move(saved, '/notes/first.md', '/notes/final.md', 'rename');
       expect(saved.commands.undo()).toBe(true);
       expect(saved.state.doc.nodeAt(imagePosition)!.attrs).toMatchObject({ width: null, originalSrc: 'final.assets/a.png', src: 'asset:/notes/final.assets/a.png' });

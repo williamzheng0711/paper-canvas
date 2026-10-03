@@ -9,7 +9,7 @@ export const canvasAssetTransitionKey = new PluginKey<undefined>('canvasAssetTra
 export const canvasAssetRefresh = 'canvasAssetRefresh';
 const normalizedAssetHistory = 'normalizedAssetHistory';
 
-const assetAttributes: Record<string, readonly string[]> = {
+export const canvasAssetAttributes: Record<string, readonly string[]> = {
   image: ['src', 'originalSrc', 'basePath'],
   htmlPreview: ['source', 'basePath'],
   inlineHtmlPreview: ['source', 'basePath'],
@@ -18,7 +18,7 @@ const assetAttributes: Record<string, readonly string[]> = {
 
 function assetKey(node: Node | JSONContent): string {
   const type = typeof node.type === 'string' ? node.type : node.type?.name;
-  return JSON.stringify([type, ...(assetAttributes[type ?? ''] ?? []).map((name) => node.attrs?.[name])]);
+  return JSON.stringify([type, ...(canvasAssetAttributes[type ?? ''] ?? []).map((name) => node.attrs?.[name])]);
 }
 
 type Refresh = { replacements: Map<string, JSONContent['attrs']> };
@@ -32,7 +32,7 @@ export const CanvasAssetHistory = Extension.create({
     const origins = new WeakMap<Node, number>();
     const knownSources = new Map<string, number>();
     const remember = (document: Node) => document.descendants((node) => {
-      if (!assetAttributes[node.type.name]) return;
+      if (!canvasAssetAttributes[node.type.name]) return;
       if (!origins.has(node)) origins.set(node, events.length);
       if (!knownSources.has(assetKey(node))) knownSources.set(assetKey(node), events.length);
     });
@@ -47,7 +47,7 @@ export const CanvasAssetHistory = Extension.create({
           if (transaction.getMeta(canvasAssetRefresh)) {
             const replacements = new Map<string, JSONContent['attrs']>();
             oldState.doc.descendants((node, position) => {
-              const names = assetAttributes[node.type.name];
+              const names = canvasAssetAttributes[node.type.name];
               const next = transaction.doc.nodeAt(position);
               if (!names || !next || node.type !== next.type || assetKey(node) === assetKey(next)) return;
               replacements.set(assetKey(node), Object.fromEntries(names.map((name) => [name, next.attrs[name]])));
@@ -62,7 +62,7 @@ export const CanvasAssetHistory = Extension.create({
           !transactions.some(isHistoryTransaction)) return;
         const transaction = state.tr;
         state.doc.descendants((node, position) => {
-          const names = assetAttributes[node.type.name];
+          const names = canvasAssetAttributes[node.type.name];
           if (!names) return;
           let restored = node.toJSON() as JSONContent;
           const revision = origins.get(node) ?? knownSources.get(assetKey(node)) ?? events.length;
