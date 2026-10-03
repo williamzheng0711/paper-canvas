@@ -18,6 +18,8 @@ use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tauri_plugin_fs::FsExt;
 use tauri_plugin_store::StoreExt;
 
+mod asset_protocol;
+
 #[cfg(target_os = "macos")]
 use objc2::runtime::{AnyObject, ProtocolObject};
 #[cfg(target_os = "macos")]
@@ -1058,7 +1060,24 @@ pub fn run() {
     let working_directory = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let initial_files = markdown_paths_from_args(&cli_args, &working_directory);
 
-    let mut builder = tauri::Builder::default().manage(OpenedFiles(Mutex::new(Vec::new())));
+    let mut builder = tauri::Builder::default()
+        .manage(OpenedFiles(Mutex::new(Vec::new())))
+        .register_asynchronous_uri_scheme_protocol("asset", |context, request, responder| {
+            let app = context.app_handle().clone();
+            let label = context.webview_label().to_owned();
+            tauri::async_runtime::spawn_blocking(move || {
+                let origin = app
+                    .get_webview_window(&label)
+                    .and_then(|view| view.url().ok())
+                    .as_ref()
+                    .map(asset_protocol::webview_origin)
+                    .unwrap_or_else(|| "null".into());
+                let scope = app.asset_protocol_scope();
+                responder.respond(asset_protocol::response(request, &origin, |path| {
+                    scope.is_allowed(path)
+                }));
+            });
+        });
 
     #[cfg(desktop)]
     {
