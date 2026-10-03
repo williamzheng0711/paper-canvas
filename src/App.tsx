@@ -2050,6 +2050,7 @@ export default function App() {
         </section>
         {commentsPanelOpen && (
           <CommentsPanel
+            key={documentSessionRef.current}
             language={preferences.language}
             comments={comments}
             newTarget={newCommentTarget}

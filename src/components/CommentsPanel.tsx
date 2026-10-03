@@ -15,6 +15,8 @@ type Props = {
   onLocate: (comment: MarkdownComment) => void;
 };
 
+const commentsPerPage = 100;
+
 function targetOffset(comment: MarkdownComment): number {
   return comment.target.kind === 'position' ? comment.target.offset : comment.target.from;
 }
@@ -43,7 +45,9 @@ export const CommentsPanel = memo(function CommentsPanel({
   const [draft, setDraft] = useState('');
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingValue, setEditingValue] = useState('');
+  const [page, setPage] = useState(0);
   const newInput = useRef<HTMLTextAreaElement>(null);
+  const panel = useRef<HTMLElement>(null);
 
   useEffect(() => {
     if (!newTarget) return;
@@ -63,6 +67,19 @@ export const CommentsPanel = memo(function CommentsPanel({
     () => [...comments].sort((left, right) => targetOffset(left) - targetOffset(right)),
     [comments],
   );
+  const lastPage = Math.max(0, Math.ceil(orderedComments.length / commentsPerPage) - 1);
+  const currentPage = Math.min(page, lastPage);
+  const firstComment = currentPage * commentsPerPage;
+  const visibleComments = orderedComments.slice(firstComment, firstComment + commentsPerPage);
+
+  useEffect(() => {
+    const activeIndex = orderedComments.findIndex((comment) => comment.id === activeCommentId);
+    if (activeIndex >= 0) setPage(Math.floor(activeIndex / commentsPerPage));
+  }, [activeCommentId, orderedComments]);
+
+  useEffect(() => {
+    if (panel.current) panel.current.scrollTop = 0;
+  }, [currentPage]);
 
   const startEditing = (comment: MarkdownComment) => {
     setEditingId(comment.id);
@@ -70,7 +87,7 @@ export const CommentsPanel = memo(function CommentsPanel({
   };
 
   return (
-    <aside className="comments-panel" aria-label={text.comments}>
+    <aside ref={panel} className="comments-panel" aria-label={text.comments}>
       <header className="comments-panel__header">
         <div className="comments-panel__title">
           <strong>{text.commentsCount(comments.length)}</strong>
@@ -80,6 +97,14 @@ export const CommentsPanel = memo(function CommentsPanel({
           ×
         </button>
       </header>
+
+      {lastPage > 0 && (
+        <nav className="comments-panel__pagination" aria-label={text.comments}>
+          <button type="button" disabled={currentPage === 0} onClick={() => setPage(currentPage - 1)}>{text.commentPreviousPage}</button>
+          <span aria-live="polite">{text.commentPageRange(firstComment + 1, Math.min(firstComment + commentsPerPage, orderedComments.length), orderedComments.length)}</span>
+          <button type="button" disabled={currentPage === lastPage} onClick={() => setPage(currentPage + 1)}>{text.commentNextPage}</button>
+        </nav>
+      )}
 
       {newTarget && (
         <form
@@ -121,7 +146,7 @@ export const CommentsPanel = memo(function CommentsPanel({
         <p className="comments-panel__empty">{text.commentNoComments}</p>
       ) : (
         <div className="comments-list">
-          {orderedComments.map((comment, index) => {
+          {visibleComments.map((comment, index) => {
             const editing = editingId === comment.id;
             return (
               <article
@@ -130,7 +155,7 @@ export const CommentsPanel = memo(function CommentsPanel({
                 data-comment-card={comment.id}
               >
                 <div className="comment-card__header">
-                  <span className="comment-card__number">{String(index + 1).padStart(2, '0')}</span>
+                  <span className="comment-card__number">{String(firstComment + index + 1).padStart(2, '0')}</span>
                   <span>{comment.target.kind === 'range' ? text.commentRange : text.commentPosition}</span>
                   {comment.status === 'needs-review' && (
                     <span className="comment-card__status">{text.commentNeedsReview}</span>
