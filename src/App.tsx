@@ -29,6 +29,7 @@ import { maximumFontSize, minimumFontSize, normalizeFontSize } from './lib/fontS
 import { maximumLineSpacing, minimumLineSpacing, normalizeLineSpacing } from './lib/lineSpacing';
 import { waitForRenderedImages } from './lib/renderedImages';
 import {
+  allowDocumentImageFiles,
   chooseMarkdownFile,
   clearDraft,
   confirmDiscardChanges,
@@ -54,6 +55,7 @@ import {
   saveEditorFile,
   saveDraft,
   savePreferences,
+  validateDocumentUnicode,
   type AppPreferences,
   type EditorFile,
   type RecentFile,
@@ -1328,14 +1330,27 @@ export default function App() {
     }
     try {
       clearSourceCommentSync();
-      const currentFile = fileRef.current;
-      const unselectedState = currentFile.sourceMarkdown === rawMarkdownRef.current
-        ? { document: currentFile.document, comments: currentFile.comments ?? [], warning: currentFile.commentWarning }
-        : documentStateFromMarkdown(rawMarkdownRef.current, fileAssetSourcePath(currentFile));
-      if (!canvasDocumentSupported(unselectedState.document)) {
-        setMessage(getMessages().canvasViewLimited);
-        return;
-      }
+      const session = documentSessionRef.current;
+      let currentFile: EditorFile;
+      let markdown: string;
+      let assetPath: string | undefined;
+      let unselectedState: ReturnType<typeof documentStateFromMarkdown>;
+      do {
+        currentFile = fileRef.current;
+        markdown = rawMarkdownRef.current;
+        assetPath = fileAssetSourcePath(currentFile);
+        unselectedState = currentFile.sourceMarkdown === markdown
+          ? { document: currentFile.document, comments: currentFile.comments ?? [], warning: currentFile.commentWarning }
+          : documentStateFromMarkdown(markdown, assetPath);
+        if (!canvasDocumentSupported(unselectedState.document)) {
+          setMessage(getMessages().canvasViewLimited);
+          return;
+        }
+        // Newly typed image references need their exact local files allowed
+        // before the preview requests them, including after a failed save.
+        await allowDocumentImageFiles({ ...currentFile, document: unselectedState.document });
+        if (documentSessionRef.current !== session || !sourceModeRef.current) return;
+      } while (markdown !== rawMarkdownRef.current || assetPath !== fileAssetSourcePath(fileRef.current));
       const parsedSelection = visibleEditorSelection()
         ? markdownToDocumentWithSelection(rawMarkdownRef.current, markdownSearch.current?.getMarkdownOffset?.())
         : undefined;
@@ -1505,6 +1520,9 @@ export default function App() {
       }
       if (documentSessionRef.current !== exportSession) return;
       if (!sourceModeRef.current) flushCanvasChanges();
+      if (!sourceModeRef.current && fileRef.current.sourceMarkdown === undefined) {
+        validateDocumentUnicode(fileRef.current.document);
+      }
       const markdown = sourceModeRef.current
         ? rawMarkdownRef.current
         : fileRef.current.sourceMarkdown ?? documentToPortableMarkdown(fileRef.current.document, fileRef.current.comments ?? []);
@@ -1523,44 +1541,60 @@ export default function App() {
     closeExportMenu();
     setMessage(getMessages().pdfExporting);
     try {
-      if (!sourceModeRef.current) {
-        const pendingImages = canvasSearch.current?.waitForPendingImages?.();
-        if (pendingImages) {
-          await pendingImages;
+      let renderedRevision: number;
+      let renderedAssetPath: string | undefined;
+      while (true) {
+        if (!sourceModeRef.current) {
+          const pendingImages = canvasSearch.current?.waitForPendingImages?.();
+          if (pendingImages) {
+            await pendingImages;
+            if (documentSessionRef.current !== exportSession) return;
+            flushCanvasChanges();
+            // Let newly inserted images reach the canvas before capture.
+            await waitForCanvasRender();
+          }
+        }
+        if (documentSessionRef.current !== exportSession) return;
+        renderedRevision = editRevisionRef.current;
+        renderedAssetPath = fileAssetSourcePath(fileRef.current);
+        // Source remains editable during rendering and image decoding, so
+        // repeat preparation if writing changes while either wait is pending.
+        if (sourceModeRef.current) {
+          const sourceFile = fileRef.current;
+          const sourceMarkdown = rawMarkdownRef.current;
+          const sourceState = documentStateFromMarkdown(sourceMarkdown, renderedAssetPath);
+          if (!canvasDocumentSupported(sourceState.document)) throw new Error(getMessages().canvasViewLimited);
+          const nextFile = {
+            ...sourceFile,
+            document: sourceState.document,
+            comments: sourceState.comments,
+            sourceMarkdown,
+            ...(sourceState.warning ? { commentWarning: sourceState.warning } : { commentWarning: undefined }),
+          };
+          await allowDocumentImageFiles(nextFile);
           if (documentSessionRef.current !== exportSession) return;
-          flushCanvasChanges();
-          // Let the newly inserted images reach the rendered canvas before
-          // the native PDF command captures it.
+          if (editRevisionRef.current !== renderedRevision || fileRef.current !== sourceFile || !sourceModeRef.current) continue;
+          fileRef.current = nextFile;
+          setFile(nextFile);
+          setDocumentId((id) => id + 1);
           await waitForCanvasRender();
         }
+        if (documentSessionRef.current !== exportSession) return;
+        if (canvasArea.current) {
+          const renderedImages = waitForRenderedImages(canvasArea.current);
+          if (renderedImages) await renderedImages;
+        }
+        if (documentSessionRef.current !== exportSession) return;
+        // Blurring can commit live formula/IME input. Include that writing in
+        // the same stability check instead of capturing the previous render.
+        if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+        if (!sourceModeRef.current) flushCanvasChanges();
+        if (editRevisionRef.current === renderedRevision && fileAssetSourcePath(fileRef.current) === renderedAssetPath) break;
       }
-      if (documentSessionRef.current !== exportSession) return;
-      // Refresh the hidden rendered document for print CSS while keeping the
-      // author's source view, selection and undo history in place.
-      if (sourceModeRef.current) {
-        const sourceState = documentStateFromMarkdown(rawMarkdownRef.current, fileAssetSourcePath(fileRef.current));
-        if (!canvasDocumentSupported(sourceState.document)) throw new Error(getMessages().canvasViewLimited);
-        const nextFile = {
-          ...fileRef.current,
-          document: sourceState.document,
-          comments: sourceState.comments,
-          sourceMarkdown: rawMarkdownRef.current,
-          ...(sourceState.warning ? { commentWarning: sourceState.warning } : { commentWarning: undefined }),
-        };
-        fileRef.current = nextFile;
-        setFile(nextFile);
-        setDocumentId((id) => id + 1);
-        resetCommentHistory();
-        await waitForCanvasRender();
-      }
-      if (documentSessionRef.current !== exportSession) return;
-      if (canvasArea.current) {
-        const renderedImages = waitForRenderedImages(canvasArea.current);
-        if (renderedImages) await renderedImages;
-      }
-      if (documentSessionRef.current !== exportSession) return;
-      if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
-      const result = await exportPdfFile(fileRef.current.name, () => documentSessionRef.current === exportSession);
+      const result = await exportPdfFile(fileRef.current.name, () =>
+        documentSessionRef.current === exportSession && editRevisionRef.current === renderedRevision &&
+        fileAssetSourcePath(fileRef.current) === renderedAssetPath,
+      );
       if (documentSessionRef.current !== exportSession) return;
       if (result.type === 'saved') {
         setMessage(getMessages().exportedFile(result.name));
@@ -1573,7 +1607,7 @@ export default function App() {
       pdfExportingRef.current = false;
       setPdfExporting(false);
     }
-  }, [flushCanvasChanges, resetCommentHistory]);
+  }, [flushCanvasChanges]);
 
   const handleCanvasContextMenu = useCallback((placement: CommentPlacement, coordinates: { x: number; y: number }) => {
     const menuWidth = 190;

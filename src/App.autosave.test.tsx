@@ -18,6 +18,10 @@ type CanvasProps = {
   outlineTarget?: { index: number; request: number };
   onChange: (document: JSONContent) => void;
   onEdit?: () => void;
+  canUndoComment?: boolean;
+  canRedoComment?: boolean;
+  onUndoComment?: () => void;
+  onRedoComment?: () => void;
 };
 
 type SourceProps = {
@@ -57,6 +61,7 @@ const harness = vi.hoisted(() => ({
 }));
 
 const files = vi.hoisted(() => ({
+  allowDocumentImageFiles: vi.fn<(file: EditorFile) => Promise<void>>(async () => undefined),
   chooseMarkdownFile: vi.fn(async () => null as { name: string; document: JSONContent; path?: string } | null),
   clearDraft: vi.fn(async () => undefined),
   exportMarkdownFile: vi.fn(async () => 'research.md'),
@@ -145,6 +150,7 @@ vi.mock('./components/MarkdownSourceEditor', () => ({
 vi.mock('./lib/files', async (importOriginal) => {
   const actual = await importOriginal<typeof FileLibrary>();
   return {
+  allowDocumentImageFiles: files.allowDocumentImageFiles,
   chooseMarkdownFile: files.chooseMarkdownFile,
   clearDraft: files.clearDraft,
   confirmDiscardChanges: actual.confirmDiscardChanges,
@@ -175,6 +181,7 @@ vi.mock('./lib/files', async (importOriginal) => {
   saveDraft: files.saveDraft,
   saveEditorFile: files.saveEditorFile,
   savePreferences: files.savePreferences,
+  validateDocumentUnicode: actual.validateDocumentUnicode,
   };
 });
 
@@ -1791,6 +1798,152 @@ describe('App autosave cursor stability', () => {
     expect(harness.sourceProps?.value).toBe(source);
   });
 
+  it('includes source edits made while PDF images are still decoding', async () => {
+    await act(async () => {
+      toggleReadingModeButton()?.click();
+      await vi.advanceTimersByTimeAsync(50);
+    });
+    const initial = '# Before image decode\n\n![image](fixture.svg)\n';
+    const latest = '# Written during image decode\n\n![image](fixture.svg)\n';
+    await act(async () => { harness.sourceProps?.onChange(initial); });
+    let resolveDecode!: () => void;
+    const decoded = new Promise<void>((resolve) => { resolveDecode = resolve; });
+    const image = document.createElement('img');
+    image.src = 'fixture.svg';
+    image.decode = vi.fn(() => decoded);
+    host.querySelector('.canvas-area')!.append(image);
+    let captured: JSONContent | undefined;
+    files.exportPdfFile.mockImplementationOnce(async () => {
+      captured = structuredClone(harness.canvasProps?.initialDocument);
+      return { type: 'saved', name: 'research.pdf' };
+    });
+    await act(async () => {
+      exportAction('PDF (.pdf)')?.click();
+      await vi.advanceTimersByTimeAsync(50);
+    });
+    expect(image.decode).toHaveBeenCalledOnce();
+    expect(files.exportPdfFile).not.toHaveBeenCalled();
+    await act(async () => {
+      harness.sourceProps?.onChange(latest);
+      resolveDecode();
+      await flushEffects();
+    });
+    await act(async () => { await vi.advanceTimersByTimeAsync(50); });
+    expect(captured).toEqual(markdownToDocument(latest));
+    expect(readingModeButton('source').getAttribute('aria-pressed')).toBe('true');
+    expect(harness.sourceProps?.value).toBe(latest);
+  });
+
+  it('refreshes newly typed images before showing canvas and retains typing during image authorization', async () => {
+    await act(async () => {
+      toggleReadingModeButton()?.click();
+      await vi.advanceTimersByTimeAsync(50);
+      harness.sourceProps?.onChange('![first](first.svg)\n');
+    });
+    let authorize!: () => void;
+    files.allowDocumentImageFiles.mockImplementationOnce(() => new Promise<void>((resolve) => { authorize = resolve; }));
+    await act(async () => { readingModeButton('canvas').click(); await flushEffects(); });
+    expect(readingModeButton('source').getAttribute('aria-pressed')).toBe('true');
+    const latest = 'Latest writing.\n\n![second](second.svg)\n';
+    await act(async () => { harness.sourceProps?.onChange(latest); authorize(); await flushEffects(); });
+    expect(files.allowDocumentImageFiles).toHaveBeenLastCalledWith(expect.objectContaining({ document: markdownToDocument(latest) }));
+    expect(harness.canvasProps?.initialDocument).toEqual(markdownToDocument(latest));
+    expect(readingModeButton('canvas').getAttribute('aria-pressed')).toBe('true');
+  });
+
+  it('does not restore an older source preview after a new document replaces pending image authorization', async () => {
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    await act(async () => {
+      toggleReadingModeButton()?.click();
+      await vi.advanceTimersByTimeAsync(50);
+    });
+    let authorize!: () => void;
+    files.allowDocumentImageFiles.mockImplementationOnce(() => new Promise<void>((resolve) => { authorize = resolve; }));
+    await act(async () => { readingModeButton('canvas').click(); await flushEffects(); });
+    await act(async () => { documentAction(getMessages().new).click(); await flushEffects(); });
+    await act(async () => { authorize(); await flushEffects(); });
+    expect(host.querySelector('.document-name')?.textContent).toContain('Untitled.md');
+    expect(harness.canvasProps?.initialDocument).toEqual({ type: 'doc', content: [{ type: 'paragraph' }] });
+    confirm.mockRestore();
+  });
+
+  it('rejects a Canvas Markdown export before entities can hide invalid Unicode', async () => {
+    const document: JSONContent = { type: 'doc', content: [{ type: 'paragraph', content: [
+      { type: 'text', text: 'a' },
+      { type: 'text', text: '\uD800', marks: [{ type: 'italic' }] },
+      { type: 'text', text: 'b' },
+    ] }] };
+    await act(async () => { harness.canvasProps?.onChange(document); await flushEffects(); });
+    await act(async () => { exportAction('Markdown (.md)').click(); await flushEffects(); });
+    expect(files.exportMarkdownFile).not.toHaveBeenCalled();
+    expect(host.querySelector('.status-message')?.textContent).toContain(getMessages().invalidMarkdownUnicode);
+    expect(harness.canvasProps?.initialDocument).toEqual(document);
+  });
+
+  it('retains the committed Save As destination when PDF image authorization finishes later', async () => {
+    await act(async () => {
+      toggleReadingModeButton()?.click();
+      await vi.advanceTimersByTimeAsync(50);
+      harness.sourceProps?.onChange('Current writing.\n');
+    });
+    let authorize!: () => void;
+    files.allowDocumentImageFiles.mockImplementationOnce(() => new Promise<void>((resolve) => { authorize = resolve; }));
+    await act(async () => { exportAction('PDF (.pdf)').click(); await flushEffects(); });
+    files.saveEditorFile.mockImplementationOnce(async (file) => ({ ...file, name: 'saved-copy.md', path: '/tmp/saved-copy.md' }));
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 's', metaKey: true, shiftKey: true, bubbles: true }));
+      await flushEffects();
+    });
+    await act(async () => { authorize(); await flushEffects(); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(50); });
+    expect(files.exportPdfFile).toHaveBeenCalledWith('saved-copy.md', expect.any(Function));
+    expect(host.querySelector('.document-name')?.textContent).toContain('saved-copy.md');
+    expect(harness.canvasProps?.initialDocument).toEqual(markdownToDocument('Current writing.\n'));
+  });
+
+  it.each(['source', 'canvas'] as const)('invalidates PDF capture when %s writing changes while the native dialog is pending', async (mode) => {
+    if (mode === 'source') {
+      await act(async () => {
+        toggleReadingModeButton()?.click();
+        await vi.advanceTimersByTimeAsync(50);
+      });
+    }
+    let finish!: () => void;
+    files.exportPdfFile.mockImplementationOnce(() => new Promise((resolve) => {
+      finish = () => resolve({ type: 'cancelled' });
+    }));
+    await act(async () => {
+      exportAction('PDF (.pdf)').click();
+      await vi.advanceTimersByTimeAsync(50);
+    });
+    const isCurrentDocument = files.exportPdfFile.mock.calls[0][1]!;
+    expect(isCurrentDocument()).toBe(true);
+    await act(async () => {
+      if (mode === 'source') harness.sourceProps?.onChange('Latest writing.');
+      else harness.canvasProps?.onChange(markdownToDocument('Latest writing.'));
+      await flushEffects();
+    });
+    expect(isCurrentDocument()).toBe(false);
+    await act(async () => { finish(); await flushEffects(); });
+  });
+
+  it('prepares the committed formula revision when blurring before PDF capture', async () => {
+    const latest = markdownToDocument('Formula $\\theta$.');
+    const textarea = document.createElement('textarea');
+    host.querySelector('.canvas-area')!.append(textarea);
+    textarea.addEventListener('blur', () => { harness.canvasProps?.onChange(latest); }, { once: true });
+    textarea.focus();
+    let currentAtCapture: boolean | undefined;
+    files.exportPdfFile.mockImplementationOnce(async (_name, isCurrentDocument) => {
+      currentAtCapture = isCurrentDocument?.();
+      return { type: 'saved', name: 'research.pdf' };
+    });
+    await act(async () => { exportAction('PDF (.pdf)').click(); await flushEffects(); });
+    expect(currentAtCapture).toBe(true);
+    expect(harness.canvasProps?.initialDocument).toEqual(latest);
+    expect(harness.searchHandle.flushCommentMapping).toHaveBeenCalled();
+  });
+
   it('stores the current source in an unnamed draft for exact startup recovery', async () => {
     const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
     await act(async () => {
@@ -2269,7 +2422,7 @@ describe('App autosave cursor stability', () => {
     confirm.mockRestore();
   });
 
-  it('locates and updates comments against the original source rather than canonical Markdown offsets', async () => {
+  it.each([false, true])('locates and updates source comments while preserving their history (PDF export=%s)', async (exported) => {
     const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
     const body = 'Read [the paper][p] then target.\n\n[p]: https://example.com/paper\n';
     const from = body.indexOf('target');
@@ -2310,6 +2463,18 @@ describe('App autosave cursor stability', () => {
     const parsed = parseMarkdownComments(harness.sourceProps?.value ?? '');
     expect(parsed.body).toBe(body);
     expect(parsed.comments[0]).toMatchObject({ content: 'Updated note', target: { kind: 'range', from, to: from + 6 } });
+    if (exported) {
+      await act(async () => {
+        exportAction('PDF (.pdf)').click();
+        await vi.advanceTimersByTimeAsync(50);
+      });
+    }
+    expect(harness.canvasProps?.canUndoComment).toBe(true);
+    await act(async () => { harness.canvasProps?.onUndoComment?.(); await flushEffects(); });
+    expect(parseMarkdownComments(harness.sourceProps?.value ?? '').comments[0].content).toBe('Initial note');
+    expect(harness.canvasProps?.canRedoComment).toBe(true);
+    await act(async () => { harness.canvasProps?.onRedoComment?.(); await flushEffects(); });
+    expect(parseMarkdownComments(harness.sourceProps?.value ?? '').comments[0].content).toBe('Updated note');
     confirm.mockRestore();
   });
 
