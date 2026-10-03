@@ -2830,6 +2830,61 @@ describe('App autosave cursor stability', () => {
     confirm.mockRestore();
   });
 
+  it('locates comments at the edited source positions after prefix typing, Save and reopen', async () => {
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const body = '# Fidelity\n\nEdit this ordinary paragraph. 中文 🧪 metadata retained.\n';
+    const excerpt = '文 🧪 ';
+    const from = body.indexOf(excerpt);
+    const comments = [
+      createMarkdownComment(body, { kind: 'position', offset: 0 }, 'Heading review', '', 'heading'),
+      createMarkdownComment(body, { kind: 'range', from, to: from + excerpt.length }, 'Range review', excerpt, 'range'),
+    ];
+    const original = serializeMarkdownWithComments(body, comments);
+    const opened: EditorFile = {
+      path: '/tmp/recent.md', name: 'recent.md', document: markdownToDocument(body),
+      sourceMarkdown: original, diskSourceMarkdown: original, comments,
+    };
+    files.openRecent.mockResolvedValueOnce(opened);
+    try {
+      await act(async () => { (await recentFileButton()).click(); await flushEffects(); });
+      await act(async () => { readingModeButton('source').click(); await vi.advanceTimersByTimeAsync(50); });
+      const edited = 'Introductory line.\n\n' + original;
+      await act(async () => { harness.sourceProps?.onChange(edited); });
+      let savedSource: string | undefined;
+      files.saveEditorFile.mockImplementationOnce(async (candidate: EditorFile) => {
+        savedSource = candidate.sourceMarkdown;
+        return { ...candidate, diskSourceMarkdown: savedSource };
+      });
+      await act(async () => { documentAction(getMessages().save).click(); await flushEffects(); });
+      expect(savedSource).toBe(edited);
+      expect(host.querySelector('.dirty-dot')).toBeNull();
+      const parsed = parseMarkdownComments(savedSource ?? '');
+      const document = markdownToDocument(parsed.body);
+      files.openRecent.mockResolvedValueOnce({
+        ...opened, document, sourceMarkdown: savedSource, diskSourceMarkdown: savedSource,
+        comments: relocateMarkdownComments(parsed.comments, parsed.body, documentToMarkdown(document)),
+      });
+      await act(async () => { (await recentFileButton()).click(); await flushEffects(); });
+      await act(async () => { readingModeButton('source').click(); await vi.advanceTimersByTimeAsync(50); });
+      const cards = Array.from(host.querySelectorAll<HTMLElement>('.comment-card'));
+      for (const [content, target] of [
+        ['Heading review', { from: parsed.body.indexOf('# Fidelity'), to: parsed.body.indexOf('# Fidelity') }],
+        ['Range review', { from: parsed.body.indexOf(excerpt), to: parsed.body.indexOf(excerpt) + excerpt.length }],
+      ] as const) {
+        const card = cards.find((item) => item.textContent?.includes(content));
+        const locate = Array.from(card?.querySelectorAll<HTMLButtonElement>('button') ?? [])
+          .find((button) => button.textContent === '定位原文');
+        expect(locate).toBeDefined();
+        await act(async () => { locate?.click(); });
+        expect(harness.searchHandle.setMarkdownSelection).toHaveBeenLastCalledWith(target);
+      }
+      expect(harness.sourceProps?.value).toBe(edited);
+      expect(host.querySelector('.dirty-dot')).toBeNull();
+    } finally {
+      confirm.mockRestore();
+    }
+  });
+
   it.each([false, true])('locates and updates source comments while preserving their history (PDF export=%s)', async (exported) => {
     const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
     const body = 'Read [the paper][p] then target.\n\n[p]: https://example.com/paper\n';

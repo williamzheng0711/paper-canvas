@@ -329,14 +329,13 @@ export function relocateMarkdownComments(
   targetMarkdown: string,
 ): MarkdownComment[] {
   const bodyFingerprint = markdownFingerprint(targetMarkdown);
-  if (sourceMarkdown === targetMarkdown) {
-    return comments.map((comment) => ({
-      ...comment,
-      bodyFingerprint,
-    }));
-  }
-
   return comments.map((comment) => {
+    // A source edit can leave an older footer attached to the current body.
+    // Equal parsed/canonical text proves the target is current only when the
+    // saved comment fingerprint also matches that text.
+    if (sourceMarkdown === targetMarkdown && comment.bodyFingerprint === bodyFingerprint) {
+      return { ...comment, bodyFingerprint };
+    }
     const oldBounds = targetBounds(comment.target, sourceMarkdown.length);
     const exact = uniqueOccurrence(targetMarkdown, comment.anchorText);
     if (exact !== undefined) {

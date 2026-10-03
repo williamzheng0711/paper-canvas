@@ -218,6 +218,46 @@ describe('PaperCanvas Markdown comments metadata', () => {
     expect(relocated.bodyFingerprint).toBe(markdownFingerprint(target));
   });
 
+  it('relocates stale saved anchors even when the parsed and canonical bodies are identical', () => {
+    const body = '# Fidelity\n\nEdit this ordinary paragraph. 中文 🧪 metadata retained.\n';
+    const excerpt = '文 🧪 ';
+    const from = body.indexOf(excerpt);
+    const comments = [
+      createMarkdownComment(body, { kind: 'position', offset: 0 }, 'Heading review', '', 'heading'),
+      createMarkdownComment(body, { kind: 'range', from, to: from + excerpt.length }, 'Range review', excerpt, 'range'),
+    ];
+    const source = 'Introductory line.\n\n' + serializeMarkdownWithComments(body, comments);
+    const parsed = parseMarkdownComments(source);
+    const [heading, range] = relocateMarkdownComments(parsed.comments, parsed.body, parsed.body);
+    const relocatedFrom = parsed.body.indexOf(excerpt);
+
+    expect(parsed.status).toBe('valid');
+    expect(heading.target).toEqual({ kind: 'position', offset: parsed.body.indexOf('# Fidelity') });
+    expect(range.target).toEqual({ kind: 'range', from: relocatedFrom, to: relocatedFrom + excerpt.length });
+    expect(range.bodyFingerprint).toBe(markdownFingerprint(parsed.body));
+    expect(range.status).toBe('active');
+  });
+
+  it('keeps current repeated anchors in place when the source body is unchanged', () => {
+    const body = 'target '.repeat(40);
+    const from = 140;
+    const comment = createMarkdownComment(body, { kind: 'range', from, to: from + 6 }, 'Review', 'target', 'range');
+
+    expect(relocateMarkdownComments([comment], body, body)).toEqual([comment]);
+  });
+
+  it('marks an ambiguous stale anchor for review even when parsed and canonical bodies match', () => {
+    const oldBody = 'Before target after.\n';
+    const from = oldBody.indexOf('target');
+    const comment = createMarkdownComment(oldBody, { kind: 'range', from, to: from + 6 }, 'Review', 'target', 'range');
+    const body = 'target and target require review.\n';
+
+    const [relocated] = relocateMarkdownComments([comment], body, body);
+
+    expect(relocated.status).toBe('needs-review');
+    expect(relocated.bodyFingerprint).toBe(markdownFingerprint(body));
+  });
+
   it('marks an ambiguous external change for review instead of guessing', () => {
     const source = '這裡有 target。\n';
     const comment = createMarkdownComment(
