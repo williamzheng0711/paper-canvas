@@ -3,6 +3,7 @@ import StarterKit from "@tiptap/starter-kit";
 import { afterEach, expect, it } from "vitest";
 import { BlockFormula, InlineFormula } from "./Formula";
 import { insertPastedFormula, insertPastedMarkdown } from "./paste";
+import { PaperCode } from "./PaperLink";
 
 const editors: Editor[] = [];
 afterEach(() => editors.splice(0).forEach((editor) => editor.destroy()));
@@ -29,6 +30,57 @@ it("keeps existing inline atoms when filling a display delimiter pair by paste",
   expect(editor.state.doc.textContent).toBe("$x$$$");
   editor.commands.undo();
   expect(editor.getJSON()).toEqual(before);
+});
+
+it.each(["$y$", "$y$\n\nsecond", "ordinary text"])("keeps the code mark when native paste of %j replaces a code span inside ordinary prose", (pasted) => {
+  const editor = new Editor({
+    extensions: [StarterKit.configure({ code: false, trailingNode: false }), PaperCode, InlineFormula, BlockFormula],
+    content: "<p>Inline <code>before after</code> code.</p>",
+    editorProps: {
+      handlePaste: (view, event) => {
+        const text = event.clipboardData?.getData("text/plain") ?? "";
+        return insertPastedFormula(view, text) || insertPastedMarkdown(view, text);
+      },
+    },
+  });
+  editors.push(editor);
+  editor.commands.setTextSelection({ from: 8, to: 20 });
+  const before = editor.getJSON();
+  const event = new Event("paste", { bubbles: true, cancelable: true }) as ClipboardEvent;
+  Object.defineProperty(event, "clipboardData", {
+    value: { getData: (type: string) => type === "text/plain" ? pasted : "" },
+  });
+  editor.view.dom.dispatchEvent(event);
+  expect(event.defaultPrevented).toBe(true);
+  const blocks = pasted.split(/\n+/);
+  expect(editor.getJSON().content).toEqual(blocks.map((text, index) => ({
+    type: "paragraph",
+    content: [
+      ...(index === 0 ? [{ type: "text", text: "Inline " }] : []),
+      { type: "text", text, marks: [{ type: "code" }] },
+      ...(index === blocks.length - 1 ? [{ type: "text", text: " code." }] : []),
+    ],
+  })));
+  const after = editor.getJSON();
+  expect(editor.commands.undo()).toBe(true);
+  expect(editor.getJSON()).toEqual(before);
+  expect(editor.commands.redo()).toBe(true);
+  expect(editor.getJSON()).toEqual(after);
+});
+
+it("keeps native plain formatting when replacing a selection that only partly contains code", () => {
+  const editor = new Editor({
+    extensions: [StarterKit.configure({ code: false, trailingNode: false }), PaperCode],
+    content: "<p>Inline <code>before after</code> code.</p>",
+  });
+  editors.push(editor);
+  editor.commands.setTextSelection({ from: 1, to: 20 });
+  const event = new Event("paste", { bubbles: true, cancelable: true }) as ClipboardEvent;
+  Object.defineProperty(event, "clipboardData", { value: { getData: (type: string) => type === "text/plain" ? "replacement" : "" } });
+  editor.view.dom.dispatchEvent(event);
+  expect(editor.getJSON().content?.[0].content).toEqual([
+    { type: "text", text: "replacement code." },
+  ]);
 });
 
 it.each([

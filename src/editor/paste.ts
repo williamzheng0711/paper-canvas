@@ -1,5 +1,5 @@
 import DOMPurify from "dompurify";
-import type { JSONContent } from "@tiptap/core";
+import { isMarkActive, type JSONContent } from "@tiptap/core";
 import { Slice } from "@tiptap/pm/model";
 import { AllSelection } from "@tiptap/pm/state";
 import type { EditorView } from "@tiptap/pm/view";
@@ -19,14 +19,11 @@ function containsFormula(node: JSONContent): boolean {
 }
 
 function pastingIntoCode(view: EditorView): boolean {
-  const { selection, schema, storedMarks } = view.state;
-  const { $from, $to, from, to } = selection;
+  const { selection, schema } = view.state;
+  const { $from } = selection;
   if ($from.parent.type.spec.code) return true;
   const code = schema.marks.code;
-  return Boolean(code && $from.parent.isTextblock && (
-    code.isInSet(storedMarks ?? $from.marks()) ||
-    ($from.sameParent($to) && view.state.doc.rangeHasMark(from, to, code))
-  ));
+  return Boolean(code && $from.parent.isTextblock && isMarkActive(view.state, code));
 }
 
 /** Parse mixed plain-text Markdown only when it contains explicit math. */
