@@ -3,6 +3,7 @@ import type { Node as ModelNode, Schema } from '@tiptap/pm/model';
 import { Plugin } from '@tiptap/pm/state';
 import { TableMap } from '@tiptap/pm/tables';
 import { canvasNodesAndMarks } from './canvasSchema';
+import { formulaPreview, maximumFormulaPreviewMarkup } from './formulaRendering';
 
 // Very large editable DOM trees stall native accessibility queries. Source
 // mode keeps the complete document editable without building that DOM tree.
@@ -73,6 +74,7 @@ export function canvasDocumentSupported(document: TreeNode): boolean {
   const frames = [{ node: document, index: -1 }];
   let nodes = 0;
   let characters = 0;
+  let formulaMarkup = 0;
   while (frames.length) {
     const frame = frames[frames.length - 1];
     if (frame.index === -1) {
@@ -84,6 +86,12 @@ export function canvasDocumentSupported(document: TreeNode): boolean {
       }
       if (nodes > maximumCanvasNodes || characters > maximumCanvasCharacters) return false;
       const type = isModelNode(frame.node) ? frame.node.type.name : frame.node.type;
+      if (type === 'inlineFormula' || type === 'blockFormula') {
+        const preview = formulaPreview(String(frame.node.attrs?.latex ?? ''), type === 'blockFormula');
+        nodes += preview.nodes + 3;
+        formulaMarkup += preview.html?.length ?? 0;
+        if (nodes > maximumCanvasNodes || formulaMarkup > maximumFormulaPreviewMarkup) return false;
+      }
       if (type === 'table') {
         const cost = tableCanvasCost(frame.node);
         if (cost === undefined) return false;

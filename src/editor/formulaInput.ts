@@ -1,5 +1,5 @@
 import type { FormulaKind } from "./Formula";
-import katex from "katex";
+import { formulaPreview } from "./formulaRendering";
 
 const displayLatexEnvironments = new Set([
   "equation",
@@ -270,15 +270,6 @@ export function formulaFromClipboard(
 }
 
 function isRenderableLatex(latex: string): boolean {
-  try {
-    katex.renderToString(latex, {
-      displayMode: false,
-      strict: "ignore",
-      throwOnError: true,
-      trust: false,
-    });
-    return true;
-  } catch {
-    return false;
-  }
+  const preview = formulaPreview(latex);
+  return preview.error === null && !preview.limited;
 }

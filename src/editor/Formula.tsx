@@ -8,7 +8,7 @@ import {
 import { NodeSelection, Selection, TextSelection } from "@tiptap/pm/state";
 import { Plugin } from "@tiptap/pm/state";
 import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
-import katex from "katex";
+import { formulaPreview } from "./formulaRendering";
 import {
   displayFormulaFromBracketedLine,
   displayFormulaFromDelimitedLine,
@@ -68,19 +68,8 @@ export function validateLatex(
   latex: string,
   displayMode = false,
 ): string | null {
-  try {
-    katex.renderToString(latex, {
-      displayMode,
-      strict: "warn",
-      throwOnError: true,
-      trust: false,
-    });
-    return null;
-  } catch (error) {
-    return error instanceof Error
-      ? error.message
-      : getMessages().formulaParseFailed;
-  }
+  const preview = formulaPreview(latex, displayMode);
+  return preview.limited ? getMessages().formulaPreviewLimited : preview.error;
 }
 
 export function completeFormulaSourceInput(
@@ -326,7 +315,7 @@ class FormulaNodeView {
 
   flushSource(): void {
     if (!this.source || this.source.value === textareaValue(this.latex)) return;
-    this.updateLatex(this.source.value);
+    if (!this.updateLatex(this.source.value)) this.restoreSource(this.source);
     const preview = this.dom.querySelector<HTMLElement>(
       ".formula-live-preview",
     );
@@ -503,16 +492,25 @@ class FormulaNodeView {
     this.sourceIsComposing = false;
   }
 
-  private updateLatex(latex: string): void {
-    if (latex === this.latex) return;
+  private restoreSource(source: HTMLTextAreaElement): void {
+    const start = source.selectionStart;
+    const end = source.selectionEnd;
+    source.value = this.latex;
+    source.setSelectionRange(Math.min(start, source.value.length), Math.min(end, source.value.length));
+    this.resizeSource(source);
+  }
+
+  private updateLatex(latex: string): boolean {
+    if (latex === this.latex) return true;
     const position = this.position();
-    if (position === null) return;
+    if (position === null) return false;
     this.view.dispatch(
       this.view.state.tr.setNodeMarkup(position, undefined, {
         ...this.node.attrs,
         latex,
       }),
     );
+    return this.view.state.doc.nodeAt(position)?.attrs.latex === latex;
   }
 
   private renderPreview(
@@ -520,7 +518,8 @@ class FormulaNodeView {
     latex: string,
     text = getMessages(),
   ): void {
-    const error = validateLatex(latex, this.kind === "block");
+    const renderedFormula = formulaPreview(latex, this.kind === "block");
+    const error = renderedFormula.limited ? text.formulaPreviewLimited : renderedFormula.error;
     container.textContent = "";
     container.classList.toggle("formula-render--error", Boolean(error));
     if (error) {
@@ -533,11 +532,7 @@ class FormulaNodeView {
     }
 
     const rendered = document.createElement("span");
-    rendered.innerHTML = katex.renderToString(latex || "\\;", {
-      displayMode: this.kind === "block",
-      throwOnError: false,
-      trust: false,
-    });
+    rendered.innerHTML = renderedFormula.html ?? "";
     container.appendChild(rendered);
   }
 
@@ -562,8 +557,12 @@ class FormulaNodeView {
       source.selectionStart === source.value.length &&
       /\n\$\$$/.test(source.value)
     ) {
-      this.updateLatex(source.value.slice(0, -3).trim());
-      this.moveToText("after");
+      if (this.updateLatex(source.value.slice(0, -3).trim())) {
+        this.moveToText("after");
+        return;
+      }
+      this.restoreSource(source);
+      this.renderPreview(preview, this.latex);
       return;
     }
     const completed = completeFormulaSourceInput(
@@ -574,9 +573,9 @@ class FormulaNodeView {
       source.value = completed.value;
       source.setSelectionRange(completed.caret, completed.caret);
     }
+    if (!this.updateLatex(source.value)) this.restoreSource(source);
     this.resizeSource(source);
     this.renderPreview(preview, source.value);
-    this.updateLatex(source.value);
   }
 
   private handleSourceKeyDown(
