@@ -608,6 +608,76 @@ describe('App autosave cursor stability', () => {
     expect(native.destroy).toHaveBeenCalledOnce();
   });
 
+  it.each(['saved', 'cancelled', 'failed'] as const)('waits for an unnamed first Save before native close (%s)', async (outcome) => {
+    const close = await startNative({ name: 'First.md', document: markdownToDocument('First writing.\n'), sourceMarkdown: 'First writing.\n' });
+    let finishSave!: () => void;
+    files.saveEditorFile.mockImplementationOnce((candidate: EditorFile) => new Promise<EditorFile>((resolve, reject) => {
+      finishSave = () => outcome === 'cancelled'
+        ? reject(new DOMException('Cancelled', 'AbortError'))
+        : outcome === 'failed' ? reject(new Error('First write failed'))
+        : resolve({ ...candidate, path: '/notes/first.md', name: 'first.md', sourceMarkdown: 'First writing.\n', diskSourceMarkdown: 'First writing.\n' });
+    }));
+    let closing: Promise<void> | undefined;
+    try {
+      await act(async () => { documentAction(getMessages().save).click(); await flushEffects(); });
+      await act(async () => { closing = close({ preventDefault: vi.fn() }); await flushEffects(); });
+      expect(native.destroy).not.toHaveBeenCalled();
+      expect(files.saveDraft).not.toHaveBeenCalled();
+      await act(async () => { finishSave(); await closing; await flushEffects(); });
+      expect(native.destroy).toHaveBeenCalledTimes(outcome === 'saved' ? 1 : 0);
+      if (outcome === 'cancelled') expect(host.querySelector('.save-status')?.textContent).toBe(getMessages().saveStatus.unsaved);
+      if (outcome === 'failed') {
+        expect(host.querySelector('.save-status')?.textContent).toBe(getMessages().saveStatus.error);
+        expect(files.saveDraft).toHaveBeenCalledOnce();
+      }
+    } finally {
+      await act(async () => { finishSave?.(); await closing; await flushEffects(); });
+    }
+  });
+
+  it('includes later source typing when native close waits for an unnamed first Save', async () => {
+    const first = 'First writing.\r\n';
+    const latest = 'Latest 中文 🧪 writing.\r\n\r\nExact  spaces.\r\n';
+    const close = await startNative({ name: 'First.md', document: markdownToDocument(first), sourceMarkdown: first });
+    await act(async () => { readingModeButton('source').click(); await flushEffects(); });
+    let finishSave!: () => void;
+    files.saveEditorFile.mockImplementationOnce((candidate: EditorFile) => new Promise<EditorFile>((resolve) => {
+      finishSave = () => resolve({ ...candidate, path: '/notes/first.md', name: 'first.md', sourceMarkdown: first, diskSourceMarkdown: first });
+    }));
+    let closing: Promise<void> | undefined;
+    try {
+      await act(async () => { documentAction(getMessages().save).click(); await flushEffects(); });
+      await act(async () => { closing = close({ preventDefault: vi.fn() }); await flushEffects(); });
+      expect(native.destroy).not.toHaveBeenCalled();
+      await act(async () => { harness.sourceProps?.onChange(latest); finishSave(); await closing; await flushEffects(); });
+      expect(files.saveEditorFile).toHaveBeenCalledTimes(2);
+      expect(files.saveEditorFile.mock.calls[1]).toEqual([
+        expect.objectContaining({ path: '/notes/first.md', diskSourceMarkdown: first, sourceMarkdown: latest }), false, latest,
+      ]);
+      expect(native.destroy).toHaveBeenCalledOnce();
+    } finally { await act(async () => { finishSave?.(); await closing; await flushEffects(); }); }
+  });
+
+  it('closes an unnamed replacement without starting another Save for a previous document', async () => {
+    const close = await startNative();
+    let finishSave!: () => void;
+    files.saveEditorFile.mockImplementationOnce((candidate: EditorFile) => new Promise<EditorFile>((resolve) => { finishSave = () => resolve(candidate); }));
+    await act(async () => { documentAction(getMessages().save).click(); await flushEffects(); });
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    try {
+      native.enabled = false;
+      await act(async () => { documentAction(getMessages().new).click(); await flushEffects(); });
+      native.enabled = true;
+      await act(async () => { await close({ preventDefault: vi.fn() }); await flushEffects(); });
+      expect(files.saveEditorFile).toHaveBeenCalledOnce();
+      expect(native.destroy).toHaveBeenCalledOnce();
+    } finally {
+      native.enabled = true;
+      confirm.mockRestore();
+      await act(async () => { finishSave(); await flushEffects(); });
+    }
+  });
+
   it('coalesces repeated native close requests while a save is pending', async () => {
     const close = await startNative();
     let finishSave!: (file: EditorFile) => void;

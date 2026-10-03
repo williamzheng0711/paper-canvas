@@ -902,7 +902,7 @@ export default function App() {
             if (!active || documentSessionRef.current !== session) return;
             if (!sourceModeRef.current) flushCanvasChanges();
             const revision = editRevisionRef.current;
-            if (fileRef.current.path) {
+            if (fileRef.current.path || (pendingSave.current && pendingSaveSession.current === session)) {
               if ((dirtyRef.current || pendingSave.current) && !(await saveCurrent())) return;
             } else if (dirtyRef.current && (persistedDraft.current?.session !== session || persistedDraft.current.revision !== revision)) {
               clearSourceCommentSync();
