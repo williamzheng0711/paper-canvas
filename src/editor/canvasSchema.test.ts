@@ -69,6 +69,31 @@ describe("shared canvas attribute validation", () => {
     }
   });
 
+  it("keeps code-fence metadata through ordinary typing, recovery and internal rich paste", async () => {
+    const meta = 'javascript:literal title="中文 🧪 & <example>" {1,3-5}';
+    const source = `\`\`\`javascript ${meta}\nconsole.log("hello");\n\`\`\`\n\nAfter.\n`;
+    const editor = new Editor({ element: document.createElement("div"), extensions: canvasNodesAndMarks(), content: markdownToDocument(source) });
+    const destination = new Editor({ element: document.createElement("div"), extensions: canvasNodesAndMarks(), editorProps: { transformPastedHTML: sanitizePastedHtml }, content: markdownToDocument("replace me") });
+    localStorage.clear();
+    try {
+      editor.commands.setTextSelection(editor.state.doc.content.size - 1);
+      editor.commands.insertContent(" Edited.");
+      expect(editor.state.doc.textContent).toContain("After. Edited.");
+      expect(documentToMarkdown(editor.getJSON())).toContain(`\`\`\`javascript ${meta}\n`);
+      await saveDraft({ name: "Code.md", document: editor.getJSON() });
+      expect((await loadDraft())?.document?.content?.[0].attrs?.meta).toBe(meta);
+      destination.commands.selectAll();
+      expect(destination.view.pasteHTML(editor.getHTML(), new Event("paste") as ClipboardEvent)).toBe(true);
+      expect(destination.getJSON().content?.[0].attrs?.meta).toBe(meta);
+      expect(documentToMarkdown(destination.getJSON())).toBe(documentToMarkdown(editor.getJSON()));
+      expect(() => destination.state.doc.check()).not.toThrow();
+    } finally {
+      editor.destroy();
+      destination.destroy();
+      localStorage.clear();
+    }
+  });
+
   it("mounts merged, resized table cells and retains their ordinary geometry", () => {
     const paragraph = { type: "paragraph" };
     const editor = new Editor({

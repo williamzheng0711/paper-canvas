@@ -167,6 +167,7 @@ export function sanitizePastedHtml(html: string): string {
       "data-footnote-definition",
       "data-footnote-identifier",
       "data-footnote-label",
+      "data-markdown-meta",
       "class",
       "colspan",
       "colwidth",
@@ -183,7 +184,7 @@ export function sanitizePastedHtml(html: string): string {
       "data-latex-json",
     ],
     ALLOW_DATA_ATTR: false,
-    ADD_URI_SAFE_ATTR: ["data-image-original-src"],
+    ADD_URI_SAFE_ATTR: ["data-image-original-src", "data-markdown-meta"],
     RETURN_DOM_FRAGMENT: true,
   });
   const template = document.createElement("template");

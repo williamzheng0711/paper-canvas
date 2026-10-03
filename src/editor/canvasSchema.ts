@@ -50,7 +50,20 @@ const PaperHeading = Heading.extend({
 const PaperCodeBlock = CodeBlockLowlight.extend({
   addAttributes() {
     const inherited = this.parent?.() as Record<string, Attribute> | undefined;
-    return { ...inherited, language: { ...inherited?.language, validate: 'string|null' } };
+    return {
+      ...inherited,
+      language: { ...inherited?.language, validate: 'string|null' },
+      meta: {
+        default: null,
+        validate: 'string|null',
+        parseHTML: (element: HTMLElement) => element.getAttribute('data-markdown-meta')
+          ?? element.querySelector('code')?.getAttribute('data-markdown-meta')
+          ?? null,
+        renderHTML: (attributes: Record<string, unknown>) => attributes.meta
+          ? { 'data-markdown-meta': attributes.meta }
+          : {},
+      },
+    };
   },
 });
 

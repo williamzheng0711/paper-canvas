@@ -20,6 +20,7 @@ import { PaperTableCell, PaperTableHeader } from "./PaperTable";
 import { documentToMarkdown, markdownToDocument } from "./markdown";
 import { requiresHtmlTable, tableToHtml } from "./markdownTableHtml";
 import { sanitizePastedHtml } from "./paste";
+import { canvasNodesAndMarks } from "./canvasSchema";
 
 const extensions = [
   StarterKit.configure({ orderedList: false }),
@@ -360,6 +361,25 @@ describe("rich table HTML source preservation", () => {
     const reopened = markdownToDocument(markdown);
     expect(reopened.content?.map((node) => node.type)).toEqual(["htmlPreview"]);
     expect(documentToMarkdown(reopened)).toBe(markdown);
+  });
+
+  it("retains code-fence metadata through rich-table save, reopen and native copy", () => {
+    const meta = 'title="table example.js" {1,3-5} 中文 🧪';
+    const table = richTable([{ type: "codeBlock", attrs: { language: "javascript", meta }, content: [{ type: "text", text: "const answer = 42;" }] }]);
+    const source = documentToMarkdown({ type: "doc", content: [table] });
+    const reopened = markdownToDocument(source);
+    expect(documentToMarkdown(reopened)).toBe(source);
+    const editor = new Editor({ element: document.createElement("div"), extensions: canvasNodesAndMarks(), content: reopened });
+    const destination = new Editor({ element: document.createElement("div"), extensions: canvasNodesAndMarks(), editorProps: { transformPastedHTML: sanitizePastedHtml }, content: markdownToDocument("replace me") });
+    try {
+      destination.commands.selectAll();
+      expect(destination.view.pasteHTML(editor.getHTML(), new Event("paste") as ClipboardEvent)).toBe(true);
+      expect(nodesOfType(destination.getJSON(), "codeBlock")[0]).toMatchObject({ attrs: { language: "javascript", meta }, content: [{ type: "text", text: "const answer = 42;" }] });
+      expect(() => destination.state.doc.check()).not.toThrow();
+    } finally {
+      editor.destroy();
+      destination.destroy();
+    }
   });
 
   it("does not let blank lines or CRLF in formula sources split an HTML table on reopen", () => {

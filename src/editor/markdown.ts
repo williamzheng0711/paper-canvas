@@ -34,6 +34,7 @@ type MdNode = {
   alt?: string | null;
   title?: string | null;
   lang?: string | null;
+  meta?: string | null;
   identifier?: string;
   label?: string;
   originalSource?: string;
@@ -533,7 +534,8 @@ function resolveReferences(root: MdRoot, source: string): void {
       (child) =>
         child.type !== "definition" ||
         !used.has(definitionKey(child.identifier ?? "")) ||
-        retained.has(definitionKey(child.identifier ?? "")),
+        retained.has(definitionKey(child.identifier ?? "")) ||
+        definitions.get(definitionKey(child.identifier ?? "")) !== child,
     );
     node.children.forEach(removeConsumedDefinitions);
   };
@@ -1067,7 +1069,10 @@ function fromMdast(
       return [
         {
           type: "codeBlock",
-          attrs: { language: node.lang ?? null },
+          attrs: {
+            language: node.lang ?? null,
+            ...(node.meta ? { meta: node.meta } : {}),
+          },
           content: node.value ? [textNode(node.value)] : [],
         },
       ];
@@ -1404,6 +1409,7 @@ function toMdast(node: JSONContent): MdNode | null {
       return {
         type: "code",
         lang: String(node.attrs?.language ?? "") || null,
+        meta: String(node.attrs?.meta ?? "") || null,
         value: flattenText(node),
       };
     case "horizontalRule":

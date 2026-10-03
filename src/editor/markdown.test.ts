@@ -352,6 +352,22 @@ describe("PaperCanvas Markdown subset", () => {
     expect(markdownToDocument(saved)).toEqual(document);
   });
 
+  it.each(["[Reference][ref]", "![Diagram][ref]", "Empty [][ref] and [Reference][ref]"])(
+    "keeps inactive duplicate definitions when resolving %s",
+    (reference) => {
+      const first = '[ref]: <https://first.example/diagram.png> "First"';
+      const second = '[REF]: <https://second.example/diagram.png> "Second 中文 🧪"';
+      const source = `${reference}\n\n${first}\n\n${second}\n\nAfter.\n`;
+      const document = markdownToDocument(source);
+      expect(nodesOfType(document, "unsupportedMarkdown").map((node) => node.attrs?.source)).toContain(second);
+      document.content!.at(-1)!.content![0].text = "After edited.";
+      const saved = documentToMarkdown(document);
+      expect(saved).toContain(second);
+      expect(saved).toContain("https://first.example/diagram.png");
+      expect(markdownToDocument(saved)).toEqual(document);
+    },
+  );
+
   it("imports semantic underline as editable marks around formatted text and inline formulas", () => {
     const source =
       "Before <u>**bold** and $x$ and [a link](https://example.com)</u> after.";
@@ -772,6 +788,19 @@ unclosed`;
     );
     expect(markdownToDocument(documentToMarkdown(document))).toEqual(document);
   });
+
+  it.each(['title="example.js" {1,3-5}', 'caption="中文 🧪 & <example>"', 'javascript:literal metadata']) (
+    "retains fenced-code metadata when surrounding writing is edited: %s",
+    (meta) => {
+      const source = `Before.\n\n\`\`\`javascript ${meta}\nconsole.log("hello");\n\`\`\`\n\nAfter.\n`;
+      const document = markdownToDocument(source);
+      expect(nodesOfType(document, "codeBlock")[0].attrs).toEqual({ language: "javascript", meta });
+      document.content!.at(-1)!.content![0].text = "After edited.";
+      const saved = documentToMarkdown(document);
+      expect(saved).toContain(`\`\`\`javascript ${meta}\n`);
+      expect(markdownToDocument(saved)).toEqual(document);
+    },
+  );
 
   it.each([
     "> ```tex\n> \\(literal\\)\n> \\[also literal\\]\n> ```",

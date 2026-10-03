@@ -172,7 +172,7 @@ export function tableToHtml(node: JSONContent): string {
     case "taskItem":
       return `<li data-type="taskItem" data-checked="${Boolean(node.attrs?.checked)}"><span data-papercanvas-task-marker="">${node.attrs?.checked ? "[x]" : "[ ]"} </span><div>${children()}</div></li>`;
     case "codeBlock":
-      return `<pre><code${attribute("lang", node.attrs?.language)}${node.attrs?.language ? attribute("class", `language-${node.attrs.language}`) : ""}>${escapeHtml((node.content ?? []).map((child) => child.text ?? "").join(""))}</code></pre>`;
+      return `<pre${attribute("data-markdown-meta", node.attrs?.meta)}><code${attribute("lang", node.attrs?.language)}${node.attrs?.language ? attribute("class", `language-${node.attrs.language}`) : ""}>${escapeHtml((node.content ?? []).map((child) => child.text ?? "").join(""))}</code></pre>`;
     case "horizontalRule":
       return "<hr>";
     case "hardBreak":
