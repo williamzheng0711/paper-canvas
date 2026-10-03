@@ -74,7 +74,7 @@ const htmlTag =
   /<!--|<\s*\/?\s*([A-Za-z][A-Za-z0-9-]*)\b(?:[^"'<>]|"[^"]*"|'[^']*')*>/g;
 const commentEnd = /--!?>/g;
 
-function commentEndOffset(source: string, opening: number): number {
+export function htmlCommentEndOffset(source: string, opening: number): number {
   const body = opening + 4;
   // HTML also recognizes these abrupt empty-comment endings.
   if (source[body] === ">") return body + 1;
@@ -91,7 +91,7 @@ export function isHtmlCommentOnly(source: string): boolean {
     const opening = source.indexOf("<!--", cursor);
     if (opening < 0) return found && source.slice(cursor).trim() === "";
     if (source.slice(cursor, opening).trim()) return false;
-    const closing = commentEndOffset(source, opening);
+    const closing = htmlCommentEndOffset(source, opening);
     if (closing < 0) return false;
     found = true;
     cursor = closing;
@@ -113,7 +113,7 @@ export function isHtmlPreviewCandidate(source: string): boolean {
     if (match[0] === "<!--") {
       // Search each comment once. A lazy regex retries every unfinished
       // opening and freezes on a small file containing many '<!--' strings.
-      const closing = commentEndOffset(source, match.index);
+      const closing = htmlCommentEndOffset(source, match.index);
       if (closing < 0) break;
       htmlTag.lastIndex = closing;
       continue;

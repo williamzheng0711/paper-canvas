@@ -106,11 +106,16 @@ function normalizeTarget(value: unknown, length: number): CommentTarget | null {
     offset?: unknown;
   };
   if (candidate.kind === 'range') {
+    if (
+      typeof candidate.from !== 'number' || !Number.isFinite(candidate.from) ||
+      typeof candidate.to !== 'number' || !Number.isFinite(candidate.to)
+    ) return null;
     const from = clampOffset(candidate.from, length);
     const to = clampOffset(candidate.to, length);
     return from <= to ? { kind: 'range', from, to } : { kind: 'range', from: to, to: from };
   }
   if (candidate.kind === 'position') {
+    if (typeof candidate.offset !== 'number' || !Number.isFinite(candidate.offset)) return null;
     return { kind: 'position', offset: clampOffset(candidate.offset, length) };
   }
   return null;

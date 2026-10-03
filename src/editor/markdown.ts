@@ -14,6 +14,13 @@ import { isHtmlPreviewCandidate } from "./htmlSafety";
 import { requiresHtmlTable, tableToHtml } from "./markdownTableHtml";
 import { selectionMarker } from "./selectionMarker";
 
+const astralCharacter = "[\\uD800-\\uDBFF][\\uDC00-\\uDFFF]";
+const astralTextEdges = new RegExp(
+  `^(?:${selectionMarker})?(${astralCharacter})|(${astralCharacter})(?:${selectionMarker})?$`,
+  "g",
+);
+const leadingTextBom = new RegExp(`^(?:${selectionMarker})?\\uFEFF`);
+
 type MdNode = {
   type: string;
   value?: string;
@@ -118,7 +125,10 @@ const processor = unified()
   .use(remarkMath)
   .use(remarkStringify, {
     emphasis: "_",
-    unsafe: [{ character: "\\", inConstruct: "phrasing" }],
+    unsafe: [
+      { character: "\\", inConstruct: "phrasing" },
+      { character: "$", inConstruct: "phrasing" },
+    ],
     handlers: {
       text(node, parent, state, info) {
         // Attention handlers may entity-encode the neighboring character.
@@ -130,7 +140,20 @@ const processor = unified()
               lineEndings,
               (character) => `&#${character.charCodeAt(0)};`,
             ).join(""),
-          );
+          )
+          // Remark's attention escaping handles one UTF-16 unit at a time.
+          // A character reference at a run edge keeps an entire astral
+          // character together when a neighboring mark needs escaping.
+          .replace(
+            astralTextEdges,
+            (edge, first: string | undefined, last: string | undefined) => {
+              const character = first ?? last!;
+              return edge.replace(character, `&#${character.codePointAt(0)};`);
+            },
+          )
+          // An editable leading zero-width no-break space is content, whereas
+          // a literal leading U+FEFF in the saved file is an encoding marker.
+          .replace(leadingTextBom, (edge) => edge.replace("\uFEFF", "&#65279;"));
         // Splitting an image out of a paragraph can leave [^note]: at the
         // start of a new block. Keep the colon as text rather than turning a
         // footnote reference into a new (possibly nested) definition.

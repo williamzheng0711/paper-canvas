@@ -12,6 +12,25 @@ import {
 } from './selectionMapping';
 
 describe('canvas and Markdown selection mapping', () => {
+  it.each(['🧪start', 'end🧪', '\uFEFFcontent'])(
+    'keeps caret mapping stable at the encoded Unicode edges of %j',
+    (text) => {
+      const document: JSONContent = {
+        type: 'doc',
+        content: [{ type: 'paragraph', content: [{ type: 'text', text }] }],
+      };
+      for (const offset of [0, text.length]) {
+        const marked = structuredClone(document);
+        marked.content![0].content![0].text = text.slice(0, offset) + selectionMarker + text.slice(offset);
+        const selection = markdownSelectionFromMarkedDocument(document, marked);
+        expect(selection).toBeDefined();
+        const mapped = markdownToDocumentWithSelection(selection!.markdown, selection!.offset);
+        expect(mapped.document).toEqual(document);
+        expect(mapped.anchor).toEqual({ kind: 'text', path: [0], offset });
+      }
+    },
+  );
+
   it("maps exact multiline formula carets through repeated inert HTML metadata", () => {
     const document = markdownToDocument("Before $\n[xy$ after.");
     const marked = structuredClone(document);

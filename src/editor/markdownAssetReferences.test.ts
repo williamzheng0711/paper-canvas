@@ -70,6 +70,56 @@ describe("POSIX filenames containing literal backslashes", () => {
 });
 
 describe("renaming local image destinations without rewriting document content", () => {
+  it("keeps dense Typora masks, image edits and comment anchors aligned with original BOM/CRLF/Unicode source", () => {
+    const row = "\\(\\text{![literal](formula.png)}\\) 中文🧪 `![code](code.png)` [link](link.png) ![actual](image.png)\r\n";
+    const source = "\uFEFF" + row.repeat(1000) + "\\[\r\n\\(\\text{![nested](nested.png)}\\)\r\n\\]\r\n";
+    const index = source.lastIndexOf("中文");
+    const before = serializeMarkdownWithComments(source, [
+      createMarkdownComment(source, { kind: "range", from: index, to: index + 2 }, "保持原文"),
+    ]);
+    const after = rebaseMarkdownImageAssets(before, oldPath, "/copies/copy.md");
+    const expected = source.replaceAll("![actual](image.png)", "![actual](../notes/image.png)");
+    const parsed = parseMarkdownComments(after);
+    expect(parsed.status).toBe("valid");
+    expect(parsed.body).toBe(expected);
+    expect(parsed.comments[0].target).toEqual({ kind: "range", from: expected.lastIndexOf("中文"), to: expected.lastIndexOf("中文") + 2 });
+    expect(parsed.comments[0].anchorText).toBe("中文");
+    const update = imagePathSourceChanges(before, after, oldPath, "/copies/copy.md")!;
+    let reconstructed = before;
+    for (const edit of [...update.changes].reverse())
+      reconstructed = reconstructed.slice(0, edit.from) + edit.value + reconstructed.slice(edit.to);
+    expect(reconstructed).toBe(after);
+  });
+
+  it("rebases an image inside deeply nested source without overflowing AST visitors", () => {
+    const source = "> ".repeat(4096) + "![Image](./research.assets/image.png)\n\n\\(literal\\)\n";
+    const expected = source.replace("./research.assets/image.png", "../notes/./research.assets/image.png");
+    expect(rebaseMarkdownImageAssets(source, oldPath, "/copies/copy.md")).toBe(expected);
+    expect(rename(source)).toBe(source.replace("./research.assets/image.png", "./renamed.assets/image.png"));
+  });
+
+  it("preserves unfinished comments without rewriting their apparent images or rescanning every opener", () => {
+    const source = "<!--".repeat(100_000) + '<img src="research.assets/hidden.png">';
+    const started = performance.now();
+    expect(renameHtmlImageAssets(source, oldPath, newPath)).toBe(source);
+    expect(rebaseHtmlImageAssets(source, oldPath, "/copies/copy.md")).toBe(source);
+    expect(performance.now() - started).toBeLessThan(1000);
+  });
+
+  it.each(["<!-->", "<!--->", "<!-- hidden <img src='research.assets/hidden.png'> --!>"])(
+    "rewrites actual HTML images after the browser's comment ending %j",
+    (comment) => {
+      const source = `${comment}<img src="research.assets/image.png">`;
+      const expected = `${comment}<img src="renamed.assets/image.png">`;
+      expect(renameHtmlImageAssets(source, oldPath, newPath)).toBe(expected);
+    },
+  );
+
+  it("does not treat a comment opening inside raw-text HTML as a document comment", () => {
+    const source = '<script><!-- <img src="research.assets/script.png"></script><img src="research.assets/image.png">';
+    expect(renameHtmlImageAssets(source, oldPath, newPath)).toBe(source.replace("research.assets/image.png", "renamed.assets/image.png"));
+  });
+
   it("preserves prose, links, code, comments, non-image HTML, and remote image URLs byte for byte", () => {
     const source = [
       "# Paths\r\n",
@@ -211,6 +261,15 @@ describe("renaming local image destinations without rewriting document content",
       ),
     ).toBe("paper.assets/diagram.png");
   });
+
+  it.each(["//server/share/Notes/research.md", "\\\\server\\share\\Notes\\research.md"])(
+    "renames a Windows network asset directory with either separator convention: %s",
+    (sourcePath) => {
+      const destinationPath = sourcePath.replace("research.md", "renamed.md");
+      for (const destination of ["RESEARCH.ASSETS/image.png", "RESEARCH.ASSETS\\image.png"])
+        expect(renameImageDestination(destination, sourcePath, destinationPath)).toBe(destination.replace("RESEARCH.ASSETS", "renamed.assets"));
+    },
+  );
 
   it("rewrites only actual HTML img src attributes, including entities and unquoted values", () => {
     const source =

@@ -4,6 +4,7 @@ import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import { isWindowsFilePath, localAssetPath } from "../lib/localAssets";
 import { normalizeLatexDelimiters } from "./markdown";
+import { htmlCommentEndOffset } from "./htmlSafety";
 import {
   commentContext,
   markdownFingerprint,
@@ -32,7 +33,7 @@ type DestinationRewrite = (raw: string, kind: DestinationKind) => string;
 const parser = unified().use(remarkParse).use(remarkGfm).use(remarkMath);
 const punctuation = /[!"#$%&'()*+,\-./:;<=>?@[\]\\^_`{|}~]/;
 const htmlTag =
-  /<!--[\s\S]*?-->|<\/?[A-Za-z][A-Za-z0-9:-]*(?:[^"'<>]|"[^"]*"|'[^']*')*>/g;
+  /<!--|<\/?[A-Za-z][A-Za-z0-9:-]*(?:[^"'<>]|"[^"]*"|'[^']*')*>/g;
 const rawTextTags = new Set([
   "script",
   "style",
@@ -44,6 +45,16 @@ const rawTextTags = new Set([
   "noframes",
   "plaintext",
 ]);
+
+function* sourceNodes(root: SourceNode): Generator<SourceNode> {
+  const pending = [root];
+  while (pending.length) {
+    const node = pending.pop()!;
+    yield node;
+    for (let index = (node.children?.length ?? 0) - 1; index >= 0; index -= 1)
+      pending.push(node.children![index]);
+  }
+}
 
 function basename(path: string): string {
   return path.split(path.startsWith("/") ? /\// : /[\\/]/).at(-1) ?? "";
@@ -151,15 +162,16 @@ export function renameImageDestination(
   )
     return raw;
   const base = directory(oldPath);
+  const windows = isWindowsFilePath(oldPath) || oldPath.startsWith("//");
+  const assetBase = windows ? base.replace(/\//g, "\\") : base;
   const oldAssets = localAssetPath(
-    base,
+    assetBase,
     encodeURIComponent(assetFolder(oldPath)),
   ).path;
   const target = localAssetPath(
-    base,
+    assetBase,
     decodedDestination(raw, kind, false).text,
   ).path;
-  const windows = isWindowsFilePath(oldAssets);
   const separator = windows ? "\\" : "/";
   const equal = (left: string, right: string) =>
     windows ? left.toLowerCase() === right.toLowerCase() : left === right;
@@ -174,7 +186,7 @@ export function renameImageDestination(
     const prefix = encodeURI(decoded.text.slice(0, end))
       .replace(/#/g, "%23")
       .replace(/\?/g, "%3F");
-    if (!equal(localAssetPath(base, prefix).path, oldAssets)) continue;
+    if (!equal(localAssetPath(assetBase, prefix).path, oldAssets)) continue;
     replacement = {
       from: decoded.ranges[match.index].from,
       to: decoded.ranges[end - 1].to,
@@ -289,11 +301,32 @@ export function rebaseImageDestination(
 }
 
 function applyEdits(source: string, edits: SourceEdit[]): string {
-  let result = source;
-  for (const edit of [...edits].sort((left, right) => right.from - left.from)) {
-    result = result.slice(0, edit.from) + edit.value + result.slice(edit.to);
+  const chunks: string[] = [];
+  let cursor = 0;
+  for (const edit of [...edits].sort((left, right) => left.from - right.from)) {
+    chunks.push(source.slice(cursor, edit.from), edit.value);
+    cursor = edit.to;
   }
-  return result;
+  chunks.push(source.slice(cursor));
+  return chunks.join("");
+}
+
+function maskSourceRanges(
+  source: string,
+  ranges: Array<{ from: number; to: number }>,
+  placeholder = false,
+): string {
+  const merged: Array<{ from: number; to: number }> = [];
+  for (const range of ranges.sort((left, right) => left.from - right.from)) {
+    const previous = merged.at(-1);
+    if (previous && range.from <= previous.to)
+      previous.to = Math.max(previous.to, range.to);
+    else merged.push({ ...range });
+  }
+  return applyEdits(source, merged.map(({ from, to }) => {
+    const blank = source.slice(from, to).replace(/[^\r\n]/g, " ");
+    return { from, to, value: placeholder ? blank.replace(/ /, "x") : blank };
+  }));
 }
 
 function htmlImageEdits(
@@ -302,8 +335,17 @@ function htmlImageEdits(
 ): SourceEdit[] {
   const edits: SourceEdit[] = [];
   let rawTextTag: string | undefined;
-  for (const match of source.matchAll(htmlTag)) {
+  htmlTag.lastIndex = 0;
+  let match: RegExpExecArray | null;
+  while ((match = htmlTag.exec(source))) {
     const tag = match[0];
+    if (tag === "<!--") {
+      if (rawTextTag) continue;
+      const closing = htmlCommentEndOffset(source, match.index);
+      if (closing < 0) break;
+      htmlTag.lastIndex = closing;
+      continue;
+    }
     const name = /^<(\/)?([A-Za-z][A-Za-z0-9:-]*)/.exec(tag);
     if (!name) continue;
     const lowerName = name[2].toLowerCase();
@@ -417,33 +459,25 @@ function destinationRange(
 function maskTyporaMath(source: string): string {
   if (!/\\(?:\(|\[|begin\{)/.test(source)) return source;
   const sourceOffset = source.startsWith('\uFEFF') ? 1 : 0;
-  let masked = source;
-  let scan = source;
+  const maskedRanges: Array<{ from: number; to: number }> = [];
+  const protectedRanges: Array<{ from: number; to: number }> = [];
   const blank = (from: number, to: number) => {
     if (from === 0) from = sourceOffset;
-    const placeholder = masked
-      .slice(from, to)
-      .replace(/[^\r\n]/g, " ")
-      .replace(/ /, "x");
-    masked = masked.slice(0, from) + placeholder + masked.slice(to);
+    maskedRanges.push({ from, to });
   };
-  const protectCodeAndMath = (node: SourceNode) => {
+  const rawRoot = parser.parse(source) as unknown as SourceNode;
+  for (const node of sourceNodes(rawRoot)) {
     if (["code", "inlineCode", "math", "inlineMath"].includes(node.type)) {
       const start = node.position?.start.offset;
       const end = node.position?.end.offset;
       if (start !== undefined && end !== undefined) {
         const from = start + sourceOffset;
         const to = end + sourceOffset;
-        scan =
-          scan.slice(0, from) +
-          scan.slice(from, to).replace(/[^\r\n]/g, " ") +
-          scan.slice(to);
+        protectedRanges.push({ from, to });
       }
-    } else node.children?.forEach(protectCodeAndMath);
-  };
-  const rawRoot = parser.parse(source) as unknown as SourceNode;
-  protectCodeAndMath(rawRoot);
-  const protectDestinations = (node: SourceNode) => {
+    }
+  }
+  for (const node of sourceNodes(rawRoot)) {
     const start = node.position?.start.offset;
     const end = node.position?.end.offset;
     if (
@@ -462,15 +496,11 @@ function maskTyporaMath(source: string): string {
         const offset = node.type === "link" ? -1 : 0;
         const start = from + range.from + offset;
         const end = from + range.to + offset;
-        scan =
-          scan.slice(0, start) +
-          scan.slice(start, end).replace(/[^\r\n]/g, " ") +
-          scan.slice(end);
+        protectedRanges.push({ from: start, to: end });
       }
     }
-    node.children?.forEach(protectDestinations);
-  };
-  protectDestinations(rawRoot);
+  }
+  const scan = maskSourceRanges(source, protectedRanges);
   const escaped = (index: number) => {
     let slashes = 0;
     while (index > 0 && scan[--index] === "\\") slashes += 1;
@@ -503,7 +533,7 @@ function maskTyporaMath(source: string): string {
     if (normalizeLatexDelimiters(formula).startsWith("$$\n"))
       blank(match.index, match.index + match[0].length);
   }
-  return masked;
+  return maskSourceRanges(source, maskedRanges, true);
 }
 
 /** Keep body bytes apart from image paths and refresh valid comment metadata. */
@@ -588,14 +618,12 @@ function markdownImageEdits(
   const definitions = new Map<string, SourceNode>();
   const identifier = (node: SourceNode) =>
     (node.identifier ?? "").trim().replace(/\s+/g, " ").toLowerCase();
-  const collect = (node: SourceNode) => {
+  for (const node of sourceNodes(root)) {
     nodes.push(node);
     if (node.type === "imageReference") imageReferences.add(identifier(node));
     if (node.type === "definition" && !definitions.has(identifier(node)))
       definitions.set(identifier(node), node);
-    node.children?.forEach(collect);
-  };
-  collect(root);
+  }
   const edits: SourceEdit[] = [];
   for (const node of nodes) {
     const start = node.position?.start.offset;

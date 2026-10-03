@@ -85,6 +85,29 @@ describe('PaperCanvas Markdown comments metadata', () => {
     });
   });
 
+  it.each([
+    { kind: 'position' },
+    { kind: 'position', offset: 'garbage' },
+    { kind: 'position', offset: null },
+    { kind: 'range', from: {}, to: 13 },
+    { kind: 'range', from: 7, to: null },
+  ])('preserves damaged numeric comment targets instead of silently relocating them: %j', (target) => {
+    const body = 'Before target after\n';
+    const comment = createMarkdownComment(body, { kind: 'range', from: 7, to: 13 }, 'Review', 'target', 'id');
+    const damaged = serializeMarkdownWithComments(body, [{ ...comment, target: target as typeof comment.target }]);
+    expect(parseMarkdownComments(damaged)).toEqual({ body: damaged, comments: [], status: 'invalid' });
+    expect(serializeMarkdownWithComments(damaged, [])).toBe(damaged);
+  });
+
+  it('continues clamping real numeric comment offsets after external body changes', () => {
+    const body = 'Before target after\n';
+    const comment = createMarkdownComment(body, { kind: 'position', offset: body.length }, 'Review', '', 'id');
+    const source = serializeMarkdownWithComments(body, [comment]).replace(body, 'short\n');
+    const parsed = parseMarkdownComments(source);
+    expect(parsed.status).toBe('valid');
+    expect(parsed.comments[0].target).toEqual({ kind: 'position', offset: 'short\n'.length });
+  });
+
   it.each(['```markdown\n', '<pre>\n', '<div>\n', '> ', '    '])(
     'preserves literal metadata inside %j',
     (prefix) => {

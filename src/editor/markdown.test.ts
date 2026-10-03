@@ -19,6 +19,79 @@ function nodesOfType(document: JSONContent, type: string): JSONContent[] {
 }
 
 describe("PaperCanvas Markdown subset", () => {
+  it.each(["\uFEFF", "\uFEFF\uFEFFhello", "\uFEFF  > literal", "\uFEFF🧪"])(
+    "preserves an editable leading zero-width no-break space: %j",
+    (text) => {
+      const document: JSONContent = {
+        type: "doc",
+        content: [{ type: "paragraph", content: [{ type: "text", text }] }],
+      };
+      expect(markdownToDocument(documentToMarkdown(document))).toEqual(document);
+    },
+  );
+
+  it.each(["bold", "italic", "strike"])(
+    "keeps complete astral characters at %s mark boundaries",
+    (type) => {
+      for (const character of ["🧪", "𐐀", "𝄞", "👨‍👩‍👧‍👦"]) {
+        for (const content of [
+          [
+            { type: "text", text: character },
+            { type: "text", text: "(", marks: [{ type }] },
+          ],
+          [
+            { type: "text", text: "(", marks: [{ type }] },
+            { type: "text", text: character },
+          ],
+          [
+            { type: "text", text: "before" },
+            { type: "text", text: character, marks: [{ type }] },
+            { type: "text", text: "after" },
+          ],
+        ]) {
+          const document: JSONContent = {
+            type: "doc",
+            content: [{ type: "paragraph", content }],
+          };
+          const saved = documentToMarkdown(document);
+          expect(markdownToDocument(saved)).toEqual(document);
+          expect(markdownToDocument(documentToMarkdown(markdownToDocument(saved)))).toEqual(document);
+        }
+      }
+    },
+  );
+
+  it("keeps nested marks around emoji without emitting lone-surrogate references", () => {
+    const document: JSONContent = {
+      type: "doc",
+      content: [{
+        type: "paragraph",
+        content: [
+          { type: "text", text: "🧪", marks: [{ type: "bold" }, { type: "underline" }] },
+          { type: "text", text: "( 🧪", marks: [{ type: "bold" }, { type: "italic" }, { type: "strike" }, { type: "underline" }] },
+        ],
+      }],
+    };
+    expect(markdownToDocument(documentToMarkdown(document))).toEqual(document);
+  });
+
+  it.each(["$`b", "$`&中文", "*$`", "\\$`b"])(
+    "retains literal dollar and backtick text across marked runs: %s",
+    (text) => {
+      const document: JSONContent = {
+        type: "doc",
+        content: [{
+          type: "paragraph",
+          content: [
+            { type: "text", text, marks: [{ type: "italic" }] },
+            { type: "text", text: "following $", marks: [{ type: "bold" }] },
+          ],
+        }],
+      };
+      expect(markdownToDocument(documentToMarkdown(document))).toEqual(document);
+    },
+  );
+
   it.each([
     '<kbd title="x > y">Press \\(x\\)</kbd>',
     "<span title='x > <script> y'>Press \\(x\\)</span>",
