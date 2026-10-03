@@ -103,7 +103,7 @@ const textAlign = {
   renderHTML: (attributes: Record<string, unknown>) => {
     const value = attributes.textAlign;
     return value === "left" || value === "center" || value === "right"
-      ? { style: `text-align: ${value}` }
+      ? { style: `text-align: ${value}`, align: value }
       : {};
   },
 };

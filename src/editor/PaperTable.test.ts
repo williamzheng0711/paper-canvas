@@ -1,5 +1,5 @@
 import { getSchema } from "@tiptap/core";
-import { DOMParser } from "@tiptap/pm/model";
+import { DOMParser, DOMSerializer } from "@tiptap/pm/model";
 import { TableMap } from "@tiptap/pm/tables";
 import StarterKit from "@tiptap/starter-kit";
 import { Table, TableRow } from "@tiptap/extension-table";
@@ -22,6 +22,20 @@ function parse(html: string) {
 }
 
 describe("table widths from standard clipboard HTML", () => {
+  it("retains native cell alignment through sanitized HTML copy and repeated paste", () => {
+    const original = parse(
+      '<table><tr><th align="center"><p>Heading</p></th><th align="right"><p>Value</p></th></tr>' +
+      '<tr><td align="left"><p>Writing</p></td><td align="right"><p>12</p></td></tr></table>',
+    );
+    const serializer = DOMSerializer.fromSchema(schema);
+    const host = document.createElement("div");
+    host.append(serializer.serializeFragment(original.content));
+    const pasted = parse(host.innerHTML);
+    expect(pasted.toJSON()).toEqual(original.toJSON());
+    const repeated = parse(sanitizePastedHtml(host.innerHTML));
+    expect(repeated.toJSON()).toEqual(original.toJSON());
+  });
+
   it("parses thousands of clipboard cells without repeatedly scanning the complete table", () => {
     const rows = 140;
     const columns = 20;
