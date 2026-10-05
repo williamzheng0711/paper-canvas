@@ -545,6 +545,61 @@ describe('App autosave cursor stability', () => {
     expect(sourceOverride).toBe(sourceMarkdown);
   });
 
+  it.each(['recovery', 'open', 'source edit'] as const)('keeps a math-heavy research paper in Canvas after %s and unchanged source round trips', async (entry) => {
+    const inline = String.raw`W_1(P_n,Q_\beta)\le \sum_{i=1}^{K}\alpha_i\|x_i-z_i\|_2+\inf_{\pi\in\Pi(\widetilde P,Q_\beta)}\int\|x-y\|_2\,d\pi(x,y)`;
+    const display = String.raw`\begin{aligned}J(\beta)&=W_1(\widetilde P,Q_\beta),\\ \sup_{\beta\in\Delta_K}\left|W_1(P_n,Q_\beta)-J(\beta)\right|&\le\sum_{i=1}^K\alpha_i e_i.\end{aligned}`;
+    const sourceMarkdown = '\ufeff# Mixture selection research\r\n\r\n' + Array.from({ length: 38 }, (_, index) => (
+      `## Result ${index + 1}\r\n\r\n` +
+      `For this fixed collection of generators, the certificate is measured from local assignments. A uniform bound controls every feasible mixture, including the optimizer chosen after the upload. The approximation guarantee is $${inline}+\\frac{${index + 1}}{N}$.\r\n\r\n` +
+      `$$\r\n${display.replace('e_i.', `e_{${index + 1}}.`)}\r\n$$\r\n\r\n`
+    )).join('');
+    expect(sourceMarkdown.length).toBeGreaterThan(20_000);
+    expect(sourceMarkdown.length).toBeLessThan(25_000);
+    const paper: EditorFile = {
+      name: 'mixture-research.md', path: '/tmp/mixture-research.md',
+      document: markdownToDocument(sourceMarkdown), sourceMarkdown,
+    };
+    if (entry === 'recovery') {
+      await act(async () => root.unmount());
+      files.loadDraft.mockResolvedValueOnce(paper);
+      root = createRoot(host);
+      await act(async () => { root.render(<App />); await flushEffects(); });
+    } else if (entry === 'open') {
+      const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+      try {
+        files.openRecent.mockResolvedValueOnce(paper);
+        await act(async () => { (await recentFileButton()).click(); await flushEffects(); });
+      } finally { confirm.mockRestore(); }
+    } else {
+      await act(async () => { readingModeButton('source').click(); await flushEffects(); });
+      await act(async () => { harness.sourceProps?.onChange(sourceMarkdown); });
+      await act(async () => { readingModeButton('canvas').click(); await flushEffects(); await vi.advanceTimersByTimeAsync(50); });
+    }
+
+    expect(readingModeButton('canvas').getAttribute('aria-pressed')).toBe('true');
+    expect(host.querySelector('.editor-mode-pane--canvas')?.hasAttribute('hidden')).toBe(false);
+    expect(harness.canvasProps?.initialDocument).toEqual(paper.document);
+    expect(host.querySelector('.status-message')?.textContent).not.toBe(getMessages().canvasViewLimited);
+    const initialDocumentId = harness.canvasProps?.documentId;
+
+    for (let cycle = 0; cycle < 3; cycle += 1) {
+      await act(async () => { readingModeButton('source').click(); await flushEffects(); await vi.advanceTimersByTimeAsync(50); });
+      expect(readingModeButton('source').getAttribute('aria-pressed')).toBe('true');
+      expect(harness.sourceProps?.value).toBe(sourceMarkdown);
+      await act(async () => { readingModeButton('canvas').click(); await flushEffects(); await vi.advanceTimersByTimeAsync(50); });
+      expect(readingModeButton('canvas').getAttribute('aria-pressed')).toBe('true');
+      expect(host.querySelector('.editor-mode-pane--canvas')?.hasAttribute('hidden')).toBe(false);
+      expect(harness.canvasProps?.documentId).toBe(initialDocumentId);
+      expect(harness.canvasProps?.initialDocument).toEqual(paper.document);
+      expect(harness.sourceProps?.value).toBe(sourceMarkdown);
+    }
+
+    await act(async () => { documentAction(getMessages().save).click(); await flushEffects(); });
+    const [saved] = files.saveEditorFile.mock.calls.at(-1)!;
+    expect(saved.document).toEqual(paper.document);
+    expect(saved.sourceMarkdown).toBe(sourceMarkdown);
+  });
+
   it('returns an oversized source document to canvas after its content is reduced', async () => {
     await act(async () => root.unmount());
     const sourceMarkdown = 'Retained writing.\n\n'.repeat(5_100);

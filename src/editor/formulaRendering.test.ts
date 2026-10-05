@@ -5,6 +5,7 @@ import {
   CanvasCapacity,
   canvasDocumentSupported,
   maximumCanvasCharacters,
+  maximumCanvasNodes,
 } from "./canvasCapacity";
 import {
   formulaPreview,
@@ -14,6 +15,10 @@ import {
 import { flushFormulaSources } from "./Formula";
 import { formulaFromClipboard } from "./formulaInput";
 import { getMessages } from "../i18n";
+import {
+  maximumCanvasFormulaMarkup,
+  maximumCanvasFormulaNodes,
+} from "./documentLimits";
 
 describe("bounded formula rendering", () => {
   it("keeps extreme valid formula source intact without expanding its preview DOM", () => {
@@ -81,11 +86,58 @@ describe("bounded formula rendering", () => {
   it("counts formula expansion across the entire canvas rather than only model atoms", () => {
     const latex = "x+".repeat(700);
     const formula = { type: "blockFormula", attrs: { latex } };
-    expect(canvasDocumentSupported({ type: "doc", content: [formula] })).toBe(
-      true,
+    const preview = formulaPreview(latex, true);
+    expect(preview.limited).toBe(false);
+    const supportedCount = Math.floor(
+      maximumCanvasFormulaNodes / preview.nodes,
+    );
+    const supportedFormulas = Array.from(
+      { length: supportedCount },
+      () => formula,
+    );
+    const excessiveFormulas = [...supportedFormulas, formula];
+    expect(supportedCount).toBeGreaterThan(1);
+    expect(excessiveFormulas.length * latex.length).toBeLessThan(
+      maximumCanvasCharacters,
+    );
+    expect(excessiveFormulas.length * (preview.html?.length ?? 0)).toBeLessThan(
+      maximumCanvasFormulaMarkup,
     );
     expect(
-      canvasDocumentSupported({ type: "doc", content: [formula, formula] }),
+      canvasDocumentSupported({ type: "doc", content: supportedFormulas }),
+    ).toBe(true);
+    expect(
+      canvasDocumentSupported({ type: "doc", content: excessiveFormulas }),
+    ).toBe(false);
+  });
+
+  it("bounds aggregate formula markup even when generated nodes and source remain within capacity", () => {
+    const latex = "\\color{lightgoldenrodyellow}\\overleftrightarrow{x}".repeat(
+      100,
+    );
+    const preview = formulaPreview(latex, true);
+    expect(preview.limited).toBe(false);
+    expect(preview.error).toBeNull();
+    const supportedCount = Math.floor(
+      maximumCanvasFormulaMarkup / preview.html!.length,
+    );
+    const formula = { type: "blockFormula", attrs: { latex } };
+    const supportedFormulas = Array.from(
+      { length: supportedCount },
+      () => formula,
+    );
+    const excessiveFormulas = [...supportedFormulas, formula];
+    expect(excessiveFormulas.length * preview.nodes).toBeLessThan(
+      maximumCanvasFormulaNodes,
+    );
+    expect(excessiveFormulas.length * latex.length).toBeLessThan(
+      maximumCanvasCharacters,
+    );
+    expect(
+      canvasDocumentSupported({ type: "doc", content: supportedFormulas }),
+    ).toBe(true);
+    expect(
+      canvasDocumentSupported({ type: "doc", content: excessiveFormulas }),
     ).toBe(false);
   });
 
@@ -93,16 +145,24 @@ describe("bounded formula rendering", () => {
     "restores the visible formula when %s makes its edit exceed canvas capacity",
     (limit) => {
       const onLimit = vi.fn();
+      const latex = "x+".repeat(700);
+      const supportedCount = Math.floor(
+        maximumCanvasFormulaNodes / formulaPreview(latex, true).nodes,
+      );
       const document = {
         type: "doc",
         content:
           limit === "source length"
             ? [{ type: "blockFormula", attrs: { latex: "y" } }]
             : [
-                { type: "blockFormula", attrs: { latex: "x+".repeat(700) } },
+                ...Array.from({ length: supportedCount }, () => ({
+                  type: "blockFormula",
+                  attrs: { latex },
+                })),
                 { type: "blockFormula", attrs: { latex: "y" } },
               ],
       };
+      expect(canvasDocumentSupported(document)).toBe(true);
       const editor = new Editor({
         extensions: [
           ...canvasNodesAndMarks(),
@@ -122,7 +182,7 @@ describe("bounded formula rendering", () => {
         source.value =
           limit === "source length"
             ? "x".repeat(maximumCanvasCharacters + 1)
-            : "x+".repeat(700);
+            : latex;
         source.dispatchEvent(new Event("input", { bubbles: true }));
         expect(onLimit).toHaveBeenCalledOnce();
         expect(editor.getJSON()).toEqual(before);
@@ -135,6 +195,79 @@ describe("bounded formula rendering", () => {
       }
     },
   );
+
+  it("restores formula input and keeps undo usable when only aggregate markup exceeds capacity", () => {
+    const latex = "\\color{lightgoldenrodyellow}\\overleftrightarrow{x}".repeat(
+      100,
+    );
+    const preview = formulaPreview(latex, true);
+    expect(preview.limited).toBe(false);
+    expect(preview.error).toBeNull();
+    const smallPreview = formulaPreview("y", true);
+    const supportedCount = Math.floor(
+      (maximumCanvasFormulaMarkup - smallPreview.html!.length) /
+        preview.html!.length,
+    );
+    const formula = { type: "blockFormula", attrs: { latex } };
+    const document = {
+      type: "doc",
+      content: [
+        ...Array.from({ length: supportedCount }, () => formula),
+        { type: "blockFormula", attrs: { latex: "y" } },
+        { type: "paragraph" },
+      ],
+    };
+    const excessiveCount = supportedCount + 1;
+    expect(excessiveCount * preview.html!.length).toBeGreaterThan(
+      maximumCanvasFormulaMarkup,
+    );
+    expect(excessiveCount * preview.nodes).toBeLessThan(
+      maximumCanvasFormulaNodes,
+    );
+    expect(excessiveCount * latex.length).toBeLessThan(maximumCanvasCharacters);
+    expect(excessiveCount * 4 + 2).toBeLessThan(maximumCanvasNodes);
+    expect(canvasDocumentSupported(document)).toBe(true);
+    const onLimit = vi.fn();
+    const editor = new Editor({
+      extensions: [
+        ...canvasNodesAndMarks(),
+        CanvasCapacity.configure({ onLimit }),
+      ],
+      content: document,
+    });
+    try {
+      const before = editor.getJSON();
+      Array.from(
+        editor.view.dom.querySelectorAll<HTMLElement>(".formula-render"),
+      )
+        .at(-1)!
+        .click();
+      const source =
+        editor.view.dom.querySelector<HTMLTextAreaElement>("textarea")!;
+      source.value = latex;
+      source.dispatchEvent(new Event("input", { bubbles: true }));
+      expect(onLimit).toHaveBeenCalledOnce();
+      expect(editor.getJSON()).toEqual(before);
+      expect(source.value).toBe("y");
+      expect(
+        editor.view.dom.querySelector(".formula-live-preview .katex")
+          ?.textContent,
+      ).toContain("y");
+      flushFormulaSources(editor.view);
+      expect(editor.getJSON()).toEqual(before);
+      expect(editor.commands.undo()).toBe(false);
+
+      source.value = "z";
+      source.dispatchEvent(new Event("input", { bubbles: true }));
+      expect(onLimit).toHaveBeenCalledOnce();
+      expect(editor.state.doc.child(supportedCount).attrs.latex).toBe("z");
+      expect(editor.commands.undo()).toBe(true);
+      expect(editor.getJSON()).toEqual(before);
+      expect(source.value).toBe("y");
+    } finally {
+      editor.destroy();
+    }
+  });
 
   it("keeps large explicitly delimited clipboard source but leaves large bare TeX as plain text", () => {
     const latex = "\\sum " + "x+".repeat(maximumFormulaPreviewSource);

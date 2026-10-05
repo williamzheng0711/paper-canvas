@@ -3,8 +3,8 @@ import type { Node as ModelNode, Schema } from '@tiptap/pm/model';
 import { Plugin } from '@tiptap/pm/state';
 import { TableMap } from '@tiptap/pm/tables';
 import { canvasNodesAndMarks } from './canvasSchema';
-import { formulaPreview, maximumFormulaPreviewMarkup } from './formulaRendering';
-import { maximumCanvasCharacters, maximumCanvasNodes } from './documentLimits';
+import { formulaPreview } from './formulaRendering';
+import { maximumCanvasCharacters, maximumCanvasNodes, maximumCanvasFormulaNodes, maximumCanvasFormulaMarkup } from './documentLimits';
 
 // Very large editable DOM trees stall native accessibility queries. Source
 // mode keeps the complete document editable without building that DOM tree.
@@ -71,6 +71,7 @@ function tableCanvasCost(table: TreeNode): number | undefined {
   return extraNodes;
 }
 
+/** Remaining content/decorations budget; oversized formula previews return -1. */
 export function remainingCanvasNodes(
   document: TreeNode,
   comments: readonly { target: CanvasCommentTarget }[] = [],
@@ -85,6 +86,7 @@ export function remainingCanvasNodes(
     }
   }
   let characters = 0;
+  let formulaNodes = 0;
   let formulaMarkup = 0;
   while (frames.length) {
     const frame = frames[frames.length - 1];
@@ -99,9 +101,13 @@ export function remainingCanvasNodes(
       const type = isModelNode(frame.node) ? frame.node.type.name : frame.node.type;
       if (type === 'inlineFormula' || type === 'blockFormula') {
         const preview = formulaPreview(String(frame.node.attrs?.latex ?? ''), type === 'blockFormula');
-        nodes += preview.nodes + 3;
+        // Formula controls share the content budget; generated presentation
+        // tags have their own allowance, including both HTML and MathML.
+        nodes += 3;
+        formulaNodes += preview.nodes;
         formulaMarkup += preview.html?.length ?? 0;
-        if (nodes > maximumCanvasNodes || formulaMarkup > maximumFormulaPreviewMarkup) return -1;
+        if (nodes > maximumCanvasNodes || formulaNodes > maximumCanvasFormulaNodes ||
+          formulaMarkup > maximumCanvasFormulaMarkup) return -1;
       }
       if (type === 'table') {
         const cost = tableCanvasCost(frame.node);

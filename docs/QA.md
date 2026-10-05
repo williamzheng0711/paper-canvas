@@ -180,6 +180,17 @@ failure injection. Keep original bytes for comparison.
   Import adjacent Typora formulas containing escaped dollars, such as
   `\(\text{\$5}\)`. Each must remain one formula with its complete source;
   formula-local image-looking text must not become a rewritten file reference.
+- Open and recover a mathematics paper with hundreds of varied inline and display
+  formulas, including aligned equations, matrices, and formulas in tables. Papers
+  below the separate formula-rendering budget must open in Canvas even when
+  KaTeX generates more than 10,000 tags. Switch modes repeatedly, edit an equation,
+  search, add a comment, and use Undo/Redo; save and reopen without losing source.
+  Repeat after pasting the paper into Markdown source. Formula previews have an
+  aggregate limit of 50,000 tags and 5,000,000 markup characters; the existing
+  10,000-node content budget and 250,000-character source budget still apply.
+  Verify over-budget opens retain exact source in Markdown and over-budget Canvas
+  edits restore the previous equation and preserve undo history. Formula expansion
+  must not allow oversized HTML, repaired tables, or comment widgets into Canvas.
 - Open Markdown with supported local images outside the home directory. Existing
   referenced files must render without granting an entire directory. Repeat with
   HTML image references, symlinks, missing images, and Save As in another folder.
