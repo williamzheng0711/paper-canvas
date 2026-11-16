@@ -1,5 +1,5 @@
 import { Editor } from "@tiptap/core";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { canvasNodesAndMarks } from "./canvasSchema";
 import {
   CanvasCapacity,
@@ -15,12 +15,18 @@ import {
 import { flushFormulaSources } from "./Formula";
 import { formulaFromClipboard } from "./formulaInput";
 import { getMessages } from "../i18n";
-import {
-  maximumCanvasFormulaMarkup,
-  maximumCanvasFormulaNodes,
-} from "./documentLimits";
+import * as productionLimits from "./documentLimits";
+
+const documentLimits: {
+  maximumCanvasFormulaNodes: number;
+  maximumCanvasFormulaMarkup: number;
+} = productionLimits;
 
 describe("bounded formula rendering", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it("keeps extreme valid formula source intact without expanding its preview DOM", () => {
     const latex = "x+".repeat(40_000);
     const editor = new Editor({
@@ -89,7 +95,7 @@ describe("bounded formula rendering", () => {
     const preview = formulaPreview(latex, true);
     expect(preview.limited).toBe(false);
     const supportedCount = Math.floor(
-      maximumCanvasFormulaNodes / preview.nodes,
+      documentLimits.maximumCanvasFormulaNodes / preview.nodes,
     );
     const supportedFormulas = Array.from(
       { length: supportedCount },
@@ -101,7 +107,7 @@ describe("bounded formula rendering", () => {
       maximumCanvasCharacters,
     );
     expect(excessiveFormulas.length * (preview.html?.length ?? 0)).toBeLessThan(
-      maximumCanvasFormulaMarkup,
+      documentLimits.maximumCanvasFormulaMarkup,
     );
     expect(
       canvasDocumentSupported({ type: "doc", content: supportedFormulas }),
@@ -119,7 +125,7 @@ describe("bounded formula rendering", () => {
     expect(preview.limited).toBe(false);
     expect(preview.error).toBeNull();
     const supportedCount = Math.floor(
-      maximumCanvasFormulaMarkup / preview.html!.length,
+      documentLimits.maximumCanvasFormulaMarkup / preview.html!.length,
     );
     const formula = { type: "blockFormula", attrs: { latex } };
     const supportedFormulas = Array.from(
@@ -128,7 +134,7 @@ describe("bounded formula rendering", () => {
     );
     const excessiveFormulas = [...supportedFormulas, formula];
     expect(excessiveFormulas.length * preview.nodes).toBeLessThan(
-      maximumCanvasFormulaNodes,
+      documentLimits.maximumCanvasFormulaNodes,
     );
     expect(excessiveFormulas.length * latex.length).toBeLessThan(
       maximumCanvasCharacters,
@@ -145,20 +151,24 @@ describe("bounded formula rendering", () => {
     "restores the visible formula when %s makes its edit exceed canvas capacity",
     (limit) => {
       const onLimit = vi.fn();
-      const latex = "x+".repeat(700);
-      const supportedCount = Math.floor(
-        maximumCanvasFormulaNodes / formulaPreview(latex, true).nodes,
-      );
+      const latex = "x+".repeat(20);
+      // The aggregate tests cover the production limits without mounting the
+      // full KaTeX DOM. Use a smaller budget here to exercise the same editor path.
+      const formulaNodes = formulaPreview(latex, true).nodes;
+      const smallFormulaNodes = formulaPreview("y", true).nodes;
+      vi.spyOn(
+        documentLimits,
+        "maximumCanvasFormulaNodes",
+        "get",
+      ).mockReturnValue(formulaNodes * 2 + smallFormulaNodes);
       const document = {
         type: "doc",
         content:
           limit === "source length"
             ? [{ type: "blockFormula", attrs: { latex: "y" } }]
             : [
-                ...Array.from({ length: supportedCount }, () => ({
-                  type: "blockFormula",
-                  attrs: { latex },
-                })),
+                { type: "blockFormula", attrs: { latex } },
+                { type: "blockFormula", attrs: { latex } },
                 { type: "blockFormula", attrs: { latex: "y" } },
               ],
       };
@@ -198,16 +208,20 @@ describe("bounded formula rendering", () => {
 
   it("restores formula input and keeps undo usable when only aggregate markup exceeds capacity", () => {
     const latex = "\\color{lightgoldenrodyellow}\\overleftrightarrow{x}".repeat(
-      100,
+      6,
     );
     const preview = formulaPreview(latex, true);
     expect(preview.limited).toBe(false);
     expect(preview.error).toBeNull();
     const smallPreview = formulaPreview("y", true);
-    const supportedCount = Math.floor(
-      (maximumCanvasFormulaMarkup - smallPreview.html!.length) /
-        preview.html!.length,
-    );
+    const supportedCount = 2;
+    const markupLimit =
+      supportedCount * preview.html!.length + smallPreview.html!.length;
+    vi.spyOn(
+      documentLimits,
+      "maximumCanvasFormulaMarkup",
+      "get",
+    ).mockReturnValue(markupLimit);
     const formula = { type: "blockFormula", attrs: { latex } };
     const document = {
       type: "doc",
@@ -218,11 +232,9 @@ describe("bounded formula rendering", () => {
       ],
     };
     const excessiveCount = supportedCount + 1;
-    expect(excessiveCount * preview.html!.length).toBeGreaterThan(
-      maximumCanvasFormulaMarkup,
-    );
+    expect(excessiveCount * preview.html!.length).toBeGreaterThan(markupLimit);
     expect(excessiveCount * preview.nodes).toBeLessThan(
-      maximumCanvasFormulaNodes,
+      documentLimits.maximumCanvasFormulaNodes,
     );
     expect(excessiveCount * latex.length).toBeLessThan(maximumCanvasCharacters);
     expect(excessiveCount * 4 + 2).toBeLessThan(maximumCanvasNodes);

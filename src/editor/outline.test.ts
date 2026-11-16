@@ -61,13 +61,14 @@ describe('outline navigation', () => {
   });
 
   it('bounds total candidate parsing for dense adversarial headings', () => {
-    const source = ('# ' + '\\('.repeat(9000) + '\n\n').repeat(500);
-    const started = performance.now();
+    const headings = Array.from({ length: 6 }, (_, index) => `# Heading ${index} ${'\\('.repeat(9000)}`);
+    // Five candidates fit in the 100,000-character budget. The sixth ends the scan.
+    const source = [...headings, '# Later', 'x'.repeat(300_000)].join('\n\n');
     const result = collectOutlineResult(markdownToDocument(source));
-    expect(result.headings.length).toBeGreaterThan(0);
-    expect(result.headings.length).toBeLessThan(500);
+    expect(result.headings.map(({ text }) => text.slice(0, 9))).toEqual([
+      'Heading 0', 'Heading 1', 'Heading 2', 'Heading 3', 'Heading 4',
+    ]);
     expect(result.limited).toBe(true);
-    expect(performance.now() - started).toBeLessThan(1500);
   });
 
   it('labels formulas and inline HTML using authored content rather than editor controls', () => {

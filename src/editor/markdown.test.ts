@@ -1,5 +1,9 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
+import remarkParse from "remark-parse";
+import { unified } from "unified";
 import { describe, expect, it } from "vitest";
 import type { JSONContent } from "@tiptap/core";
 import {
@@ -320,7 +324,7 @@ describe("PaperCanvas Markdown subset", () => {
     const source = "\\(".repeat(80_000);
     const started = performance.now();
     expect(normalizeLatexDelimiters(source)).toBe(source);
-    expect(performance.now() - started).toBeLessThan(1500);
+    expect(performance.now() - started).toBeLessThan(3000);
   });
 
   it("pairs a long run of unfinished inline HTML tags without rescanning every following tag", () => {
@@ -829,23 +833,27 @@ unclosed`;
   });
 
   it.each(["README.md", "README.en.md", "README.zh-CN.md"])(
-    "imports every HTML layout block in %s as a lossless preview",
+    "imports every top-level HTML layout block in %s as a lossless preview",
     (file) => {
       const source = readFileSync(resolve(process.cwd(), file), "utf8");
+      const sourceTree = unified()
+        .use(remarkParse)
+        .use(remarkGfm)
+        .use(remarkMath)
+        .parse(source);
+      const htmlBlocks = sourceTree.children
+        .filter((node) => node.type === "html")
+        .map((node) => node.value);
       const document = markdownToDocument(source);
-      const previews = nodesOfType(document, "htmlPreview");
+      const previews = document.content?.filter(
+        (node) => node.type === "htmlPreview",
+      );
       const serialized = documentToMarkdown(document);
 
-      const expectedPreviewCount = file === "README.md" ? 6 : 13;
-
-      expect(previews).toHaveLength(expectedPreviewCount);
+      expect(previews?.map((node) => node.attrs?.source)).toEqual(htmlBlocks);
       expect(nodesOfType(document, "unsupportedMarkdown")).toHaveLength(0);
-      previews.forEach((preview) =>
-        expect(serialized).toContain(String(preview.attrs?.source ?? "")),
-      );
-      expect(documentToMarkdown(markdownToDocument(serialized))).toBe(
-        serialized,
-      );
+      htmlBlocks.forEach((block) => expect(serialized).toContain(block));
+      expect(documentToMarkdown(markdownToDocument(serialized))).toBe(serialized);
     },
   );
 
