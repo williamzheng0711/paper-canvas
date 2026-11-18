@@ -20,7 +20,7 @@
   <a href="https://williamzheng0711.github.io/paper-canvas/download/PaperCanvas-macOS-universal.dmg">下载 macOS 版</a>
 </p>
 
-公开安装包版本为 **v0.2.0**。下方的说明和截图对应当前源码，包含 v0.2.0 发布后的改动。
+版本号与更新内容见 [GitHub 最新发布](https://github.com/williamzheng0711/paper-canvas/releases/latest)。
 
 <p align="center">
   <a href="docs/assets/papercanvas-editor.png">

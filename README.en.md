@@ -20,7 +20,7 @@
   <a href="https://williamzheng0711.github.io/paper-canvas/download/PaperCanvas-macOS-universal.dmg">Download for macOS</a>
 </p>
 
-The published installers are **v0.2.0**. The guide and screenshots below use the current development build, which includes changes made after that release.
+See the [latest GitHub release](https://github.com/williamzheng0711/paper-canvas/releases/latest) for the version number and release notes.
 
 <p align="center">
   <a href="docs/assets/papercanvas-editor.png">
